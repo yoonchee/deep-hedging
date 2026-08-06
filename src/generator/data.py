@@ -7,6 +7,7 @@ normalized price-path windows, replacing the synthetic GBM placeholder
 previously used in train_gan.py's `sample_real_prices()`.
 """
 
+import math
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -70,6 +71,34 @@ def sample_price_windows(
 
     # [Batch, Time_Steps] -> [Batch, Time_Steps, 1]
     return normalized.unsqueeze(-1)
+
+
+def sample_real_prices(
+    batch_size: Annotated[int, "number of price paths"],
+    seq_len: Annotated[int, "number of price observations per path"],
+    s0: Annotated[float, "initial asset price S_0"] = 1.0,
+    vol: Annotated[float, "single-regime GBM volatility"] = 0.2,
+    dt: Annotated[float, "time increment per step"] = 1.0,
+) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] strictly positive 'real' price paths"]:
+    """Single-regime GBM 'real' market data.
+
+    Offline, deterministic fallback data source (train_gan.py's
+    --data-source synthetic) for quick smoke tests when no network is
+    available. For actual historical data, see `HistoricalPriceLoader`
+    (--data-source yfinance).
+    """
+    # [Batch, Time_Steps - 1] i.i.d. standard normal shocks
+    z = torch.randn(batch_size, seq_len - 1)
+
+    # [Batch, Time_Steps - 1] -> [Batch, Time_Steps] (cumulative log-return, S_0 fixed)
+    log_returns = -0.5 * vol**2 * dt + vol * math.sqrt(dt) * z
+    log_prices = torch.cat(
+        [torch.zeros(batch_size, 1), torch.cumsum(log_returns, dim=1)], dim=1
+    )
+
+    # [Batch, Time_Steps] -> [Batch, Time_Steps, 1]
+    prices = s0 * torch.exp(log_prices)
+    return prices.unsqueeze(-1)
 
 
 class HistoricalPriceLoader:

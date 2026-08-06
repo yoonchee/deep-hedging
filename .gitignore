@@ -5,3 +5,4 @@ __pycache__/
 checkpoints/
 .DS_Store
 data/
+.claude/

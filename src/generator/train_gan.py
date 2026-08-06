@@ -13,7 +13,6 @@ Run directly as a training CLI:
     python src/generator/train_gan.py --epochs 50 --data-source yfinance
 """
 
-import math
 import sys
 from pathlib import Path
 from typing import Annotated, Optional
@@ -27,8 +26,9 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from generator.data import HistoricalPriceLoader  # noqa: E402
+from generator.data import HistoricalPriceLoader, sample_real_prices  # noqa: E402
 from generator.market_gan import Discriminator, Generator  # noqa: E402
+from generator.validate import validate_generator_fidelity  # noqa: E402
 
 
 def gradient_penalty(
@@ -137,35 +137,6 @@ class WGANGPTrainer:
         return {"loss_d": loss_d, "loss_g": loss_g}
 
 
-def sample_real_prices(
-    batch_size: Annotated[int, "number of price paths"],
-    seq_len: Annotated[int, "number of price observations per path"],
-    s0: Annotated[float, "initial asset price S_0"] = 1.0,
-    vol: Annotated[float, "single-regime GBM volatility"] = 0.2,
-    dt: Annotated[float, "time increment per step"] = 1.0,
-) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] strictly positive 'real' price paths"]:
-    """Single-regime GBM 'real' market data.
-
-    Fallback data source (--data-source synthetic) for offline use or quick
-    smoke tests. For actual historical market data, see
-    `generator.data.HistoricalPriceLoader` (--data-source yfinance) -- the
-    training loop below is agnostic to where `real` comes from as long as it
-    has shape [Batch, Time_Steps, 1].
-    """
-    # [Batch, Time_Steps - 1] i.i.d. standard normal shocks
-    z = torch.randn(batch_size, seq_len - 1)
-
-    # [Batch, Time_Steps - 1] -> [Batch, Time_Steps] (cumulative log-return, S_0 fixed)
-    log_returns = -0.5 * vol**2 * dt + vol * math.sqrt(dt) * z
-    log_prices = torch.cat(
-        [torch.zeros(batch_size, 1), torch.cumsum(log_returns, dim=1)], dim=1
-    )
-
-    # [Batch, Time_Steps] -> [Batch, Time_Steps, 1]
-    prices = s0 * torch.exp(log_prices)
-    return prices.unsqueeze(-1)
-
-
 def main() -> None:
     import argparse
 
@@ -196,6 +167,14 @@ def main() -> None:
         "--price-column", type=str, default="Adj Close", help="OHLCV column used as the price series (yfinance source)"
     )
     parser.add_argument("--data-cache-dir", type=str, default="data", help="local CSV cache directory (yfinance source)")
+    parser.add_argument(
+        "--skip-fidelity-check",
+        action="store_true",
+        help="skip the post-training real-vs-synthetic fidelity check (generator.validate)",
+    )
+    parser.add_argument(
+        "--fidelity-output-dir", type=str, default="results", help="directory for the fidelity check's plots/JSON"
+    )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -266,6 +245,17 @@ def main() -> None:
         checkpoint_path,
     )
     print(f"Saved checkpoint to {checkpoint_path}")
+
+    if not args.skip_fidelity_check:
+        print("Running real-vs-synthetic fidelity check...")
+        generator.eval()
+        with torch.no_grad():
+            real_check = sample_real(args.batch_size, args.seq_len)
+            z = generator.sample_noise(args.batch_size, args.seq_len)
+            synthetic_check = generator(z)
+        validate_generator_fidelity(
+            real_check, synthetic_check, output_dir=Path(args.fidelity_output_dir)
+        )
 
 
 if __name__ == "__main__":
