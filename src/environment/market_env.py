@@ -65,6 +65,43 @@ def european_call_payoff(
     return torch.clamp(S_T - strike, min=0.0)
 
 
+def estimate_premium_monte_carlo(
+    sample_prices: Annotated[
+        "Callable[[int], torch.Tensor]",
+        "callable(batch_size) -> [Batch, Time_Steps, 1] price paths, from whatever "
+        "simulator/generator is in use (regime-switching, WGAN-GP, TimeGAN, ...)",
+    ],
+    strike: Annotated[float, "option strike price K"],
+    num_paths: Annotated[
+        int,
+        "500,000 chosen empirically: at this process's own regime-switching "
+        "params, cross-seed std of the estimate is ~1% relative "
+        "(50k/100k are 7-10% relative, too noisy to hold fixed for a whole "
+        "training run) -- see RESULTS.md's P0 section for the convergence check",
+    ] = 500_000,
+    chunk_size: Annotated[
+        int,
+        "paths per sample_prices() call. A single 500k-path call is near-instant "
+        "for the closed-form/analytic regime-switching simulator, but an RNN-based "
+        "GAN generator forward pass at that batch size was observed to blow past "
+        "any reasonable memory/time budget on CPU (100k took ~2s, 500k did not "
+        "finish in 180s) -- chunking keeps peak memory bounded regardless of "
+        "num_paths and works uniformly for both cases",
+    ] = 50_000,
+) -> Annotated[float, "Monte Carlo E[Payoff(S_T)], r=0 so this is also the fair option value"]:
+    with torch.no_grad():
+        total = 0.0
+        remaining = num_paths
+        while remaining > 0:
+            batch = min(chunk_size, remaining)
+            prices = sample_prices(batch)
+            S_T = prices[:, -1, :]
+            payoff = european_call_payoff(S_T, strike)
+            total += payoff.sum().item()
+            remaining -= batch
+        return total / num_paths
+
+
 class MarketEnvironment:
     """Simulates the hedged wealth path of a short European call position."""
 

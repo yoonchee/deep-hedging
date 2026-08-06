@@ -42,7 +42,7 @@ from backtester.plotting import (  # noqa: E402
 )
 from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
 from common.stats import excess_kurtosis, skewness  # noqa: E402
-from environment.market_env import MarketEnvironment  # noqa: E402
+from environment.market_env import MarketEnvironment, estimate_premium_monte_carlo  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from loss.cvar import CVaRLoss  # noqa: E402
 from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent  # noqa: E402
@@ -167,6 +167,9 @@ def run_backtest(
     dt: Annotated[float, "time increment per step"] = 1.0,
     output_dir: Annotated[Union[str, Path], "directory for plots and JSON summary"] = "results",
     seed: Optional[int] = 0,
+    include_premium: Annotated[
+        bool, "include P0 (Monte Carlo E[Payoff(S_T)] under this process) in wealth -- see math_spec.md section 1.1"
+    ] = True,
 ) -> Annotated[Dict, "benchmark summary, also written to <output_dir>/benchmark_summary.json"]:
     path_generator = torch.Generator().manual_seed(seed) if seed is not None else None
     prices = simulate_regime_switching_paths(
@@ -180,7 +183,18 @@ def run_backtest(
         generator=path_generator,
     )
 
-    environment = MarketEnvironment(strike=strike, proportional_fee=proportional_fee, dt=dt)
+    premium = 0.0
+    if include_premium:
+        premium_generator = torch.Generator().manual_seed(seed + 1) if seed is not None else None
+        premium = estimate_premium_monte_carlo(
+            lambda n: simulate_regime_switching_paths(
+                n, seq_len, s0=strike, dt=dt, low_vol=low_vol, high_vol=high_vol,
+                switch_prob=switch_prob, generator=premium_generator,
+            ),
+            strike=strike,
+        )
+
+    environment = MarketEnvironment(strike=strike, proportional_fee=proportional_fee, dt=dt, premium=premium)
 
     all_strategies: Dict[str, Tuple[Any, bool]] = {
         "Black-Scholes Delta": (BlackScholesDeltaPolicy(strike=strike), False)
@@ -209,6 +223,7 @@ def run_backtest(
             "strike": strike,
             "proportional_fee_bps": proportional_fee * 1e4,
             "implied_vol": implied_vol,
+            "premium": premium,
             "stress_regime": {
                 "low_vol": low_vol,
                 "high_vol": high_vol,
@@ -336,6 +351,9 @@ def run_alpha_sweep_backtest(
     checkpoint_dir: Annotated[Union[str, Path], "directory with hedging_agent_*_alpha*.pt files"] = "checkpoints",
     output_dir: Annotated[Union[str, Path], "directory for plots and JSON summary"] = "results",
     seed: Optional[int] = 0,
+    include_premium: Annotated[
+        bool, "include P0 (Monte Carlo E[Payoff(S_T)] under this process) in wealth -- see math_spec.md section 1.1"
+    ] = True,
 ) -> Annotated[Dict, "per-alpha summary, also written to <output_dir>/alpha_sweep_<architecture>_summary.json"]:
     policies = load_alpha_sweep_checkpoints(architecture, alphas, Path(checkpoint_dir))
     if not policies:
@@ -356,7 +374,19 @@ def run_alpha_sweep_backtest(
         switch_prob=switch_prob,
         generator=path_generator,
     )
-    environment = MarketEnvironment(strike=strike, proportional_fee=proportional_fee, dt=dt)
+
+    premium = 0.0
+    if include_premium:
+        premium_generator = torch.Generator().manual_seed(seed + 1) if seed is not None else None
+        premium = estimate_premium_monte_carlo(
+            lambda n: simulate_regime_switching_paths(
+                n, seq_len, s0=strike, dt=dt, low_vol=low_vol, high_vol=high_vol,
+                switch_prob=switch_prob, generator=premium_generator,
+            ),
+            strike=strike,
+        )
+
+    environment = MarketEnvironment(strike=strike, proportional_fee=proportional_fee, dt=dt, premium=premium)
 
     wealth_by_alpha: Dict[float, torch.Tensor] = {}
     summary_by_alpha: Dict[str, Dict[str, float]] = {}
@@ -387,6 +417,7 @@ def run_alpha_sweep_backtest(
             "strike": strike,
             "proportional_fee_bps": proportional_fee * 1e4,
             "implied_vol": implied_vol,
+            "premium": premium,
         },
         "alphas": summary_by_alpha,
     }

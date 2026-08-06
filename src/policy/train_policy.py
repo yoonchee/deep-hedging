@@ -20,7 +20,7 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
-from environment.market_env import MarketEnvironment  # noqa: E402
+from environment.market_env import MarketEnvironment, estimate_premium_monte_carlo  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from generator.train_timegan import load_timegan_price_generator  # noqa: E402
 from loss.cvar import CVaRLoss  # noqa: E402
@@ -193,6 +193,17 @@ def main() -> None:
     parser.add_argument("--cvar-alpha", type=float, default=0.95)
     parser.add_argument("--dt", type=float, default=1.0)
     parser.add_argument(
+        "--disable-premium",
+        action="store_true",
+        help="omit P0 from the wealth objective (pre-P0 behavior); by default P0 is estimated via Monte Carlo through the generator, see math_spec.md section 1.1",
+    )
+    parser.add_argument(
+        "--premium-paths",
+        type=int,
+        default=500_000,
+        help="Monte Carlo path count for the P0 estimate (chunked internally; see environment/market_env.py::estimate_premium_monte_carlo)",
+    )
+    parser.add_argument(
         "--architecture",
         type=str,
         choices=["mlp", "rnn", "lstm", "gru"],
@@ -313,8 +324,20 @@ def _train_and_save(
         )
         sequence_policy = True
 
+    premium = 0.0
+    if not args.disable_premium:
+        premium = estimate_premium_monte_carlo(
+            lambda n: generator(generator.sample_noise(n, args.seq_len, device=device)),
+            strike=args.strike,
+            num_paths=args.premium_paths,
+        )
+        print(
+            f"P0 (premium) estimated via Monte Carlo over {args.premium_paths} paths "
+            f"through the generator: {premium:.4f}"
+        )
+
     environment = MarketEnvironment(
-        strike=args.strike, proportional_fee=args.proportional_fee_bps / 1e4, dt=args.dt
+        strike=args.strike, proportional_fee=args.proportional_fee_bps / 1e4, dt=args.dt, premium=premium
     )
     cvar_loss = CVaRLoss(alpha=alpha)
 
@@ -346,6 +369,7 @@ def _train_and_save(
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     saved_args = dict(vars(args))
     saved_args["cvar_alpha"] = alpha  # reflect the actual alpha used for this checkpoint
+    saved_args["premium"] = premium  # the actual Monte Carlo estimate used, not just the CLI request
     torch.save(
         {
             "policy_state_dict": policy.state_dict(),

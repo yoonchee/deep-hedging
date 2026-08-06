@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from common.black_scholes import BlackScholesDeltaPolicy, black_scholes_call_price
-from environment.market_env import MarketEnvironment
+from environment.market_env import MarketEnvironment, estimate_premium_monte_carlo
+from generator.data import sample_real_prices
 from generator.market_gan import Generator
 from loss.cvar import CVaRLoss
 from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent
@@ -84,6 +85,29 @@ def test_black_scholes_call_price_matches_hand_computed_value_for_part1_params()
 def test_black_scholes_call_price_reduces_to_intrinsic_value_at_near_zero_volatility() -> None:
     price = black_scholes_call_price(S0=110.0, K=100.0, tau=1.0, sigma=1e-6)
     assert price == pytest.approx(10.0, abs=1e-3)
+
+
+def test_estimate_premium_monte_carlo_matches_closed_form_for_gbm() -> None:
+    torch.manual_seed(0)
+    s0, strike, vol, seq_len = 100.0, 100.0, 0.15, 30
+    dt = (1.0 / 12.0) / (seq_len - 1)
+
+    def sample_prices(batch_size: int) -> torch.Tensor:
+        return sample_real_prices(batch_size, seq_len, s0=s0, vol=vol, dt=dt)
+
+    premium = estimate_premium_monte_carlo(sample_prices, strike=strike, num_paths=200_000)
+
+    # Closed-form Black-Scholes price at these params (Part I's own setup) is ~1.727.
+    assert premium == pytest.approx(1.727, abs=0.05)
+
+
+def test_estimate_premium_monte_carlo_is_nonnegative() -> None:
+    def sample_prices(batch_size: int) -> torch.Tensor:
+        return sample_real_prices(batch_size, seq_len=10, s0=1.0, vol=0.3)
+
+    premium = estimate_premium_monte_carlo(sample_prices, strike=1.0, num_paths=10_000)
+
+    assert premium >= 0.0
 
 
 def test_market_environment_premium_defaults_to_zero_and_is_backward_compatible() -> None:
