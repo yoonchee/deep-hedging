@@ -158,9 +158,24 @@ trail:
   used to show, and GRU's own result got worse), showing the original
   "GRU-specific" explanation was never real. Neither generator is
   straightforwardly "better"; see `RESULTS.md` for the full story.
+- **Why every mean wealth in this repo is negative**: this project's wealth
+  formula omits the option premium (P₀). Verified directly against a
+  closed-form Black-Scholes price in Part I and a Monte Carlo estimate in
+  the stress test — both match the measured negative mean wealth to within
+  simulation noise — and this is very likely why the paper's own Part II
+  results report large *positive* mean PnL where this repo's numbers are
+  negative. See `RESULTS.md` for the full derivation and both checks.
 
 ## Known limitations
 
+- **No option premium (P₀) term in the wealth formula** — this is why every
+  mean wealth in this repo is negative, and verified (not just suspected)
+  to be the likely reason the paper's own Part II results show large
+  *positive* mean PnL where this repo's analogous numbers are negative; see
+  `RESULTS.md` for the direct numerical check.
+- Part I trains for 500 epochs, not the paper's stated 50 — checked
+  directly: 50 epochs is verified insufficient in this implementation
+  (CVaR roughly 2-3x worse across every architecture).
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
 - Basic RNN's stress-test convergence is seed-sensitive (bimodal: some
@@ -169,7 +184,6 @@ trail:
 - TimeGAN's diversity is miscalibrated (first too low, then too high after
   a fix) and its fidelity checker has no upper-bound diversity warning to
   catch the latter — see `RESULTS.md`.
-- No option premium (P₀) term in the wealth formula.
 - Toy-scale networks and training budgets throughout, not the paper's scale.
 
 ## References

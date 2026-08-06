@@ -7,6 +7,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 ## Contents
 
 - [What's implemented vs. the paper](#whats-implemented-vs-the-paper)
+- [A note on mean wealth: this repo has no P₀ (premium) term](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)
 - [Part I: frictionless replication](#part-i-frictionless-replication)
 - [The GAN fidelity story](#the-gan-fidelity-story)
 - [Stress-test backtest](#stress-test-backtest)
@@ -20,12 +21,71 @@ found, and — deliberately — what didn't work and why, not just what did.
 |---|---|---|
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
 | Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match, Basic RNN is seed-sensitive and improved (not fully closed) by a CVaR control-variate baseline — see below |
-| Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params (S₀=K=100, vol=0.15, T=1/12, 30 steps) |
+| Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 market/option params (S₀=K=100, vol=0.15, T=1/12, 30 steps); trained for 500 epochs, not the paper's stated 50 — verified insufficient in this implementation, see below |
 | Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results that shifted after the RNN/LSTM fix — see TimeGAN section |
-| Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches |
+| Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches, now extended to the paper's own Part II grid {0.5, 0.75, 0.99, 0.995, 0.997} |
 | Delta-convexity diagnostic (paper Figs. 5/8/11) | `backtester/plotting.py::plot_delta_convexity` | Matches, and was the tool that caught the RNN/LSTM failure |
-| Option premium P₀ in the wealth objective | *(not implemented)* | Open — wealth excludes premium collected, per this project's original `math_spec.md` |
+| Option premium P₀ in the wealth objective | *(not implemented)* | Open, but now quantified — see [below](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term); explains the negative mean wealth throughout this document |
 | GAN fidelity validation | `generator/validate.py` | **Beyond** the paper — not something Kim (2021) does |
+
+## A note on mean wealth: this repo has no P₀ (premium) term
+
+Every mean-wealth/mean-PnL number in this document is negative — Part I's
+Black-Scholes baseline shows -1.729 at every α (the CVaR columns differ
+across α, the mean doesn't, since P&L itself doesn't depend on α), and the
+stress-test's Black-Scholes baseline shows -0.695. Both numbers turn out to
+be explained by the same missing term, not a bug and not an unexplained
+finding:
+
+`Wealth_T = -Payoff(S_T) + Σ δ_t(S_{t+1}-S_t) - Costs` (`math_spec.md` §1.1)
+never adds back the premium P₀ that would be collected for writing the
+option in the first place. For a hedge that (near-)perfectly replicates the
+payoff, the classical replication argument is that the accumulated hedging
+P&L, financed at the risk-free rate, nets out to `Payoff(S_T) - C₀` — so
+without collecting a premium, `Wealth_T ≈ -C₀`: a constant offset equal to
+the option's own fair value, not zero.
+
+This is directly verifiable in both settings:
+
+- **Part I** (S₀=K=100, vol=0.15, T=1/12, r=0): the closed-form
+  Black-Scholes call price at these exact parameters is C₀ ≈ 1.72. The
+  measured Black-Scholes mean PnL is **-1.729** — a match to two decimal
+  places.
+- **Stress test** (regime-switching vol 15%/60%, switch_prob=0.10, S₀=K=1,
+  30 steps, dt=1): there's no closed-form price for this process, so the
+  fair value was estimated directly as `E[Payoff(S_T)]` via Monte Carlo
+  (200,000 paths, same simulator used for the backtest): **0.690**. The
+  measured Black-Scholes mean wealth is **-0.695** — again a match to
+  within simulation noise.
+
+Two consequences worth stating explicitly:
+
+- **This is almost certainly why the paper's own Part II results show
+  large positive mean PnL (≈18-35 on their S₀=100 scale) while every
+  analogous number in this repo is negative.** The paper's own Part I
+  table reports Black-Scholes mean PnL ≈ 0.0005 — essentially zero — which
+  is only reachable if its objective *does* include a correctly-priced
+  P₀ ≈ C₀ that cancels the expected payout. This repo's version of the
+  same experiment, run without that term, produces exactly the `-C₀`
+  offset predicted above. The sign and rough scale of the paper-vs-repo
+  PnL gap is consistent with this one missing term, not a separately
+  unexplained discrepancy — and, in particular, not evidence of any issue
+  with the paper's own generator, a hypothesis briefly considered while
+  preparing this section and dropped once this reconciliation held up.
+- **CVaR comparisons *within* this repo remain valid**: `CVaR_α(X + c) =
+  CVaR_α(X) - c` for a constant `c`, so every strategy in a given table
+  shifts by the same amount and the architectures' *relative* ordering
+  (what this document's tables are actually used for) is unaffected. But
+  this repo's absolute CVaR numbers are not directly comparable to the
+  paper's own absolute CVaR figures — e.g. Part I's α=0.99 Black-Scholes
+  CVaR is 2.63 here vs. -0.92 in the paper — without also correcting for a
+  differing PnL-sign convention, which has not been verified; only the
+  mean-PnL/P₀ portion of the gap has been checked directly above.
+
+Whether to actually add a P₀ term to `MarketEnvironment` (so mean wealth
+reads near zero for a well-hedging policy, matching the paper's own
+convention) is a separate implementation decision from documenting this
+correctly — see Known limitations and Ideas for future work.
 
 ## Part I: frictionless replication
 
@@ -34,7 +94,13 @@ Paper's exact setup: S₀ = K = 100 (at-the-money), r = 0, vol = 0.15, T = 1/12
 `RecurrentHedgingAgent` uses `hidden_dim=128` with a single linear readout
 (see [below](#the-rnnlstm-training-failure-and-its-real-fix) for why not the
 deeper head). 500 training epochs per (architecture, α) pair; 5000-path
-out-of-sample test.
+out-of-sample test. **This is 10x the paper's own stated 50 epochs** (Table
+1) — checked directly rather than left as an assumption: rerunning with
+`--epochs 50` gives CVaR roughly 2-3x worse than the 500-epoch numbers below
+for every architecture (e.g. α=0.99 MLP: 6.32 vs. 3.04; Basic RNN: 5.83 vs.
+2.63), i.e. 50 epochs is verified insufficient for this implementation to
+reach Black-Scholes-competitive CVaR, not merely untested. The params below
+are the paper's exact market/option setup; the training budget is not.
 
 CVaR of terminal PnL, lower is better (reproduce with
 `python src/backtester/replicate_part1.py --epochs 500`):
@@ -280,6 +346,41 @@ than smoothing over: single-seed conclusions about *why* a specific
 architecture fails are unreliable in this codebase's training regime, and
 should be treated as provisional until checked across multiple seeds.
 
+### Multi-alpha risk-return sweep, extended to the paper's own Part II grid
+
+The paper's Part II tests risk aversion at α ∈ {0.5, 0.75, 0.99, 0.995,
+0.997} — noticeably more extreme than this repo's original sweep of {0.5,
+0.75, 0.9, 0.95, 0.99}, which never exercised the two most extreme levels
+at all. Extended by training two more MLP checkpoints
+(`train_policy.py --architecture mlp --alpha-sweep 0.995,0.997`) and
+rerunning the sweep backtest under the same stress-test conditions as the
+main table above (reproduce with `python src/backtester/evaluate.py`):
+
+| α | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
+|---|---|---|---|---|---|
+| 0.50 | -0.698 | 2.67 | 3.62 | -1.82 | 4.95 |
+| 0.75 | -0.700 | 2.60 | 3.58 | -1.94 | 5.54 |
+| 0.90 | -0.689 | 3.50 | 5.03 | -2.28 | 6.50 |
+| 0.95 | -0.697 | 2.74 | 3.77 | -1.90 | 4.59 |
+| 0.99 | -0.644 | 6.60 | 13.86 | -7.17 | 70.1 |
+| 0.995 | -0.604 | 6.39 | **18.49** | -15.5 | 335 |
+| 0.997 | -0.637 | 6.76 | 17.23 | -8.96 | 104 |
+
+CVaR₉₉ and tail extremity (skew/kurtosis) are both clearly higher at α ≥
+0.99 than at α ≤ 0.95, but the ordering *within* each of those groups is
+non-monotonic — α=0.9's CVaR₉₉ (5.03) exceeds α=0.95's (3.77), and
+α=0.995's kurtosis (335) exceeds α=0.997's (104). Each checkpoint here is a
+single training run at a single seed, and this project has already found
+(three times, in the RNN/LSTM investigation above) that single-seed
+training outcomes in this codebase are noisy enough to produce this kind of
+non-monotonicity on their own — no mechanism is claimed for the ordering
+here, and doing so would repeat that exact mistake. Nor was this tested
+against the paper's own numbers at these α levels (the paper's Part II uses
+TimeGAN and Basic RNN specifically, not this repo's WGAN-GP+MLP
+combination), so no match/mismatch verdict is claimed either — only that
+the sweep now actually covers the risk-aversion range the paper cares
+about, instead of stopping short of it.
+
 ## TimeGAN: the paper's actual Part II generator
 
 The WGAN-GP above is a reasonable placeholder, but Kim (2021)'s actual Part
@@ -421,14 +522,29 @@ as an architecture-level finding.
 
 Roughly in priority order:
 
-1. **Generator tail-risk fidelity — improved, not perfect.** The
+1. **No option premium (P₀)** in the wealth formula — `Wealth_T` excludes
+   the premium collected for writing the option, so mean wealth is
+   persistently negative across every experiment in this repo (verified to
+   match `-C₀`, the option's own fair value, in both Part I and the
+   stress-test setting — see [above](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)).
+   This is also the most likely explanation for why this repo's mean-PnL
+   numbers are negative while the paper's own Part II results are large and
+   positive. A real, now-quantified deviation from the paper's formal
+   objective, promoted above the items below because it explains multiple
+   previously-unexplained numbers rather than being self-contained.
+2. **Part I trains for 10x the paper's stated epoch budget** (500 vs. 50,
+   Table 1) — checked directly, not assumed: `--epochs 50` gives CVaR
+   roughly 2-3x worse than the 500-epoch numbers for every architecture
+   (e.g. α=0.99 MLP: 6.32 vs. 3.04), so this isn't a cosmetic difference the
+   paper's own budget was actually enough for in this implementation.
+3. **Generator tail-risk fidelity — improved, not perfect.** The
    moment-matching loss fixed the sign and rough magnitude of both skew and
    kurtosis, and this measurably improved MLP/GRU's stress-test tail risk.
    But synthetic skew now overshoots real's (-1.65 vs. -0.91) and kurtosis
    still runs a bit low (~3.1 vs. ~4.0-5.5, itself a noisy target — see
    above). A learned, per-batch-adaptive weighting (vs. the current fixed
    `--lambda-moment`) could plausibly tighten this further.
-2. **Basic RNN's stress-test performance is improved but not fully closed
+4. **Basic RNN's stress-test performance is improved but not fully closed
    to LSTM/GRU's level.** The DC-dominance input fix (Part I) closed the
    gap completely in Part I's frictionless setting and for LSTM in the
    harder WGAN-GP stress-test setting (CVaR₉₉ 18.37 → 5.02). Basic RNN was
@@ -441,7 +557,7 @@ Roughly in priority order:
    substantially reduces this variance (cross-seed CVaR₉₉ std 6.89 → 1.20)
    and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
    a real improvement, though still short of LSTM/GRU's ~5.0.
-3. **TimeGAN's diversity is miscalibrated, and neither direction tried so
+5. **TimeGAN's diversity is miscalibrated, and neither direction tried so
    far lands correctly.** Sigmoid latents undershot real diversity (31%);
    switching to tanh overshot it (214-224%) — see the TimeGAN section above
    for the full before/after. `validate.py`'s fidelity checker also has a
@@ -453,18 +569,25 @@ Roughly in priority order:
    "beats Black-Scholes" behavior GRU used to show, and GRU's own result
    under the same generator got worse) — this was never a GRU-specific
    effect, see the TimeGAN section's revised writeup.
-4. **No option premium (P₀)** in the wealth formula — `Wealth_T` excludes
-   the premium collected for writing the option, so mean wealth is
-   persistently negative across every experiment in this repo. Consistent
-   throughout, but a real deviation from the paper's formal objective.
-5. **Scale** — networks and training budgets throughout are toy-sized
+6. **Scale** — networks and training budgets throughout are toy-sized
    relative to the paper (500k Monte Carlo scenarios, larger networks).
-6. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
+7. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
    adjustments (`Adj Close == Close` always) — if the paper's authors used a
    security where those differ, this isn't an exact data match.
 
 ## Ideas for future work
 
+- **Add the P₀ term to `MarketEnvironment`** (`Wealth_T = P₀ - Payoff(S_T) +
+  Σ δ_t(S_{t+1}-S_t) - Costs`, with `P₀` the analytic Black-Scholes price at
+  each experiment's own parameters). Now that the missing-P₀ explanation for
+  this repo's negative mean wealth is verified (see
+  [above](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)) rather
+  than just suspected, this is a well-scoped, low-risk change: it shifts
+  every mean and every CVaR by a known constant per experiment without
+  touching training dynamics (CVaR-minimizing policy search doesn't care
+  about a constant additive shift to the loss), and would make this repo's
+  absolute numbers directly comparable to the paper's own tables for the
+  first time.
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.

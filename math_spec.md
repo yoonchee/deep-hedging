@@ -8,6 +8,29 @@ $$
 \text{Payoff}(S_T) = \max(S_T - K, 0)
 $$
 
+### 1.1 Terminal Wealth (and the missing $P_0$ term)
+
+`environment/market_env.py::MarketEnvironment` computes terminal wealth of a
+short option position, hedged by trading $\delta_t$ shares at each step:
+
+$$
+\text{Wealth}_T = -\text{Payoff}(S_T) + \sum_t \delta_t (S_{t+1} - S_t) - \sum_t \text{Cost}_t
+$$
+
+This omits the premium $P_0$ collected for writing the option — the paper's
+own formulation (Eq. 1) includes it. For a hedge that (near-)perfectly
+replicates the payoff, the classical replication argument is that the
+accumulated hedging P&L, financed at the risk-free rate, nets out to
+$\text{Payoff}(S_T) - C_0$ (with $C_0$ the option's fair value), so without
+collecting a premium, $\text{Wealth}_T \approx -C_0$ — a constant offset,
+not the zero-mean result the paper reports for a well-hedging baseline. This
+is not merely a formal gap: it is the verified, quantified explanation for
+why every mean wealth in this repo's results is negative — see RESULTS.md's
+["A note on mean wealth"](RESULTS.md#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)
+section for the direct numerical checks against a closed-form ($C_0 \approx
+1.72$ vs. measured $-1.729$ in Part I) and a Monte Carlo estimate ($E[\text{Payoff}]
+\approx 0.690$ vs. measured $-0.695$ in the stress test).
+
 ## 2. Transaction Cost Model
 
 Proportional transaction cost incurred when rebalancing the hedge position at time $t$:
