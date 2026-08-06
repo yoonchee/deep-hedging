@@ -57,6 +57,26 @@
       "excess_kurtosis": 70.07492065429688,
       "mean_transaction_cost": 0.0030698871705681086,
       "total_transaction_cost": 6.139774322509766
+    },
+    "0.995": {
+      "mean_wealth": -0.6041745543479919,
+      "std_wealth": 2.327981472015381,
+      "cvar_95": 6.387359142303467,
+      "cvar_99": 18.493255615234375,
+      "skewness": -15.490545272827148,
+      "excess_kurtosis": 334.7672119140625,
+      "mean_transaction_cost": 0.0020157801918685436,
+      "total_transaction_cost": 4.03156042098999
+    },
+    "0.997": {
+      "mean_wealth": -0.6366368532180786,
+      "std_wealth": 1.996179223060608,
+      "cvar_95": 6.759952545166016,
+      "cvar_99": 17.225025177001953,
+      "skewness": -8.96296215057373,
+      "excess_kurtosis": 103.96275329589844,
+      "mean_transaction_cost": 0.0027141401078552008,
+      "total_transaction_cost": 5.428280353546143
     }
   }
 }

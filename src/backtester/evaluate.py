@@ -323,7 +323,7 @@ def _plot_alpha_sweep_boxplot(wealth_by_alpha: Dict[float, torch.Tensor], path: 
 
 def run_alpha_sweep_backtest(
     architecture: Annotated[str, "'mlp', 'rnn', 'lstm', or 'gru'"],
-    alphas: Annotated[List[float], "CVaR alphas to compare, e.g. [0.5, 0.75, 0.9, 0.95, 0.99]"],
+    alphas: Annotated[List[float], "CVaR alphas to compare, e.g. [0.5, 0.75, 0.9, 0.95, 0.99, 0.995, 0.997]"],
     strike: Annotated[float, "option strike price K"],
     batch_size: Annotated[int, "number of stress test paths"] = 2000,
     seq_len: Annotated[int, "number of price observations per path"] = 30,
@@ -549,7 +549,9 @@ if __name__ == "__main__":
 
     # Multi-alpha sweep demonstration (paper Figures 20-21): requires
     # checkpoints from `train_policy.py --architecture mlp --alpha-sweep ...`.
-    sweep_alphas = [0.5, 0.75, 0.9, 0.95, 0.99]
+    # Includes 0.995/0.997 to match the paper's own Part II alpha grid
+    # ({0.5, 0.75, 0.99, 0.995, 0.997}), alongside this repo's own 0.9/0.95.
+    sweep_alphas = [0.5, 0.75, 0.9, 0.95, 0.99, 0.995, 0.997]
     try:
         sweep_result = run_alpha_sweep_backtest(
             architecture="mlp",

@@ -248,7 +248,7 @@ def main() -> None:
         type=str,
         default=None,
         help="comma-separated CVaR alphas to train separate checkpoints for "
-        "(e.g. '0.5,0.75,0.9,0.95,0.99'), overriding --cvar-alpha and --checkpoint; "
+        "(e.g. '0.5,0.75,0.9,0.95,0.99,0.995,0.997'), overriding --cvar-alpha and --checkpoint; "
         "saves to checkpoints/hedging_agent_<architecture>_alpha<alpha>.pt per value",
     )
     args = parser.parse_args()
