@@ -1,23 +1,23 @@
 {
   "real": {
-    "mean": 0.010224714875221252,
-    "std": 0.05164024978876114,
-    "skewness": -0.9035423398017883,
-    "excess_kurtosis": 4.1980695724487305
+    "mean": 0.009671132080256939,
+    "std": 0.05126446485519409,
+    "skewness": -0.9436752796173096,
+    "excess_kurtosis": 4.682424068450928
   },
   "synthetic": {
-    "mean": -0.04627449810504913,
-    "std": 0.06707507371902466,
-    "skewness": 0.08417777717113495,
-    "excess_kurtosis": 0.08148813247680664
+    "mean": -0.049780186265707016,
+    "std": 0.2405843585729599,
+    "skewness": -1.650829792022705,
+    "excess_kurtosis": 3.181440830230713
   },
-  "diversity_ratio": 1.2988913491588632,
+  "diversity_ratio": 4.693004389152109,
   "diversity_warning_threshold": 0.3,
-  "mean_bias_in_std": -1.0940925578668819,
+  "mean_bias_in_std": -1.159698409295701,
   "mean_bias_warning_threshold_std": 2.0,
-  "skew_diff": 0.9877201169729233,
+  "skew_diff": -0.7071545124053955,
   "skew_warning_threshold": 0.5,
-  "kurtosis_diff": -4.116581439971924,
+  "kurtosis_diff": -1.5009832382202148,
   "kurtosis_warning_threshold": 2.0,
-  "verdict": "WARNING: skewness off by +0.99 (synthetic +0.08 vs. real -0.90) -- generator isn't capturing real tail asymmetry; excess kurtosis off by -4.12 (synthetic +0.08 vs. real +4.20) -- generator isn't capturing real fat-tail risk. Policies trained against this generator may fail badly out of sample."
+  "verdict": "WARNING: skewness off by -0.71 (synthetic -1.65 vs. real -0.94) -- generator isn't capturing real tail asymmetry. Policies trained against this generator may fail badly out of sample."
 }
