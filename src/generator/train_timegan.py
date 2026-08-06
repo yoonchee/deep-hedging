@@ -81,7 +81,7 @@ class TimeGANTrainer:
     # ---- Phase 1: autoencoder pretraining ----
 
     def pretrain_autoencoder_step(
-        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [0, 1]"]
+        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
     ) -> Annotated[float, "reconstruction loss for this step"]:
         x_real = x_real.to(self.device)
         h = self.timegan.embedder(x_real)
@@ -96,7 +96,7 @@ class TimeGANTrainer:
     # ---- Phase 2: supervised pretraining ----
 
     def pretrain_supervisor_step(
-        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [0, 1]"]
+        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
     ) -> Annotated[float, "supervised loss for this step"]:
         x_real = x_real.to(self.device)
         with torch.no_grad():
@@ -113,12 +113,12 @@ class TimeGANTrainer:
     # ---- Phase 3: joint adversarial training ----
 
     def _invert_price_channel(
-        self, price_scaled: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price channel, in [0, 1]"]
+        self, price_scaled: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price channel, in [-1, 1]"]
     ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price channel, price-ratio scale"]:
-        return self.price_min + price_scaled * (self.price_max - self.price_min)
+        return (price_scaled + 1.0) / 2.0 * (self.price_max - self.price_min) + self.price_min
 
     def train_discriminator_step(
-        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [0, 1]"]
+        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
     ) -> Annotated[float, "critic loss value for this step (-L_D)"]:
         x_real = x_real.to(self.device)
         batch_size, seq_len, _ = x_real.shape
@@ -181,7 +181,7 @@ class TimeGANTrainer:
         }
 
     def train_embedder_recovery_joint_step(
-        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [0, 1]"]
+        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
     ) -> Annotated[float, "weighted reconstruction loss for this step"]:
         x_real = x_real.to(self.device)
         h = self.timegan.embedder(x_real)
@@ -194,7 +194,7 @@ class TimeGANTrainer:
         return loss.item()
 
     def train_step_phase3(
-        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [0, 1]"]
+        self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
     ) -> Annotated[dict, "{'loss_d', 'loss_er', 'loss', 'loss_adv', 'loss_supervised', 'loss_moment'}"]:
         batch_size, seq_len, _ = x_real.shape
 
@@ -234,7 +234,7 @@ class TimeGANPriceGenerator(nn.Module):
     def forward(
         self, z: Annotated[torch.Tensor, "[Batch, Time_Steps, noise_dim] ~ N(0, I)"]
     ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price-ratio-scale price path"]:
-        # [Batch, Time_Steps, noise_dim] -> [Batch, Time_Steps, F], in [0, 1]
+        # [Batch, Time_Steps, noise_dim] -> [Batch, Time_Steps, F], in [-1, 1]
         x_hat_scaled = self.timegan.generate(z)
 
         # [Batch, Time_Steps, F] -> [Batch, Time_Steps, F], price-ratio scale
@@ -481,9 +481,8 @@ def main() -> None:
 
             z = timegan.sample_noise(args.moment_target_batch_size, args.seq_len, device=device)
             synthetic_scaled = timegan.generate(z).cpu()
-            synthetic_price_scaled = synthetic_scaled[..., price_index : price_index + 1]
-            span = scaler.max_vals[price_index] - scaler.min_vals[price_index]
-            synthetic_check_price = scaler.min_vals[price_index] + synthetic_price_scaled * span
+            synthetic_check_full = scaler.inverse_transform(synthetic_scaled)
+            synthetic_check_price = synthetic_check_full[..., price_index : price_index + 1]
 
         validate_generator_fidelity(
             real_check_price, synthetic_check_price, output_dir=Path(args.fidelity_output_dir)

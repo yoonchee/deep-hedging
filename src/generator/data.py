@@ -116,8 +116,17 @@ def sample_multivariate_price_windows(
 
 
 class MinMaxScaler(nn.Module):
-    """Per-feature min-max scaling to [0, 1] -- what TimeGAN's Embedder/Recovery
-    sigmoid output assumes of its input (see generator/timegan.py).
+    """Per-feature min-max scaling to [-1, 1] -- what TimeGAN's Embedder/Recovery
+    tanh output assumes of its input (see generator/timegan.py).
+
+    [-1, 1] rather than [0, 1]: an earlier version scaled to [0, 1] to match
+    a sigmoid-bounded TimeGAN, but composing several sigmoid-bounded
+    networks in series (Generator -> Supervisor -> Recovery) compressed
+    synthetic-path diversity well below real data's. Switching both this
+    scaler and every TimeGAN network to tanh doubles the linear span per
+    layer (width 1 -> width 2) without giving up boundedness (still needed
+    so Recovery's reconstructed price channel inverse-transforms to a
+    well-defined, correctly-signed range).
 
     A plain nn.Module (buffers, not parameters) so the fitted min/max travel
     with .to(device) and the checkpoint's state_dict automatically.
@@ -136,15 +145,15 @@ class MinMaxScaler(nn.Module):
 
     def transform(
         self, x: Annotated[torch.Tensor, "[..., F] raw-scale values"]
-    ) -> Annotated[torch.Tensor, "[..., F] scaled to [0, 1]"]:
+    ) -> Annotated[torch.Tensor, "[..., F] scaled to [-1, 1]"]:
         span = (self.max_vals - self.min_vals).clamp(min=1e-8)
-        return (x - self.min_vals) / span
+        return 2.0 * (x - self.min_vals) / span - 1.0
 
     def inverse_transform(
-        self, x: Annotated[torch.Tensor, "[..., F] values in [0, 1]"]
+        self, x: Annotated[torch.Tensor, "[..., F] values in [-1, 1]"]
     ) -> Annotated[torch.Tensor, "[..., F] raw-scale values"]:
         span = (self.max_vals - self.min_vals).clamp(min=1e-8)
-        return x * span + self.min_vals
+        return (x + 1.0) / 2.0 * span + self.min_vals
 
 
 def sample_real_prices(

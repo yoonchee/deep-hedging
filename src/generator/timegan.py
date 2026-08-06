@@ -13,11 +13,21 @@ section 5 for the loss formulas):
     Supervisor S: H (any)                       -> next-step H prediction
     Discriminator D: H (any)                    -> per-step realism score
 
-Embedder/Recovery/Generator/Supervisor all end in sigmoid, bounding every
-latent code (and the reconstructed/generated features) to [0,1] -- this is
-also why the recovered price channel is automatically non-negative with no
-special-cased activation, as long as the real data fed to Embedder was
-itself min-max scaled to [0,1] first (see data.py::MinMaxScaler).
+Embedder/Recovery/Generator/Supervisor all end in tanh, bounding every
+latent code (and the reconstructed/generated features) to [-1,1] -- as long
+as the real data fed to Embedder was itself min-max scaled to [-1,1] first
+(see data.py::MinMaxScaler), recovered/generated features land back in a
+well-defined, correctly-signed range once inverse-transformed, even though
+the raw network output can go negative (see MinMaxScaler.inverse_transform).
+
+An earlier version of this module used sigmoid ([0,1]) throughout. That
+compounds badly: the "fake" generation path composes three bounded,
+saturating nonlinearities in series (Generator -> Supervisor -> Recovery)
+versus two for real-data reconstruction (Embedder -> Recovery) -- the
+suspected cause of a diversity shortfall found in the fidelity checker (see
+RESULTS.md's TimeGAN section). Switching to tanh doubles the linear span per
+layer (width 1 -> width 2); whether that actually fixes the shortfall is
+re-measured after this change, not assumed.
 """
 
 from typing import Annotated, Optional
@@ -40,11 +50,11 @@ class Embedder(nn.Module):
         self.output_layer = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(
-        self, x: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [0, 1]"]
-    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, H] latent code H_real, in [0, 1]"]:
+        self, x: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
+    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, H] latent code H_real, in [-1, 1]"]:
         # [Batch, Time_Steps, F] -> [Batch, Time_Steps, H]
         hidden_states, _ = self.rnn(x)
-        return torch.sigmoid(self.output_layer(hidden_states))
+        return torch.tanh(self.output_layer(hidden_states))
 
 
 class Recovery(nn.Module):
@@ -61,11 +71,11 @@ class Recovery(nn.Module):
         self.output_layer = nn.Linear(hidden_dim, feature_dim)
 
     def forward(
-        self, h: Annotated[torch.Tensor, "[Batch, Time_Steps, H] latent code, in [0, 1]"]
-    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, F] reconstructed path, in [0, 1]"]:
+        self, h: Annotated[torch.Tensor, "[Batch, Time_Steps, H] latent code, in [-1, 1]"]
+    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, F] reconstructed path, in [-1, 1]"]:
         # [Batch, Time_Steps, H] -> [Batch, Time_Steps, F]
         hidden_states, _ = self.rnn(h)
-        return torch.sigmoid(self.output_layer(hidden_states))
+        return torch.tanh(self.output_layer(hidden_states))
 
 
 class TimeGANGenerator(nn.Module):
@@ -84,10 +94,10 @@ class TimeGANGenerator(nn.Module):
 
     def forward(
         self, z: Annotated[torch.Tensor, "[Batch, Time_Steps, noise_dim] ~ N(0, I)"]
-    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, H] synthetic latent code H_hat, in [0, 1]"]:
+    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, H] synthetic latent code H_hat, in [-1, 1]"]:
         # [Batch, Time_Steps, noise_dim] -> [Batch, Time_Steps, H]
         hidden_states, _ = self.rnn(z)
-        return torch.sigmoid(self.output_layer(hidden_states))
+        return torch.tanh(self.output_layer(hidden_states))
 
     def sample_noise(
         self,
@@ -117,10 +127,10 @@ class Supervisor(nn.Module):
 
     def forward(
         self, h: Annotated[torch.Tensor, "[Batch, Time_Steps, H] latent code (real H or fake H_hat)"]
-    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, H] next-step latent code prediction, in [0, 1]"]:
+    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, H] next-step latent code prediction, in [-1, 1]"]:
         # [Batch, Time_Steps, H] -> [Batch, Time_Steps, H]
         hidden_states, _ = self.rnn(h)
-        return torch.sigmoid(self.output_layer(hidden_states))
+        return torch.tanh(self.output_layer(hidden_states))
 
 
 class LatentDiscriminator(nn.Module):
@@ -184,7 +194,7 @@ class TimeGAN(nn.Module):
 
     def generate(
         self, z: Annotated[torch.Tensor, "[Batch, Time_Steps, noise_dim] ~ N(0, I)"]
-    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, F] synthetic multi-feature path, in [0, 1]"]:
+    ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, F] synthetic multi-feature path, in [-1, 1]"]:
         # [Batch, Time_Steps, noise_dim] -> [Batch, Time_Steps, H] -> [Batch, Time_Steps, H] -> [Batch, Time_Steps, F]
         h_hat = self.generator(z)
         h_hat_supervised = self.supervisor(h_hat)

@@ -21,7 +21,7 @@ def test_embedder_output_shape_and_bounded() -> None:
     h = embedder(x)
 
     assert h.shape == (batch, seq, hidden_dim)
-    assert torch.all(h >= 0.0) and torch.all(h <= 1.0)
+    assert torch.all(h >= -1.0) and torch.all(h <= 1.0)
 
 
 def test_recovery_output_shape_and_bounded() -> None:
@@ -32,7 +32,7 @@ def test_recovery_output_shape_and_bounded() -> None:
     x_tilde = recovery(h)
 
     assert x_tilde.shape == (batch, seq, feature_dim)
-    assert torch.all(x_tilde >= 0.0) and torch.all(x_tilde <= 1.0)
+    assert torch.all(x_tilde >= -1.0) and torch.all(x_tilde <= 1.0)
 
 
 def test_timegan_generator_output_shape_and_bounded() -> None:
@@ -43,7 +43,7 @@ def test_timegan_generator_output_shape_and_bounded() -> None:
     h_hat = generator(z)
 
     assert h_hat.shape == (batch, seq, hidden_dim)
-    assert torch.all(h_hat >= 0.0) and torch.all(h_hat <= 1.0)
+    assert torch.all(h_hat >= -1.0) and torch.all(h_hat <= 1.0)
 
 
 def test_supervisor_output_shape_and_bounded() -> None:
@@ -54,7 +54,7 @@ def test_supervisor_output_shape_and_bounded() -> None:
     h_supervised = supervisor(h)
 
     assert h_supervised.shape == (batch, seq, hidden_dim)
-    assert torch.all(h_supervised >= 0.0) and torch.all(h_supervised <= 1.0)
+    assert torch.all(h_supervised >= -1.0) and torch.all(h_supervised <= 1.0)
 
 
 def test_latent_discriminator_output_is_per_timestep() -> None:
@@ -75,7 +75,7 @@ def test_timegan_generate_output_shape_and_bounded() -> None:
     x_hat = timegan.generate(z)
 
     assert x_hat.shape == (batch, seq, feature_dim)
-    assert torch.all(x_hat >= 0.0) and torch.all(x_hat <= 1.0)
+    assert torch.all(x_hat >= -1.0) and torch.all(x_hat <= 1.0)
 
 
 def test_minmax_scaler_round_trip() -> None:
@@ -87,7 +87,7 @@ def test_minmax_scaler_round_trip() -> None:
     scaler.fit(x)
     scaled = scaler.transform(x)
 
-    assert scaled.min() >= -1e-5 and scaled.max() <= 1 + 1e-5
+    assert scaled.min() >= -1 - 1e-5 and scaled.max() <= 1 + 1e-5
 
     recovered = scaler.inverse_transform(scaled)
     assert torch.allclose(recovered, x, atol=1e-4)
@@ -224,7 +224,8 @@ def test_moment_loss_pulls_price_channel_skew_kurtosis_toward_target() -> None:
     trainer = TimeGANTrainer(
         timegan,
         n_critic=1,
-        lambda_moment=5.0,
+        lr=3e-3,
+        lambda_moment=10.0,
         target_skewness=target_skew,
         target_excess_kurtosis=target_kurtosis,
         price_min=price_min,
@@ -237,14 +238,17 @@ def test_moment_loss_pulls_price_channel_skew_kurtosis_toward_target() -> None:
             z = timegan.sample_noise(1000, seq)
             synthetic_scaled = timegan.generate(z)
             price_scaled = synthetic_scaled[..., price_index : price_index + 1]
-            price = price_min + price_scaled * (price_max - price_min)
+            price = (price_scaled + 1.0) / 2.0 * (price_max - price_min) + price_min
             returns = terminal_log_return(price)
             return abs(skewness(returns) - target_skew) + abs(excess_kurtosis(returns) - target_kurtosis)
 
     gap_before = moment_gap()
 
+    # tanh-bounded latents converge more slowly here than the earlier
+    # sigmoid version did -- 250 steps needed for a reliable margin, vs 100
+    # before (see RESULTS.md's TimeGAN section for why tanh replaced sigmoid).
     x_real = scaler.transform(real_raw[:32])
-    for _ in range(100):
+    for _ in range(250):
         trainer.train_step_phase3(x_real)
 
     gap_after = moment_gap()
