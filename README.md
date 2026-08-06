@@ -200,8 +200,10 @@ trail:
   seeds converge well, others get stuck) — substantially improved by a
   CVaR control-variate baseline, but not fully closed to LSTM/GRU's level.
 - TimeGAN's diversity is improved but still overshoots (31% → 214-224% →
-  130.2% across three calibration attempts), and its fidelity checker still
-  has no upper-bound diversity warning to catch this — see `RESULTS.md`.
+  130.2% across three calibration attempts) — its fidelity checker now has
+  an upper-bound diversity warning (`DIVERSITY_OVERSHOOT_WARNING_THRESHOLD`)
+  that would have caught the 214-224% overshoot, but 130.2% is under it;
+  see `RESULTS.md`.
 - Toy-scale networks and training budgets throughout, not the paper's scale
   (the paper's 500k Monte Carlo scenarios and larger networks are out of
   reach on this project's compute budget, stated plainly rather than chased).

@@ -44,6 +44,18 @@ COLOR_BASELINE = "#c3c2b7"
 # generator is very likely mode-collapsed rather than just imperfectly fit.
 DIVERSITY_WARNING_THRESHOLD = 0.3
 
+# Heuristic upper counterpart: this repo's own TimeGAN history hit this
+# failure mode directly -- a tanh-latent fix for mode collapse overshot to
+# 214-224% of real diversity, and this checker printed "OK" the whole time
+# because only the low-diversity side was ever checked (see RESULTS.md's
+# TimeGAN section). 1.7x sits between that failure (214-224%, should warn)
+# and a later, meaningfully-improved-but-still-imperfect run (130.2%,
+# shouldn't) -- over-dispersion is just as capable of producing a
+# degenerate downstream policy as mode collapse, only in the opposite
+# direction (training on tail risk the test distribution doesn't have,
+# instead of not training on tail risk it does).
+DIVERSITY_OVERSHOOT_WARNING_THRESHOLD = 1.7
+
 # Heuristic: if the synthetic mean sits more than this many real standard
 # deviations away from the real mean, the generator has learned the wrong
 # location for the whole distribution (e.g. a persistent decline that isn't
@@ -147,6 +159,10 @@ def validate_generator_fidelity(
     - Diversity ratio (synthetic terminal-return std / real terminal-return
       std): mode collapse -- the generator producing near-identical paths
       regardless of noise -- shows up as this ratio collapsing toward zero.
+      Badly over-dispersed synthetic data (ratio >> 1) is checked too, a
+      distinct failure mode this checker used to miss entirely (see
+      RESULTS.md's TimeGAN section for the 214-224%-diversity checkpoint
+      that printed "OK" before this check existed).
     - Mean bias (in real standard deviations): the generator can have
       perfectly healthy diversity while still centering its whole
       distribution on the wrong location (e.g. a persistent decline that
@@ -187,6 +203,13 @@ def validate_generator_fidelity(
             f"diversity is only {diversity_ratio:.1%} of real (threshold "
             f"{DIVERSITY_WARNING_THRESHOLD:.0%}) -- likely mode collapse"
         )
+    elif diversity_ratio > DIVERSITY_OVERSHOOT_WARNING_THRESHOLD:
+        problems.append(
+            f"diversity is {diversity_ratio:.1%} of real (threshold "
+            f"{DIVERSITY_OVERSHOOT_WARNING_THRESHOLD:.0%}) -- badly over-dispersed, a distinct "
+            "failure mode from mode collapse but just as capable of producing a degenerate "
+            "downstream policy"
+        )
     if abs(mean_bias_in_std) > MEAN_BIAS_WARNING_THRESHOLD_STD:
         problems.append(
             f"mean is {mean_bias_in_std:+.1f} real std devs off ({synthetic_stats['mean']:+.4f} "
@@ -218,6 +241,7 @@ def validate_generator_fidelity(
         "synthetic": synthetic_stats,
         "diversity_ratio": diversity_ratio,
         "diversity_warning_threshold": DIVERSITY_WARNING_THRESHOLD,
+        "diversity_overshoot_warning_threshold": DIVERSITY_OVERSHOOT_WARNING_THRESHOLD,
         "mean_bias_in_std": mean_bias_in_std,
         "mean_bias_warning_threshold_std": MEAN_BIAS_WARNING_THRESHOLD_STD,
         "skew_diff": skew_diff,

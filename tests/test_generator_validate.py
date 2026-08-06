@@ -3,6 +3,7 @@
 import torch
 
 from generator.validate import (
+    DIVERSITY_OVERSHOOT_WARNING_THRESHOLD,
     DIVERSITY_WARNING_THRESHOLD,
     KURTOSIS_WARNING_THRESHOLD,
     SKEW_WARNING_THRESHOLD,
@@ -55,6 +56,28 @@ def test_validate_generator_fidelity_flags_mode_collapse(tmp_path) -> None:
 
     assert summary["diversity_ratio"] < DIVERSITY_WARNING_THRESHOLD
     assert "WARNING" in summary["verdict"]
+
+
+def test_validate_generator_fidelity_flags_diversity_overshoot(tmp_path) -> None:
+    # This repo hit this exact failure mode: a mode-collapse fix (sigmoid ->
+    # tanh latents) overshot to 214-224% of real diversity, and this checker
+    # printed "OK" the whole time because only the low-diversity side was
+    # ever checked (see RESULTS.md's TimeGAN section). Badly over-dispersed
+    # synthetic data is just as capable of producing a degenerate downstream
+    # policy as mode collapse, only via the opposite mechanism (training on
+    # tail risk the test distribution doesn't have).
+    real = _make_diverse_paths(batch_size=500, seq_len=30, seed=0)
+    synthetic = _make_diverse_paths(batch_size=500, seq_len=30, seed=1)
+    # Scale up synthetic's spread directly (bypassing the noise-generation
+    # helper, which only controls per-step scale, not terminal spread
+    # precisely) to land comfortably over the threshold.
+    synthetic = synthetic.pow(3)
+
+    summary = validate_generator_fidelity(real, synthetic, output_dir=tmp_path)
+
+    assert summary["diversity_ratio"] > DIVERSITY_OVERSHOOT_WARNING_THRESHOLD
+    assert "WARNING" in summary["verdict"]
+    assert "over-dispersed" in summary["verdict"]
 
 
 def test_validate_generator_fidelity_flags_mean_bias_with_healthy_diversity(tmp_path) -> None:

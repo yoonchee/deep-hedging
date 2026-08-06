@@ -731,9 +731,11 @@ Roughly in priority order:
    real progress, still not landing on 100%, and not diagnosed further
    (untried: higher `--lambda-diversity`, more phase-3 epochs). See the
    TimeGAN section above for the full three-attempt history. `validate.py`'s
-   fidelity checker also has a real gap surfaced by this:
-   `DIVERSITY_WARNING_THRESHOLD` only catches *low* diversity, nothing
-   currently flags a ratio above 100%. Attempt 2's overshoot produced one
+   fidelity checker used to have a real gap surfaced by this —
+   `DIVERSITY_WARNING_THRESHOLD` only caught *low* diversity, nothing
+   flagged a ratio above 100% — now fixed: `DIVERSITY_OVERSHOOT_WARNING_THRESHOLD`
+   (1.7x) would have caught attempt 2's 214-224% (it printed "OK" at the
+   time) without flagging attempt 3's 130.2%. Attempt 2's overshoot produced one
    architecture's best stress-test result and another's worst, and *which*
    architecture benefited changed completely after the RNN/LSTM moneyness
    fix (never a GRU-specific effect); attempt 3's smaller overshoot
@@ -777,10 +779,14 @@ Roughly in priority order:
   phase-3 epochs, or investigate the discriminator-loss-trending-to-zero /
   generator-loss-climbing pattern observed late in attempt 3's training
   (a possibly-imbalanced BCE endgame that wasn't diagnosed).
-- Add an upper-bound check to `validate.py`'s diversity signal — currently
-  only mode collapse (too little diversity) is flagged; attempt 2's tanh
-  fix showed a ratio of 214-224% sailing through as "OK", and attempt 3's
-  130.2% still would too.
+- ~~Add an upper-bound check to `validate.py`'s diversity signal~~ —
+  **done**: `DIVERSITY_OVERSHOOT_WARNING_THRESHOLD` (1.7x) flags severe
+  over-dispersion the same way `DIVERSITY_WARNING_THRESHOLD` flags mode
+  collapse. Would have caught attempt 2's 214-224% (which printed "OK" at
+  the time); doesn't flag attempt 3's 130.2%, since that's real (if
+  incomplete) progress, not a failure. The exact threshold (1.7x) is a
+  heuristic positioned between those two data points, same spirit as the
+  existing 0.3x floor — not derived from anything more principled.
 - **Partially answered, one level down**: *why* did training against
   TimeGAN's over-dispersed data route exactly one architecture into a
   "beats Black-Scholes" attractor each time (GRU under the old input
