@@ -14,15 +14,32 @@ import torch
 
 
 class HedgingPolicy(Protocol):
-    """Structural type for anything usable as a hedging policy in `MarketEnvironment`.
+    """Structural type for a stepwise hedging policy (the default `sequence_policy=False` mode).
 
-    Satisfied by `HedgingAgent` (via `nn.Module.__call__`) as well as
-    non-learned strategies such as an analytic Black-Scholes delta policy.
+    Called once per time step with a hand-crafted state vector. Satisfied by
+    `HedgingAgent` (via `nn.Module.__call__`) as well as non-learned
+    strategies such as an analytic Black-Scholes delta policy.
     """
 
     def __call__(
         self, state: Annotated[torch.Tensor, "[Batch, 4] = (S_t, delta_{t-1}, T-t, implied_vol)"]
     ) -> Annotated[torch.Tensor, "[Batch, 1] hedge ratio delta_t"]: ...
+
+
+class SequenceHedgingPolicy(Protocol):
+    """Structural type for a whole-path hedging policy (`sequence_policy=True` mode).
+
+    Called once per rollout with the full price path, returning every
+    delta_t in one pass. Satisfied by `RecurrentHedgingAgent`, whose own
+    recurrent hidden state carries history and elapsed time implicitly
+    instead of receiving them as explicit state features.
+    """
+
+    def __call__(
+        self, prices: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] full price path S_0..S_N"]
+    ) -> Annotated[
+        torch.Tensor, "[Batch, Time_Steps - 1, 1] hedge ratios delta_0..delta_{N-1}"
+    ]: ...
 
 
 def transaction_cost(
@@ -58,33 +75,61 @@ class MarketEnvironment:
 
     def simulate(
         self,
-        policy: HedgingPolicy,
+        policy: Union[HedgingPolicy, SequenceHedgingPolicy],
         prices: Annotated[
             torch.Tensor, "[Batch, Time_Steps, 1] simulated asset price path S_0..S_{N}"
         ],
         implied_vol: Annotated[
             Union[float, torch.Tensor], "scalar or [Batch, 1] implied volatility"
         ],
+        sequence_policy: Annotated[
+            bool, "True for a whole-path RecurrentHedgingAgent-style policy"
+        ] = False,
     ) -> Annotated[torch.Tensor, "[Batch] terminal portfolio wealth Wealth_T"]:
-        wealth, _ = self._rollout(policy, prices, implied_vol)
+        wealth, _ = self._rollout(policy, prices, implied_vol, sequence_policy)
         return wealth
 
     def simulate_with_costs(
         self,
-        policy: HedgingPolicy,
+        policy: Union[HedgingPolicy, SequenceHedgingPolicy],
         prices: Annotated[
             torch.Tensor, "[Batch, Time_Steps, 1] simulated asset price path S_0..S_{N}"
         ],
         implied_vol: Annotated[
             Union[float, torch.Tensor], "scalar or [Batch, 1] implied volatility"
         ],
+        sequence_policy: Annotated[
+            bool, "True for a whole-path RecurrentHedgingAgent-style policy"
+        ] = False,
     ) -> Annotated[
         Tuple[torch.Tensor, torch.Tensor],
         "([Batch] terminal wealth Wealth_T, [Batch] total transaction cost paid)",
     ]:
-        return self._rollout(policy, prices, implied_vol)
+        return self._rollout(policy, prices, implied_vol, sequence_policy)
 
     def _rollout(
+        self,
+        policy: Union[HedgingPolicy, SequenceHedgingPolicy],
+        prices: Annotated[
+            torch.Tensor, "[Batch, Time_Steps, 1] simulated asset price path S_0..S_{N}"
+        ],
+        implied_vol: Annotated[
+            Union[float, torch.Tensor], "scalar or [Batch, 1] implied volatility"
+        ],
+        sequence_policy: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if sequence_policy:
+            wealth, total_cost = self._rollout_sequence(policy, prices)
+        else:
+            wealth, total_cost = self._rollout_stepwise(policy, prices, implied_vol)
+
+        S_T = prices[:, -1, :]  # [Batch, 1]
+        payoff = european_call_payoff(S_T, self.strike).squeeze(-1)  # [Batch]
+
+        wealth = wealth - payoff
+        return wealth, total_cost
+
+    def _rollout_stepwise(
         self,
         policy: HedgingPolicy,
         prices: Annotated[
@@ -130,8 +175,33 @@ class MarketEnvironment:
             total_cost = total_cost + cost.squeeze(-1)
             delta_prev = delta_t
 
-        S_T = prices[:, -1, :]  # [Batch, 1]
-        payoff = european_call_payoff(S_T, self.strike).squeeze(-1)  # [Batch]
+        return wealth, total_cost
 
-        wealth = wealth - payoff
+    def _rollout_sequence(
+        self,
+        policy: SequenceHedgingPolicy,
+        prices: Annotated[
+            torch.Tensor, "[Batch, Time_Steps, 1] simulated asset price path S_0..S_{N}"
+        ],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, _, _ = prices.shape
+        device = prices.device
+
+        # [Batch, Time_Steps, 1] -> [Batch, Time_Steps - 1, 1] (one delta per hedge step)
+        delta_path = policy(prices)
+
+        S_t = prices[:, :-1, :]  # [Batch, Time_Steps - 1, 1]
+        S_next = prices[:, 1:, :]  # [Batch, Time_Steps - 1, 1]
+
+        # [Batch, 1, 1] + [Batch, Time_Steps - 2, 1] -> [Batch, Time_Steps - 1, 1] (delta_{-1} = 0)
+        zeros = torch.zeros(batch_size, 1, 1, device=device)
+        delta_prev = torch.cat([zeros, delta_path[:, :-1, :]], dim=1)
+
+        hedge_pnl = delta_path * (S_next - S_t)  # [Batch, Time_Steps - 1, 1]
+        cost = transaction_cost(delta_path, delta_prev, S_t, self.proportional_fee)
+
+        # [Batch, Time_Steps - 1, 1] -> [Batch]
+        wealth = (hedge_pnl - cost).sum(dim=1).squeeze(-1)
+        total_cost = cost.sum(dim=1).squeeze(-1)
+
         return wealth, total_cost

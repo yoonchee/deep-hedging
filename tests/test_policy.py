@@ -1,11 +1,12 @@
 """Tests for the Deep Hedging policy pipeline (policy + environment + CVaR)."""
 
+import pytest
 import torch
 
 from environment.market_env import MarketEnvironment
 from generator.market_gan import Generator
 from loss.cvar import CVaRLoss
-from policy.hedging_agent import HedgingAgent
+from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent
 from policy.train_policy import PolicyTrainer
 
 
@@ -75,6 +76,71 @@ def test_gradient_propagates_to_all_policy_parameters() -> None:
         implied_vol=0.2,
         lr=1e-2,
         device=torch.device("cpu"),
+    )
+    stats = trainer.train_step(batch_size, seq_len)
+
+    assert isinstance(stats["loss"], float)
+    for name, param in policy.named_parameters():
+        assert param.grad is not None, f"no gradient for {name}"
+        assert torch.any(param.grad != 0), f"zero gradient for {name}"
+
+
+@pytest.mark.parametrize("cell_type", ["rnn", "lstm", "gru"])
+def test_recurrent_agent_output_shape_and_range(cell_type: str) -> None:
+    batch_size, seq_len = 8, 10
+    agent = RecurrentHedgingAgent(cell_type=cell_type, hidden_dim=16, num_layers=1)
+
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+    delta_path = agent(prices)
+
+    assert delta_path.shape == (batch_size, seq_len - 1, 1)
+    assert torch.all(delta_path >= 0.0) and torch.all(delta_path <= 1.0)
+
+
+def test_recurrent_agent_rejects_unknown_cell_type() -> None:
+    with pytest.raises(ValueError):
+        RecurrentHedgingAgent(cell_type="transformer")
+
+
+@pytest.mark.parametrize("cell_type", ["rnn", "lstm", "gru"])
+def test_recurrent_agent_gradient_propagates_to_every_price_timestep(cell_type: str) -> None:
+    # Same rationale as the stepwise HedgingAgent test above, but for a
+    # sequence policy evaluated through MarketEnvironment's vectorized
+    # sequence_policy=True rollout: every S_t should still receive gradient.
+    torch.manual_seed(0)
+    batch_size, seq_len = 8, 10
+    agent = RecurrentHedgingAgent(cell_type=cell_type, hidden_dim=16, num_layers=1)
+    env = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+
+    prices = (torch.rand(batch_size, seq_len, 1) + 0.5).requires_grad_(True)
+    wealth = env.simulate(agent, prices, implied_vol=0.2, sequence_policy=True)
+    wealth.sum().backward()
+
+    assert prices.grad is not None
+    grad_per_step = prices.grad.abs().sum(dim=(0, 2))
+    assert grad_per_step.shape == (seq_len,)
+    assert torch.all(grad_per_step > 0), grad_per_step
+
+
+@pytest.mark.parametrize("cell_type", ["rnn", "lstm", "gru"])
+def test_recurrent_agent_gradient_propagates_to_all_policy_parameters(cell_type: str) -> None:
+    torch.manual_seed(0)
+    batch_size, seq_len = 16, 12
+
+    policy = RecurrentHedgingAgent(cell_type=cell_type, hidden_dim=16, num_layers=1)
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    cvar_loss = CVaRLoss(alpha=0.95)
+
+    trainer = PolicyTrainer(
+        policy,
+        environment,
+        generator,
+        cvar_loss,
+        implied_vol=0.2,
+        lr=1e-2,
+        device=torch.device("cpu"),
+        sequence_policy=True,
     )
     stats = trainer.train_step(batch_size, seq_len)
 
