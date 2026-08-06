@@ -6,18 +6,18 @@
     "excess_kurtosis": 4.504249095916748
   },
   "synthetic": {
-    "mean": -0.07080976665019989,
-    "std": 0.01620778813958168,
-    "skewness": -1.081296443939209,
-    "excess_kurtosis": 5.993303298950195
+    "mean": 0.07933252304792404,
+    "std": 0.11532984673976898,
+    "skewness": -1.512699007987976,
+    "excess_kurtosis": 3.7397494316101074
   },
-  "diversity_ratio": 0.3153694841445966,
+  "diversity_ratio": 2.2440763637557684,
   "diversity_warning_threshold": 0.3,
-  "mean_bias_in_std": -1.5644391222573806,
+  "mean_bias_in_std": 1.3570141965178009,
   "mean_bias_warning_threshold_std": 2.0,
-  "skew_diff": -0.06734025478363037,
+  "skew_diff": -0.49874281883239746,
   "skew_warning_threshold": 0.5,
-  "kurtosis_diff": 1.4890542030334473,
+  "kurtosis_diff": -0.7644996643066406,
   "kurtosis_warning_threshold": 2.0,
-  "verdict": "OK: diversity is 31.5% of real, mean bias is -1.6 real std devs, skew diff -0.07, kurtosis diff +1.49."
+  "verdict": "OK: diversity is 224.4% of real, mean bias is +1.4 real std devs, skew diff -0.50, kurtosis diff -0.76."
 }

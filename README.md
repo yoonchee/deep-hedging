@@ -19,9 +19,10 @@ what matches the paper, what doesn't, and why is in
 - A **TimeGAN market generator** (Yoon et al. 2019, the paper's actual Part
   II architecture) -- embedder/recovery/generator/supervisor/discriminator
   over multi-variate OHLCV data, trained via the paper's 3-phase procedure.
-  Achieves better tail-shape fidelity than the WGAN-GP above, but a lower
-  diversity ratio that translates into worse stress-test hedging results --
-  see `RESULTS.md` for the full story.
+  Its synthetic-data diversity has been hard to calibrate correctly (first
+  too low, then -- after a tanh fix -- too high), and the results are
+  architecture-dependent: it produced this project's single best hedging
+  policy (GRU) and its worst (MLP) -- see `RESULTS.md` for the full story.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
@@ -132,22 +133,25 @@ trail:
   Black-Scholes) — but Basic RNN and LSTM barely moved, confirming their
   failure is structural (they don't condition on market state at all) and
   independent of the generator fix.
-- **TimeGAN vs. WGAN-GP**: TimeGAN (the paper's actual Part II architecture)
-  achieves *better* skew/kurtosis fidelity than the WGAN-GP+moment-loss
-  generator — but its price-channel diversity is only ~31% of real data's
-  (traced to four compounding sigmoid-bounded transformations), and policies
-  trained against it perform noticeably *worse* on the stress test than the
-  WGAN-GP-trained ones. A more paper-faithful architecture didn't translate
-  into better downstream hedging here — see `RESULTS.md` for the full
-  diagnosis.
+- **TimeGAN vs. WGAN-GP**: TimeGAN's synthetic-data diversity was hard to
+  calibrate — first only ~31% of real data's standard deviation (sigmoid
+  latent space), then 214-224% after switching to tanh to fix it. That
+  overshoot happened to produce the single best-performing policy in this
+  project: GRU trained against the tanh-fixed TimeGAN nearly matches
+  Black-Scholes' mean/std exactly and *beats* it on stress-test CVaR
+  (confirmed stable across 4 backtest seeds) — while MLP trained the same
+  way is the worst-performing policy in the whole comparison. Neither
+  generator is straightforwardly "better"; see `RESULTS.md` for the full
+  three-act story.
 
 ## Known limitations
 
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
 - Basic RNN and LSTM policies don't converge in this setup; GRU and MLP do.
-- TimeGAN's price-channel diversity is well below real data's, despite
-  excellent skew/kurtosis fidelity — see `RESULTS.md`.
+- TimeGAN's diversity is miscalibrated (first too low, then too high after
+  a fix) and its fidelity checker has no upper-bound diversity warning to
+  catch the latter — see `RESULTS.md`.
 - No option premium (P₀) term in the wealth formula.
 - Toy-scale networks and training budgets throughout, not the paper's scale.
 

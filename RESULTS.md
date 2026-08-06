@@ -21,7 +21,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
 | Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches architecturally; RNN/LSTM don't converge in practice (see below) |
 | Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params (S₀=K=100, vol=0.15, T=1/12, 30 steps) |
-| Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. TimeGAN matches the paper's actual architecture, but WGAN-GP+moment-loss produces better downstream hedging policies (see TimeGAN section) |
+| Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results — WGAN-GP+moment-loss is more consistent, TimeGAN's over-dispersed synthetic data produced the single best policy in the project (GRU) and the worst (MLP); see TimeGAN section |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches |
 | Delta-convexity diagnostic (paper Figs. 5/8/11) | `backtester/plotting.py::plot_delta_convexity` | Matches, and was the tool that caught the RNN/LSTM failure |
 | Option premium P₀ in the wealth objective | *(not implemented)* | Open — wealth excludes premium collected, per this project's original `math_spec.md` |
@@ -213,6 +213,9 @@ reused unchanged, applied to TimeGAN's recovered price channel.
 Trained on the same real `^GSPC` data (500+500+1500 epochs, ~9 seconds
 total — TimeGAN trains far faster per epoch than the WGAN-GP here, since
 its default `hidden_dim=24` is much smaller than the WGAN-GP's 64).
+
+### Attempt 1: sigmoid, [0,1] latent space (the paper's literal convention)
+
 Fidelity check on the extracted price channel, range across 4 seeds:
 
 | Metric | Real | Synthetic | Verdict |
@@ -222,53 +225,95 @@ Fidelity check on the extracted price channel, range across 4 seeds:
 | Skewness | ≈ -1.01 | ≈ -1.08 | Excellent — diff -0.14 to +0.07 across seeds |
 | Excess kurtosis | ≈ 4.50 | ≈ 5.99 | Good — diff +0.80 to +1.59, always slightly high |
 
-**TimeGAN's tail-shape fidelity (skew/kurtosis) is better than the
-WGAN-GP+moment-loss generator's** — every seed passes cleanly ("OK", no
-warnings), where the WGAN-GP still triggers a skew warning on some seeds.
-This is a genuinely more paper-faithful result on the exact axis the
-moment-loss fix targeted.
-
-**But the stress-test backtest tells a different story.** Retraining all
-four policies against TimeGAN (identical architecture, identical training
-budget) and rerunning the same regime-switching stress test (reproduce with
-`python src/backtester/evaluate.py`, after `train_policy.py --generator-type
-timegan --architecture {mlp,rnn,lstm,gru}`):
-
-| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
-|---|---|---|---|---|---|
-| MLP (WGAN-GP) | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 |
-| MLP (TimeGAN) | -0.482 | 8.26 | **26.31** | -14.64 | 252.2 |
-| GRU (WGAN-GP) | -0.712 | 3.14 | **4.52** | -2.19 | 6.7 |
-| GRU (TimeGAN) | -0.519 | 6.80 | **22.33** | -11.55 | 199.8 |
-
-TimeGAN-trained MLP and GRU are dramatically *worse* than their
-WGAN-GP+moment-loss counterparts — worse, in fact, than the original
-pre-moment-loss WGAN-GP policies (CVaR₉₉ 19.96 and 18.41 respectively). The
-likely cause is directly visible in the fidelity table above: **diversity,
-not tail shape, is the bottleneck here.** TimeGAN's synthetic price paths
-have only ~31% of real data's standard deviation — right at the
-mode-collapse warning line — because its architecture composes *four*
-sigmoid-bounded transformations in sequence (Embedder → Generator →
-Supervisor → Recovery), each squashing toward the middle of [0,1],
+Tail-shape fidelity here was *better* than the WGAN-GP+moment-loss
+generator's (every seed passed cleanly; WGAN-GP still triggers a skew
+warning on some seeds). But the stress-test backtest told a different
+story: retraining all four policies against this generator and rerunning
+the regime-switching stress test produced dramatically *worse* results than
+WGAN-GP-trained policies — MLP's CVaR₉₉ 7.26 → 26.31, GRU's 4.52 → 22.33,
+both worse than even the original pre-moment-loss WGAN-GP numbers. The
+likely cause: TimeGAN's synthetic price paths had only ~31% of real data's
+standard deviation, because its architecture composes *four*
+sigmoid-bounded transformations in series (Embedder → Generator →
+Supervisor → Recovery), each squashing toward the middle of [0,1] and
 compounding into a narrower overall distribution than the WGAN-GP's single
-tanh-bounded-log-return parameterization. Policies trained on that narrower
-distribution rarely see large moves during training — the near-zero
-transaction cost for TimeGAN-trained MLP (0.0000375 vs. WGAN-GP's 0.005) is
-the tell, it learned an almost fully static hedge — and get caught
-flat-footed by the stress test's genuinely volatile regime-switching
-scenario. Excellent tail-*shape* fidelity didn't compensate for a
-diversity/scale shortfall the fidelity checker had already flagged, before
-either policy was ever trained.
+tanh-bounded-log-return parameterization. Policies trained on that narrow
+distribution rarely saw large moves during training and got caught
+flat-footed by the stress test.
 
-This is the headline finding of the TimeGAN work: **a more paper-faithful
-generator architecture does not automatically produce better downstream
-hedging policies.** Here, the simpler WGAN-GP, once explicitly corrected
-for tail shape, generalizes better to a genuinely adversarial stress
-scenario than the more complex, more paper-faithful TimeGAN — because of a
-diversity shortfall visible in the fidelity checker's output well before
-either policy was ever trained. This isn't a failure of the implementation
-so much as an argument for keeping the fidelity checker in the loop for
-*every* generator, not just the first one built.
+### Attempt 2: tanh, [-1,1] latent space (widen the compressed range)
+
+The fix: switch Embedder/Recovery/Generator/Supervisor from sigmoid to
+tanh, and `data.py::MinMaxScaler` from `[0,1]` to `[-1,1]` to match —
+doubling the linear span per layer (width 1 → width 2) without giving up
+boundedness. Retrained from scratch, same budget. Fidelity check, 4 seeds:
+
+| Metric | Real | Synthetic | Verdict |
+|---|---|---|---|
+| Diversity ratio | -- | **214-224%** | Overshot, badly — the opposite failure mode |
+| Mean bias | -- | +1.4σ | Under threshold, sign flipped from attempt 1 |
+| Skewness | ≈ -1.01 | -1.51 to -1.55 | Borderline (diff -0.36 to **-0.59**, fails on one seed) |
+| Excess kurtosis | ≈ 4.50 | 3.74-4.50 | Good (diff -0.76 to -1.53) |
+
+The fix worked in *direction* but overshot in *magnitude* — synthetic
+diversity went from 31% (badly mode-collapsed-adjacent) to 214-224% of
+real (badly over-dispersed), consistently across seeds, not noise. This is
+also a real gap in `validate.py`'s fidelity checker: `DIVERSITY_WARNING_THRESHOLD`
+only fires on *low* diversity (mode collapse); nothing currently flags a
+diversity ratio this far *above* 100%, so this run's checker output still
+prints "OK" even though the distribution is clearly miscalibrated in the
+other direction.
+
+**And yet the stress-test backtest is a genuinely different story here.**
+Retraining all four policies against the tanh-fixed TimeGAN:
+
+| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
+|---|---|---|---|---|---|---|
+| Black-Scholes | -0.695 | 1.82 | 2.34 | -1.97 | 5.34 | 12.90 |
+| MLP (WGAN-GP) | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 | 10.00 |
+| MLP (TimeGAN) | -0.511 | 5.50 | 19.05 | -16.47 | 315.2 | 5.98 |
+| Basic RNN (WGAN-GP) | -0.536 | 6.17 | 19.61 | -14.83 | 257.3 | 1.53 |
+| Basic RNN (TimeGAN) | -0.556 | 5.77 | 17.96 | -14.44 | 246.8 | 11.50 |
+| LSTM (WGAN-GP) | -0.548 | 5.77 | 18.37 | -14.90 | 259.6 | 2.77 |
+| LSTM (TimeGAN) | -0.566 | 5.70 | 18.34 | -13.45 | 226.4 | 12.60 |
+| GRU (WGAN-GP) | -0.712 | 3.14 | 4.52 | -2.19 | 6.7 | 15.49 |
+| GRU (TimeGAN) | **-0.697** | **1.00** | **1.00** | **+1.01** | **-0.58** | 6.00 |
+
+Basic RNN and LSTM land in roughly the same place as their WGAN-GP
+counterparts (a bit better on CVaR₉₉, a bit worse on transaction cost — no
+clear winner). MLP is still worse than its WGAN-GP counterpart, though far
+better than the sigmoid-TimeGAN attempt. **GRU is the real finding here**:
+its mean wealth (-0.697) and standard deviation (0.367, not shown above)
+now sit almost exactly on top of Black-Scholes' own (-0.695 / 0.369), and
+its CVaR₉₅/CVaR₉₉ (both ≈1.00) actually *beat* the closed-form analytic
+hedge (1.82 / 2.34) — with positive skew and negative excess kurtosis,
+the opposite signature from every other policy's crash-driven left tail.
+This was checked for seed-sensitivity across 4 different stress-test seeds
+(not just the canonical seed 42 used above) and is completely stable —
+CVaR₉₅/CVaR₉₉ landed at 1.00/1.00-1.003 every time, not a fluke of one
+particular random path draw.
+
+The likely explanation ties back to the fidelity table above: GRU was
+trained against a generator that showed it price paths *far* wilder
+(214-224% of real diversity) than the stress test's actual regime-switching
+scenario ever produces. For GRU specifically — the one architecture that
+Part I already showed genuinely conditions on market state rather than
+learning a near-constant policy — that over-exposure appears to have acted
+like a domain-randomization regularizer, teaching a hedge robust enough
+that the real stress test looks comparatively tame by contrast. Basic
+RNN/LSTM don't share this benefit because (per the Part I diagnosis) they
+were never conditioning on market state to begin with, so a wilder training
+distribution has nothing to teach them; MLP sits in between.
+
+This is the actual headline finding of the TimeGAN work, revised from the
+sigmoid attempt: **neither generator is straightforwardly "better"** —
+WGAN-GP+moment-loss is the safer, more consistent choice across
+architectures, but TimeGAN(tanh)'s badly-overshot diversity, almost by
+accident, produced the single best-performing policy in this entire
+project (GRU, beating even the analytic Black-Scholes benchmark on tail
+risk). Whether that generalizes past this exact regime-switching stress
+scenario, or is a fortunate match between this scenario's volatility range
+and TimeGAN's overshoot, is not established — see known limitations.
 
 ## Known limitations
 
@@ -287,13 +332,15 @@ Roughly in priority order:
    against the fixed generator left their stress-test tail risk unchanged
    (they don't condition on market state at all, so a better generator has
    nothing to teach them).
-3. **TimeGAN's diversity shortfall** — its price-channel standard deviation
-   is only ~31% of real data's (right at the mode-collapse warning
-   threshold), despite excellent skew/kurtosis fidelity. Traced to
-   composing four sigmoid-bounded transformations (Embedder→Generator→
-   Supervisor→Recovery); see the TimeGAN section above. This is why
-   WGAN-GP+moment-loss, not TimeGAN, is the better choice for policy
-   training today, despite being the less paper-faithful architecture.
+3. **TimeGAN's diversity is miscalibrated, and neither direction tried so
+   far lands correctly.** Sigmoid latents undershot real diversity (31%);
+   switching to tanh overshot it (214-224%) — see the TimeGAN section above
+   for the full before/after. The overshoot happened to produce this
+   project's single best-performing policy (GRU, beating Black-Scholes on
+   stress-test CVaR) but also its worst (MLP). `validate.py`'s fidelity
+   checker also has a real gap surfaced by this: `DIVERSITY_WARNING_THRESHOLD`
+   only catches *low* diversity, nothing currently flags a ratio this far
+   *above* 100%.
 4. **No option premium (P₀)** in the wealth formula — `Wealth_T` excludes
    the premium collected for writing the option, so mean wealth is
    persistently negative across every experiment in this repo. Consistent
@@ -309,12 +356,22 @@ Roughly in priority order:
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.
-- Loosen TimeGAN's [0,1] latent-space bound on Generator/Supervisor (only
-  Embedder/Recovery strictly need it, to guarantee Recovery's reconstructed
-  price channel is well-defined) — the compounding sigmoid squash is the
-  likely cause of its diversity shortfall, and fixing it could let TimeGAN's
-  superior tail-shape fidelity actually translate into better stress-test
-  results.
+- Calibrate TimeGAN's diversity properly instead of guessing a bound width:
+  an explicit diversity-matching loss term (analogous to the skew/kurtosis
+  moment-matching loss, but targeting the ratio of synthetic-to-real
+  terminal-return standard deviation) would let training find the right
+  scale directly rather than relying on which bounded activation happens to
+  land closest.
+- Add an upper-bound check to `validate.py`'s diversity signal — currently
+  only mode collapse (too little diversity) is flagged; this session's tanh
+  fix showed a ratio of 214-224% sailing through as "OK".
+- Understand *why* GRU specifically benefits so dramatically from
+  TimeGAN's over-dispersed training data while Basic RNN/LSTM/MLP don't —
+  is this really about GRU's gating (tying back to the unexplained Part I
+  GRU advantage), or a coincidental match between TimeGAN's overshoot and
+  this specific stress scenario's volatility range? Testing against a
+  second, differently-parameterized stress scenario would help distinguish
+  the two.
 - Actor-critic variance reduction or an entropy bonus for RNN/LSTM training,
   per the paper's own future-work section.
 - Add the P₀ premium term to the wealth objective.
