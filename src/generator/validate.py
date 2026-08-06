@@ -28,6 +28,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from common.stats import excess_kurtosis, skewness  # noqa: E402
 from generator.data import HistoricalPriceLoader, sample_real_prices  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 
@@ -50,6 +51,15 @@ DIVERSITY_WARNING_THRESHOLD = 0.3
 # capable of producing a degenerate downstream policy.
 MEAN_BIAS_WARNING_THRESHOLD_STD = 2.0
 
+# Heuristics for distribution SHAPE, independent of mean/spread: a generator
+# can have the right center and the right diversity while still missing real
+# markets' tail asymmetry (crash risk) and fat tails entirely -- this is what
+# let checkpoints/market_gan.pt pass the mean/diversity checks while still
+# producing policies that failed badly on tail risk in the stress-test
+# backtest (see results/benchmark_summary.json before this fix).
+SKEW_WARNING_THRESHOLD = 0.5
+KURTOSIS_WARNING_THRESHOLD = 2.0
+
 
 def _terminal_log_return(
     prices: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price paths"]
@@ -59,22 +69,12 @@ def _terminal_log_return(
     return torch.log(sT / s0)
 
 
-def _skewness(x: torch.Tensor) -> float:
-    centered = x - x.mean()
-    return (centered.pow(3).mean() / centered.pow(2).mean().pow(1.5)).item()
-
-
-def _excess_kurtosis(x: torch.Tensor) -> float:
-    centered = x - x.mean()
-    return (centered.pow(4).mean() / centered.pow(2).mean().pow(2) - 3.0).item()
-
-
 def _return_stats(x: Annotated[torch.Tensor, "[Batch] terminal log-returns"]) -> Dict[str, float]:
     return {
         "mean": x.mean().item(),
         "std": x.std().item(),
-        "skewness": _skewness(x),
-        "excess_kurtosis": _excess_kurtosis(x),
+        "skewness": skewness(x),
+        "excess_kurtosis": excess_kurtosis(x),
     }
 
 
@@ -150,7 +150,7 @@ def validate_generator_fidelity(
 ) -> Annotated[Dict, "fidelity summary, also written to <output_dir>/gan_fidelity_summary.json"]:
     """Compares real and synthetic price paths to catch generative failures.
 
-    Checks two independent, complementary failure modes:
+    Checks four independent, complementary failure modes:
 
     - Diversity ratio (synthetic terminal-return std / real terminal-return
       std): mode collapse -- the generator producing near-identical paths
@@ -159,9 +159,15 @@ def validate_generator_fidelity(
       perfectly healthy diversity while still centering its whole
       distribution on the wrong location (e.g. a persistent decline that
       isn't in the real data) -- diversity alone would miss this.
+    - Skew and excess-kurtosis mismatches: the generator can have the right
+      center *and* the right spread while still missing real markets' tail
+      asymmetry (crash risk) and fat tails entirely. This is the failure
+      mode that let an earlier checkpoint pass the mean/diversity checks
+      while still producing policies with badly underestimated tail risk
+      once stress-tested.
 
-    Both run automatically after every `train_gan.py` run, before either
-    failure mode can cascade into a policy trained against the generator.
+    All four run automatically after every `train_gan.py` run, before any of
+    them can cascade into a policy trained against the generator.
     """
     real_returns = _terminal_log_return(real_prices)
     synthetic_returns = _terminal_log_return(synthetic_prices)
@@ -173,6 +179,8 @@ def validate_generator_fidelity(
     )
     mean_bias = synthetic_stats["mean"] - real_stats["mean"]
     mean_bias_in_std = mean_bias / real_stats["std"] if real_stats["std"] > 0 else float("nan")
+    skew_diff = synthetic_stats["skewness"] - real_stats["skewness"]
+    kurtosis_diff = synthetic_stats["excess_kurtosis"] - real_stats["excess_kurtosis"]
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -192,13 +200,24 @@ def validate_generator_fidelity(
             f"mean is {mean_bias_in_std:+.1f} real std devs off ({synthetic_stats['mean']:+.4f} "
             f"vs. real {real_stats['mean']:+.4f}) -- generator learned the wrong distribution location"
         )
+    if abs(skew_diff) > SKEW_WARNING_THRESHOLD:
+        problems.append(
+            f"skewness off by {skew_diff:+.2f} (synthetic {synthetic_stats['skewness']:+.2f} vs. "
+            f"real {real_stats['skewness']:+.2f}) -- generator isn't capturing real tail asymmetry"
+        )
+    if abs(kurtosis_diff) > KURTOSIS_WARNING_THRESHOLD:
+        problems.append(
+            f"excess kurtosis off by {kurtosis_diff:+.2f} (synthetic "
+            f"{synthetic_stats['excess_kurtosis']:+.2f} vs. real {real_stats['excess_kurtosis']:+.2f}) "
+            "-- generator isn't capturing real fat-tail risk"
+        )
 
     if problems:
         verdict = "WARNING: " + "; ".join(problems) + ". Policies trained against this generator may fail badly out of sample."
     else:
         verdict = (
-            f"OK: diversity is {diversity_ratio:.1%} of real, "
-            f"mean bias is {mean_bias_in_std:+.1f} real std devs."
+            f"OK: diversity is {diversity_ratio:.1%} of real, mean bias is {mean_bias_in_std:+.1f} "
+            f"real std devs, skew diff {skew_diff:+.2f}, kurtosis diff {kurtosis_diff:+.2f}."
         )
     print(verdict)
 
@@ -209,6 +228,10 @@ def validate_generator_fidelity(
         "diversity_warning_threshold": DIVERSITY_WARNING_THRESHOLD,
         "mean_bias_in_std": mean_bias_in_std,
         "mean_bias_warning_threshold_std": MEAN_BIAS_WARNING_THRESHOLD_STD,
+        "skew_diff": skew_diff,
+        "skew_warning_threshold": SKEW_WARNING_THRESHOLD,
+        "kurtosis_diff": kurtosis_diff,
+        "kurtosis_warning_threshold": KURTOSIS_WARNING_THRESHOLD,
         "verdict": verdict,
     }
     with open(output_dir / "gan_fidelity_summary.json", "w") as f:

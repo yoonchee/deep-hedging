@@ -15,5 +15,9 @@
   "diversity_warning_threshold": 0.3,
   "mean_bias_in_std": -1.0940925578668819,
   "mean_bias_warning_threshold_std": 2.0,
-  "verdict": "OK: diversity is 129.9% of real, mean bias is -1.1 real std devs."
+  "skew_diff": 0.9877201169729233,
+  "skew_warning_threshold": 0.5,
+  "kurtosis_diff": -4.116581439971924,
+  "kurtosis_warning_threshold": 2.0,
+  "verdict": "WARNING: skewness off by +0.99 (synthetic +0.08 vs. real -0.90) -- generator isn't capturing real tail asymmetry; excess kurtosis off by -4.12 (synthetic +0.08 vs. real +4.20) -- generator isn't capturing real fat-tail risk. Policies trained against this generator may fail badly out of sample."
 }

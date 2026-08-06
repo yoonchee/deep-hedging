@@ -2,7 +2,12 @@
 
 import torch
 
-from generator.validate import DIVERSITY_WARNING_THRESHOLD, validate_generator_fidelity
+from generator.validate import (
+    DIVERSITY_WARNING_THRESHOLD,
+    KURTOSIS_WARNING_THRESHOLD,
+    SKEW_WARNING_THRESHOLD,
+    validate_generator_fidelity,
+)
 
 
 def _make_diverse_paths(
@@ -11,6 +16,27 @@ def _make_diverse_paths(
     torch.manual_seed(seed)
     z = torch.randn(batch_size, seq_len - 1) * 0.1 + drift
     log_prices = torch.cat([torch.zeros(batch_size, 1), torch.cumsum(z, dim=1)], dim=1)
+    return torch.exp(log_prices).unsqueeze(-1)
+
+
+def _make_fat_tailed_paths(
+    batch_size: int, seq_len: int, seed: int, crash_prob: float = 0.08, crash_size: float = -1.5
+) -> torch.Tensor:
+    # A rare, single per-path crash (not many small per-step jumps, which
+    # wash out into just a wider Gaussian via the CLT): most paths look
+    # ordinary, but a minority carry one large negative shock -- real
+    # markets' crash risk, giving strong negative skew and fat tails
+    # (positive excess kurtosis), unlike a pure Gaussian generator.
+    torch.manual_seed(seed)
+    z = torch.randn(batch_size, seq_len - 1) * 0.1
+    has_crash = torch.rand(batch_size) < crash_prob
+    crash_step = torch.randint(0, seq_len - 1, (batch_size,))
+    crash_return = torch.zeros(batch_size, seq_len - 1)
+    crashing = has_crash.nonzero(as_tuple=True)[0]
+    crash_return[crashing, crash_step[crashing]] = crash_size
+    log_prices = torch.cat(
+        [torch.zeros(batch_size, 1), torch.cumsum(z + crash_return, dim=1)], dim=1
+    )
     return torch.exp(log_prices).unsqueeze(-1)
 
 
@@ -54,6 +80,27 @@ def test_validate_generator_fidelity_passes_for_comparable_diversity(tmp_path) -
 
     assert summary["diversity_ratio"] >= DIVERSITY_WARNING_THRESHOLD
     assert "OK" in summary["verdict"]
+
+
+def test_validate_generator_fidelity_flags_tail_shape_mismatch(tmp_path) -> None:
+    # Real data has crash risk (negative skew, fat tails); synthetic is a
+    # plain symmetric Gaussian -- mean/diversity checks alone would miss
+    # this entirely, since the generator can still get the center and
+    # spread roughly right (this is exactly what happened with the actual
+    # market_gan.pt checkpoint before this check existed).
+    real = _make_fat_tailed_paths(batch_size=3000, seq_len=30, seed=0)
+    synthetic = _make_diverse_paths(batch_size=3000, seq_len=30, seed=1)
+
+    summary = validate_generator_fidelity(real, synthetic, output_dir=tmp_path)
+
+    assert (
+        abs(summary["skew_diff"]) > SKEW_WARNING_THRESHOLD
+        or abs(summary["kurtosis_diff"]) > KURTOSIS_WARNING_THRESHOLD
+    )
+    assert "WARNING" in summary["verdict"]
+    assert (
+        "tail asymmetry" in summary["verdict"] or "fat-tail risk" in summary["verdict"]
+    )
 
 
 def test_validate_generator_fidelity_writes_outputs(tmp_path) -> None:
