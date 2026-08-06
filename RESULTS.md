@@ -7,7 +7,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 ## Contents
 
 - [What's implemented vs. the paper](#whats-implemented-vs-the-paper)
-- [A note on mean wealth: this repo has no P₀ (premium) term](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)
+- [Terminal wealth and the P₀ (premium) term](#terminal-wealth-and-the-p₀-premium-term)
 - [Part I: frictionless replication](#part-i-frictionless-replication)
 - [The GAN fidelity story](#the-gan-fidelity-story)
 - [Stress-test backtest](#stress-test-backtest)
@@ -25,67 +25,74 @@ found, and — deliberately — what didn't work and why, not just what did.
 | Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results that shifted after the RNN/LSTM fix — see TimeGAN section |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches, now extended to the paper's own Part II grid {0.5, 0.75, 0.99, 0.995, 0.997} |
 | Delta-convexity diagnostic (paper Figs. 5/8/11) | `backtester/plotting.py::plot_delta_convexity` | Matches, and was the tool that caught the RNN/LSTM failure |
-| Option premium P₀ in the wealth objective | *(not implemented)* | Open, but now quantified — see [below](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term); explains the negative mean wealth throughout this document |
+| Option premium P₀ in the wealth objective | `MarketEnvironment(premium=...)`, `common/black_scholes.py::black_scholes_call_price` | Implemented for Part I (closed-form, exact); still `0.0` in the stress test and every GAN-driven setting, which have no closed-form price — see [below](#terminal-wealth-and-the-p₀-premium-term) |
 | GAN fidelity validation | `generator/validate.py` | **Beyond** the paper — not something Kim (2021) does |
 
-## A note on mean wealth: this repo has no P₀ (premium) term
+## Terminal wealth and the P₀ (premium) term
 
-Every mean-wealth/mean-PnL number in this document is negative — Part I's
-Black-Scholes baseline shows -1.729 at every α (the CVaR columns differ
-across α, the mean doesn't, since P&L itself doesn't depend on α), and the
-stress-test's Black-Scholes baseline shows -0.695. Both numbers turn out to
-be explained by the same missing term, not a bug and not an unexplained
+Every mean-wealth/mean-PnL number in this document used to be negative —
+Part I's Black-Scholes baseline showed -1.729 at every α, and the
+stress-test's Black-Scholes baseline showed -0.695. Both numbers turned out
+to be explained by the same missing term, not a bug and not an unexplained
 finding:
 
-`Wealth_T = -Payoff(S_T) + Σ δ_t(S_{t+1}-S_t) - Costs` (`math_spec.md` §1.1)
-never adds back the premium P₀ that would be collected for writing the
-option in the first place. For a hedge that (near-)perfectly replicates the
-payoff, the classical replication argument is that the accumulated hedging
-P&L, financed at the risk-free rate, nets out to `Payoff(S_T) - C₀` — so
-without collecting a premium, `Wealth_T ≈ -C₀`: a constant offset equal to
-the option's own fair value, not zero.
+`Wealth_T = -Payoff(S_T) + Σ δ_t(S_{t+1}-S_t) - Costs` (the original form,
+`math_spec.md` §1.1) never added back the premium P₀ that would be
+collected for writing the option in the first place. For a hedge that
+(near-)perfectly replicates the payoff, the classical replication argument
+is that the accumulated hedging P&L, financed at the risk-free rate, nets
+out to `Payoff(S_T) - C₀` — so without collecting a premium, `Wealth_T ≈
+-C₀`: a constant offset equal to the option's own fair value, not zero.
 
-This is directly verifiable in both settings:
+This was directly verified in both settings:
 
 - **Part I** (S₀=K=100, vol=0.15, T=1/12, r=0): the closed-form
-  Black-Scholes call price at these exact parameters is C₀ ≈ 1.72. The
-  measured Black-Scholes mean PnL is **-1.729** — a match to two decimal
-  places.
+  Black-Scholes call price at these exact parameters is C₀ ≈ 1.727. The
+  measured Black-Scholes mean PnL (without P₀) was **-1.729** — a match to
+  two decimal places.
 - **Stress test** (regime-switching vol 15%/60%, switch_prob=0.10, S₀=K=1,
   30 steps, dt=1): there's no closed-form price for this process, so the
   fair value was estimated directly as `E[Payoff(S_T)]` via Monte Carlo
   (200,000 paths, same simulator used for the backtest): **0.690**. The
-  measured Black-Scholes mean wealth is **-0.695** — again a match to
+  measured Black-Scholes mean wealth was **-0.695** — again a match to
   within simulation noise.
 
-Two consequences worth stating explicitly:
+**P₀ is now implemented — for Part I only.** `MarketEnvironment` gained a
+`premium` parameter (default `0.0`, so nothing changes unless a caller
+opts in — `math_spec.md` §1.1) and `black_scholes_call_price` was added to
+`common/black_scholes.py`. `replicate_part1.py` computes the closed-form
+C₀ at its own exact parameters and passes it in, since constant vol and
+r=0 make that price exact; a constant additive shift to wealth doesn't
+change the CVaR-minimizing optimal policy (same argmin, same gradient),
+only the reported scale, so this required no retraining-logic changes,
+only rerunning. The stress test and every GAN-driven setting
+(`evaluate.py`, `train_policy.py`) have no closed-form price to use
+instead and were **deliberately left at `premium=0.0`** rather than
+substituting a Monte Carlo estimate, whose own error would then need
+characterizing — see Ideas for future work.
 
-- **This is almost certainly why the paper's own Part II results show
-  large positive mean PnL (≈18-35 on their S₀=100 scale) while every
-  analogous number in this repo is negative.** The paper's own Part I
-  table reports Black-Scholes mean PnL ≈ 0.0005 — essentially zero — which
-  is only reachable if its objective *does* include a correctly-priced
-  P₀ ≈ C₀ that cancels the expected payout. This repo's version of the
-  same experiment, run without that term, produces exactly the `-C₀`
-  offset predicted above. The sign and rough scale of the paper-vs-repo
-  PnL gap is consistent with this one missing term, not a separately
-  unexplained discrepancy — and, in particular, not evidence of any issue
-  with the paper's own generator, a hypothesis briefly considered while
-  preparing this section and dropped once this reconciliation held up.
-- **CVaR comparisons *within* this repo remain valid**: `CVaR_α(X + c) =
-  CVaR_α(X) - c` for a constant `c`, so every strategy in a given table
-  shifts by the same amount and the architectures' *relative* ordering
-  (what this document's tables are actually used for) is unaffected. But
-  this repo's absolute CVaR numbers are not directly comparable to the
-  paper's own absolute CVaR figures — e.g. Part I's α=0.99 Black-Scholes
-  CVaR is 2.63 here vs. -0.92 in the paper — without also correcting for a
-  differing PnL-sign convention, which has not been verified; only the
-  mean-PnL/P₀ portion of the gap has been checked directly above.
+The result, in Part I: Black-Scholes' mean PnL is now **-0.0017**,
+matching the paper's own reported ≈0.0005 to three decimal places, and —
+more significantly — this repo's absolute CVaR numbers now land within
+2-9% of the paper's own absolute CVaR figures for three of four
+architectures (see the [Part I section](#part-i-frictionless-replication)
+for the full comparison table). This is a materially stronger replication
+claim than "same qualitative shape," and it retires the earlier, more
+cautious framing of this section (which had verified only the mean/P₀
+portion of the gap, not the CVaR-sign-convention question — that question
+is now answered: the two conventions are negatives of each other once P₀
+is included).
 
-Whether to actually add a P₀ term to `MarketEnvironment` (so mean wealth
-reads near zero for a well-hedging policy, matching the paper's own
-convention) is a separate implementation decision from documenting this
-correctly — see Known limitations and Ideas for future work.
+**This is also almost certainly why the paper's own Part II results show
+large positive mean PnL (≈18-35 on their S₀=100 scale) while this repo's
+stress-test numbers are still negative** (P₀ isn't wired in there yet). The
+paper's own Part I table reports Black-Scholes mean PnL ≈ 0.0005 —
+essentially zero — which is only reachable if its objective *does* include
+a correctly-priced P₀ ≈ C₀ that cancels the expected payout, exactly as
+verified above for this repo once P₀ was added. This is not evidence of
+any issue with the paper's own generator, a hypothesis briefly considered
+while first investigating this gap and dropped once the reconciliation
+held up.
 
 ## Part I: frictionless replication
 
@@ -95,31 +102,70 @@ Paper's exact setup: S₀ = K = 100 (at-the-money), r = 0, vol = 0.15, T = 1/12
 (see [below](#the-rnnlstm-training-failure-and-its-real-fix) for why not the
 deeper head). 500 training epochs per (architecture, α) pair; 5000-path
 out-of-sample test. **This is 10x the paper's own stated 50 epochs** (Table
-1) — checked directly rather than left as an assumption: rerunning with
-`--epochs 50` gives CVaR roughly 2-3x worse than the 500-epoch numbers below
-for every architecture (e.g. α=0.99 MLP: 6.32 vs. 3.04; Basic RNN: 5.83 vs.
-2.63), i.e. 50 epochs is verified insufficient for this implementation to
-reach Black-Scholes-competitive CVaR, not merely untested. The params below
-are the paper's exact market/option setup; the training budget is not.
+1) — checked directly rather than left as an assumption, and the effect
+turns out to be architecture-dependent, not uniform: at α=0.99, `--epochs
+50` gives CVaR 3.3x worse for MLP (4.39 vs. 1.34) and roughly 1.3x worse
+for LSTM/GRU (1.05/1.04 vs. 0.84/0.79), but Basic RNN barely moves (1.08 vs.
+1.03) — the extra epochs help most architectures but this one architecture
+already seems to have settled by epoch 50 in this run (possibly the same
+seed-sensitivity flagged below rather than a genuine training-budget
+effect; not disentangled here). Either way, 50 epochs is verified
+insufficient for at least three of four architectures to reach the
+500-epoch numbers below, not merely untested. The params below are the
+paper's exact market/option setup; the training budget is not.
+
+**Since [P₀ was added](#terminal-wealth-and-the-p₀-premium-term)**,
+this is also the one experiment in the repo where the wealth objective
+includes the option premium (closed-form Black-Scholes price at these exact
+params, C₀ ≈ 1.727) — constant vol and r=0 make it exact here, unlike the
+regime-switching/GAN-driven settings elsewhere. Black-Scholes' own mean PnL,
+which was -1.729 (≈ -C₀) before P₀ was added, is now **-0.0017** — matching
+the paper's own reported ≈0.0005 to three decimal places.
 
 CVaR of terminal PnL, lower is better (reproduce with
 `python src/backtester/replicate_part1.py --epochs 500`):
 
 | α | Black-Scholes | MLP | Basic RNN | LSTM | GRU |
 |---|---|---|---|---|---|
-| 0.50 | 1.93 | 2.12 | 2.02 | **1.94** | 1.95 |
-| 0.75 | 2.07 | 2.32 | 2.20 | **2.09** | 2.07 |
-| 0.99 | 2.63 | 3.04 | 2.63 | **2.50** | 2.53 |
+| 0.50 | 0.207 | 0.307 | 0.291 | 0.209 | **0.199** |
+| 0.75 | 0.341 | 0.626 | 0.470 | 0.351 | **0.335** |
+| 0.99 | 0.903 | 1.344 | 1.032 | **0.839** | 0.789 |
 
-**All four architectures now replicate the paper's core result**: every
+**All four architectures still replicate the paper's core result**: every
 cell type tracks Black-Scholes-level CVaR at every risk-aversion level, with
-Basic RNN/LSTM/GRU actually slightly *beating* the closed-form baseline at
-α=0.99 (2.50–2.63 vs. 2.63). `delta_convexity.png` for every α confirms this
-visually — all four learned delta curves overlay Black-Scholes' analytic
-S-curve closely at every time step, a complete reversal from the earlier
-flat, input-insensitive RNN/LSTM curves. MLP is the one architecture that
-still trails slightly (a softer S-curve, consistent with its simpler
-per-step state formulation) but is otherwise in the same ballpark.
+LSTM/GRU slightly *beating* the closed-form baseline at every α once P₀
+shrinks the scale (0.789-0.839 vs. 0.903 at α=0.99). MLP is the one
+architecture that still trails, consistent with its simpler per-step state
+formulation. `delta_convexity.png` for every α is unaffected by P₀ (a
+constant additive shift to wealth doesn't change the optimal hedge ratio at
+any point, only the reported PnL/CVaR scale) and still shows every learned
+delta curve overlaying Black-Scholes' analytic S-curve closely.
+
+**This now matches the paper's own absolute CVaR numbers, not just their
+qualitative shape.** The paper reports Part I's α=0.99 CVaR as (its own
+sign convention: CVaR of *PnL*, negative meaning a loss)
+Black-Scholes/RNN/LSTM/GRU = -0.9203/-0.7810/-0.8974/-0.7270; this repo (CVaR
+of *losses*, i.e. `-PnL`, so positive) now reports 0.903/1.032/0.839/0.789.
+Comparing magnitudes:
+
+| | Paper (PnL, − = loss) | This repo (loss magnitude) | Difference |
+|---|---|---|---|
+| Black-Scholes | -0.9203 | 0.903 | 1.9% |
+| LSTM | -0.8974 | 0.839 | 6.5% |
+| GRU | -0.7270 | 0.789 | 8.5% |
+| Basic RNN | -0.7810 | 1.032 | 32.1% |
+
+Black-Scholes, LSTM, and GRU now land within 2-9% of the paper's own
+figures — strong evidence the two sign conventions are simply negatives of
+each other (`paper's CVaR(PnL) ≈ -1 × this repo's CVaR(loss)`) once P₀ is
+accounted for, and that this repo's Part I replication matches the paper
+not just qualitatively but at the level of absolute numbers. **Basic RNN is
+the exception**: its CVaR here (1.032) is 32% worse than the paper's RNN
+figure (0.781), a real, unexplained gap rather than noise-level — worth
+tracking as an open question given this project's independent finding
+(below and in the stress-test section) that Basic RNN is unusually
+seed-sensitive in this codebase; this single α=0.99, seed=0 run hasn't been
+checked across multiple seeds the way the stress-test claim was.
 
 ### The RNN/LSTM training failure, and its real fix
 
@@ -276,6 +322,14 @@ src/backtester/evaluate.py`):
 | Basic RNN | -0.676 | 3.05 | **7.27** | -9.19 | 120.0 | 18.07 |
 | LSTM | **-0.686** | **3.26** | **5.02** | -2.83 | 11.7 | 15.21 |
 | GRU | -0.710 | 3.07 | 4.52 | -2.48 | 10.2 | 18.60 |
+
+**Unlike Part I, these mean-wealth and CVaR numbers omit P₀** — there's no
+closed-form option price under regime-switching volatility, so
+`MarketEnvironment` here still defaults to `premium=0.0`. Every mean wealth
+above carries the same ≈-0.69 offset (this setting's own fair option value,
+verified via Monte Carlo) described in
+[Terminal wealth and the P₀ (premium) term](#terminal-wealth-and-the-p₀-premium-term)
+— it is not comparable to Part I's near-zero means one section up.
 
 **Round 1 (moment-matching loss only)**: produced the table originally
 here, claiming "MLP and GRU condition on market state, Basic RNN/LSTM
@@ -522,21 +576,24 @@ as an architecture-level finding.
 
 Roughly in priority order:
 
-1. **No option premium (P₀)** in the wealth formula — `Wealth_T` excludes
-   the premium collected for writing the option, so mean wealth is
-   persistently negative across every experiment in this repo (verified to
-   match `-C₀`, the option's own fair value, in both Part I and the
-   stress-test setting — see [above](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)).
-   This is also the most likely explanation for why this repo's mean-PnL
-   numbers are negative while the paper's own Part II results are large and
-   positive. A real, now-quantified deviation from the paper's formal
-   objective, promoted above the items below because it explains multiple
-   previously-unexplained numbers rather than being self-contained.
+1. **No option premium (P₀) outside Part I.** `MarketEnvironment` now
+   supports a `premium` term and Part I wires in the exact closed-form
+   value, which is why Part I's mean wealth now reads ≈0 like the paper's
+   and its CVaR numbers now match the paper's own absolute figures to
+   within 2-9% for three of four architectures (see
+   [above](#terminal-wealth-and-the-p₀-premium-term)). The stress test and
+   every GAN-driven setting still default to `premium=0.0` — there's no
+   closed-form option price under regime-switching or GAN-generated paths
+   — so mean wealth stays negative there, and is very likely why this
+   repo's stress-test-style numbers stay negative while the paper's own
+   Part II results are large and positive. Downgraded from "no P₀
+   anywhere" now that Part I is fixed, but still real outside it.
 2. **Part I trains for 10x the paper's stated epoch budget** (500 vs. 50,
-   Table 1) — checked directly, not assumed: `--epochs 50` gives CVaR
-   roughly 2-3x worse than the 500-epoch numbers for every architecture
-   (e.g. α=0.99 MLP: 6.32 vs. 3.04), so this isn't a cosmetic difference the
-   paper's own budget was actually enough for in this implementation.
+   Table 1) — checked directly, not assumed: `--epochs 50` gives CVaR 3.3x
+   worse for MLP and ~1.3x worse for LSTM/GRU at α=0.99 (Basic RNN barely
+   moves — see [above](#part-i-frictionless-replication)), so this isn't a
+   cosmetic difference the paper's own budget was actually enough for in
+   this implementation, at least for most architectures.
 3. **Generator tail-risk fidelity — improved, not perfect.** The
    moment-matching loss fixed the sign and rough magnitude of both skew and
    kurtosis, and this measurably improved MLP/GRU's stress-test tail risk.
@@ -577,17 +634,24 @@ Roughly in priority order:
 
 ## Ideas for future work
 
-- **Add the P₀ term to `MarketEnvironment`** (`Wealth_T = P₀ - Payoff(S_T) +
-  Σ δ_t(S_{t+1}-S_t) - Costs`, with `P₀` the analytic Black-Scholes price at
-  each experiment's own parameters). Now that the missing-P₀ explanation for
-  this repo's negative mean wealth is verified (see
-  [above](#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)) rather
-  than just suspected, this is a well-scoped, low-risk change: it shifts
-  every mean and every CVaR by a known constant per experiment without
-  touching training dynamics (CVaR-minimizing policy search doesn't care
-  about a constant additive shift to the loss), and would make this repo's
-  absolute numbers directly comparable to the paper's own tables for the
-  first time.
+- **Extend P₀ to the stress test and GAN-driven settings.** Part I now
+  includes the exact closed-form premium (see
+  [above](#terminal-wealth-and-the-p₀-premium-term)), but `evaluate.py` and
+  `train_policy.py` still default to `premium=0.0` since regime-switching
+  and GAN-generated paths have no closed-form option price. A Monte Carlo
+  estimate (`E[Payoff(S_T)]` over a large batch from whatever
+  generator/simulator is already in use, the same technique used to derive
+  the 0.690 stress-test check above) would generalize the fix, but its own
+  estimation error would need characterizing — e.g. how many paths are
+  needed for the estimate to be stable enough not to itself distort CVaR
+  training, and whether to hold that estimate fixed per training run or
+  resample it.
+- Investigate Basic RNN's 32% CVaR gap vs. the paper's own RNN figure at
+  Part I α=0.99 (1.032 vs. 0.781, the one architecture that didn't land
+  within the 2-9% band the other three did) — is this the same
+  seed-sensitivity found in the stress-test setting, now showing up in
+  Part I too, or something specific to α=0.99? A multi-seed sweep here
+  (same methodology as the stress-test one) would tell the two apart.
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.

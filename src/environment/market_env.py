@@ -1,11 +1,16 @@
 """Market environment simulator (src/environment/market_env.py).
 
 Computes the terminal hedged-portfolio wealth for a short European call
-position, following math_spec.md sections 1 and 2:
+position, following math_spec.md sections 1, 1.1, and 2:
 
     Payoff(S_T) = max(S_T - K, 0)
     Cost_t = kappa * |delta_t - delta_{t-1}| * S_t
-    Wealth_T = -Payoff(S_T) + sum_{t=0}^{T-1} [delta_t * (S_{t+1} - S_t) - Cost_t]
+    Wealth_T = P_0 - Payoff(S_T) + sum_{t=0}^{T-1} [delta_t * (S_{t+1} - S_t) - Cost_t]
+
+`premium` (P_0) defaults to 0.0 -- a caller that hasn't computed the
+option's fair value gets the same behavior as before this term existed.
+See math_spec.md section 1.1 for why omitting it made every mean wealth in
+this repo negative, and RESULTS.md for where P_0 is (and isn't) wired in.
 """
 
 from typing import Annotated, Protocol, Tuple, Union
@@ -68,10 +73,14 @@ class MarketEnvironment:
         strike: Annotated[float, "option strike price K"],
         proportional_fee: Annotated[float, "kappa, proportional transaction fee rate"] = 0.0,
         dt: Annotated[float, "time increment per step, used to compute T - t"] = 1.0,
+        premium: Annotated[
+            float, "P_0, the option premium collected for writing the option"
+        ] = 0.0,
     ) -> None:
         self.strike = strike
         self.proportional_fee = proportional_fee
         self.dt = dt
+        self.premium = premium
 
     def simulate(
         self,
@@ -126,7 +135,7 @@ class MarketEnvironment:
         S_T = prices[:, -1, :]  # [Batch, 1]
         payoff = european_call_payoff(S_T, self.strike).squeeze(-1)  # [Batch]
 
-        wealth = wealth - payoff
+        wealth = wealth + self.premium - payoff
         return wealth, total_cost
 
     def _rollout_stepwise(

@@ -19,6 +19,19 @@ def _standard_normal_cdf(
     return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
+def black_scholes_call_price(
+    S0: Annotated[float, "initial asset price"],
+    K: Annotated[float, "option strike price"],
+    tau: Annotated[float, "time to maturity T (> 0)"],
+    sigma: Annotated[float, "volatility"],
+    r: Annotated[float, "risk-free rate"] = 0.0,
+) -> Annotated[float, "analytic Black-Scholes call price C_0, the fair option premium"]:
+    d1 = (math.log(S0 / K) + (r + 0.5 * sigma**2) * tau) / (sigma * math.sqrt(tau))
+    d2 = d1 - sigma * math.sqrt(tau)
+    N = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+    return S0 * N(d1) - K * math.exp(-r * tau) * N(d2)
+
+
 def black_scholes_call_delta(
     S: Annotated[torch.Tensor, "[Batch, 1] current asset price"],
     K: Annotated[float, "option strike price"],

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from common.black_scholes import BlackScholesDeltaPolicy
+from common.black_scholes import BlackScholesDeltaPolicy, black_scholes_call_price
 from environment.market_env import MarketEnvironment
 from generator.market_gan import Generator
 from loss.cvar import CVaRLoss
@@ -70,6 +70,54 @@ def test_market_environment_wealth_shape() -> None:
 
     assert wealth.shape == (batch_size,)
     assert torch.all(torch.isfinite(wealth))
+
+
+def test_black_scholes_call_price_matches_hand_computed_value_for_part1_params() -> None:
+    # S0=K=100, vol=0.15, T=1/12 (Part I's exact params); hand-derived
+    # reference d1 ~ 0.02165 -> C0 ~ 1.72, independently cross-checked
+    # against the measured Black-Scholes mean PnL of -1.729 in
+    # results/part1_replication/part1_summary.json (see RESULTS.md).
+    price = black_scholes_call_price(S0=100.0, K=100.0, tau=1.0 / 12.0, sigma=0.15)
+    assert price == pytest.approx(1.72, abs=0.01)
+
+
+def test_black_scholes_call_price_reduces_to_intrinsic_value_at_near_zero_volatility() -> None:
+    price = black_scholes_call_price(S0=110.0, K=100.0, tau=1.0, sigma=1e-6)
+    assert price == pytest.approx(10.0, abs=1e-3)
+
+
+def test_market_environment_premium_defaults_to_zero_and_is_backward_compatible() -> None:
+    batch_size, seq_len = 8, 10
+    agent = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    torch.manual_seed(0)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+
+    env_default = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    env_explicit_zero = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0, premium=0.0)
+
+    torch.manual_seed(1)
+    wealth_default = env_default.simulate(agent, prices, implied_vol=0.2)
+    torch.manual_seed(1)
+    wealth_explicit_zero = env_explicit_zero.simulate(agent, prices, implied_vol=0.2)
+
+    assert torch.allclose(wealth_default, wealth_explicit_zero)
+
+
+def test_market_environment_premium_shifts_wealth_by_exactly_premium() -> None:
+    batch_size, seq_len = 8, 10
+    agent = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+    premium = 1.72
+
+    env_no_premium = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    env_with_premium = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0, premium=premium)
+
+    torch.manual_seed(2)
+    wealth_no_premium = env_no_premium.simulate(agent, prices, implied_vol=0.2)
+    torch.manual_seed(2)
+    wealth_with_premium = env_with_premium.simulate(agent, prices, implied_vol=0.2)
+
+    assert torch.allclose(wealth_with_premium, wealth_no_premium + premium, atol=1e-6)
 
 
 def test_gradient_propagates_to_every_price_timestep() -> None:

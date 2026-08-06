@@ -8,28 +8,39 @@ $$
 \text{Payoff}(S_T) = \max(S_T - K, 0)
 $$
 
-### 1.1 Terminal Wealth (and the missing $P_0$ term)
+### 1.1 Terminal Wealth and the $P_0$ (premium) term
 
 `environment/market_env.py::MarketEnvironment` computes terminal wealth of a
 short option position, hedged by trading $\delta_t$ shares at each step:
 
 $$
-\text{Wealth}_T = -\text{Payoff}(S_T) + \sum_t \delta_t (S_{t+1} - S_t) - \sum_t \text{Cost}_t
+\text{Wealth}_T = P_0 - \text{Payoff}(S_T) + \sum_t \delta_t (S_{t+1} - S_t) - \sum_t \text{Cost}_t
 $$
 
-This omits the premium $P_0$ collected for writing the option — the paper's
-own formulation (Eq. 1) includes it. For a hedge that (near-)perfectly
-replicates the payoff, the classical replication argument is that the
-accumulated hedging P&L, financed at the risk-free rate, nets out to
-$\text{Payoff}(S_T) - C_0$ (with $C_0$ the option's fair value), so without
-collecting a premium, $\text{Wealth}_T \approx -C_0$ — a constant offset,
-not the zero-mean result the paper reports for a well-hedging baseline. This
-is not merely a formal gap: it is the verified, quantified explanation for
-why every mean wealth in this repo's results is negative — see RESULTS.md's
-["A note on mean wealth"](RESULTS.md#a-note-on-mean-wealth-this-repo-has-no-p₀-premium-term)
-section for the direct numerical checks against a closed-form ($C_0 \approx
-1.72$ vs. measured $-1.729$ in Part I) and a Monte Carlo estimate ($E[\text{Payoff}]
+$P_0$, the premium collected for writing the option, defaults to $0$
+(`MarketEnvironment(premium=0.0)`) — the paper's own formulation (Eq. 1)
+always includes it. For a hedge that (near-)perfectly replicates the
+payoff, the classical replication argument is that the accumulated hedging
+P&L, financed at the risk-free rate, nets out to $\text{Payoff}(S_T) - C_0$
+(with $C_0$ the option's fair value), so without collecting a premium,
+$\text{Wealth}_T \approx -C_0$ — a constant offset, not the near-zero mean
+the paper reports for a well-hedging baseline. This is not merely a formal
+gap: it was the verified, quantified explanation for why every mean wealth
+in this repo's results was negative — see RESULTS.md's
+["Terminal wealth and the P₀ (premium) term"](RESULTS.md#terminal-wealth-and-the-p₀-premium-term)
+section for the numerical checks (closed-form $C_0 \approx 1.727$ vs.
+measured $-1.729$ in Part I without $P_0$; Monte Carlo $E[\text{Payoff}]
 \approx 0.690$ vs. measured $-0.695$ in the stress test).
+
+$P_0$ is wired in for **Part I only** (`backtester/replicate_part1.py`,
+`black_scholes_call_price` in `common/black_scholes.py`), where constant
+vol and $r=0$ make the closed-form price exact. It remains $0$ in the
+regime-switching stress test and every GAN-driven setting
+(`backtester/evaluate.py`, `policy/train_policy.py`), which have no
+closed-form option price to use instead. A constant additive shift to
+wealth does not change the CVaR-minimizing optimal policy (same argmin,
+identical gradient), only the reported wealth/CVaR scale — see section 3's
+$\text{CVaR}_\alpha(X + c) = \text{CVaR}_\alpha(X) - c$ identity.
 
 ## 2. Transaction Cost Model
 

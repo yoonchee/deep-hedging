@@ -49,7 +49,7 @@ math_spec.md                  Core formulas: payoff, transaction cost, CVaR, WGA
 src/
   common/
     stats.py                   Shared skewness/excess-kurtosis/terminal-log-return helpers (tensor + float)
-    black_scholes.py           Analytic Black-Scholes call delta (also used as a CVaR control-variate baseline)
+    black_scholes.py           Analytic Black-Scholes call delta + price (delta used as a CVaR control-variate baseline; price used as Part I's P0 premium)
   generator/
     market_gan.py             WGAN-GP Generator (GRU) + Discriminator (LSTM), single-feature
     timegan.py                TimeGAN: Embedder/Recovery/Generator/Supervisor/Discriminator, multi-feature
@@ -66,7 +66,7 @@ src/
     evaluate.py                Stress-test backtest vs. Black-Scholes (WGAN-GP- and TimeGAN-trained policies)
     replicate_part1.py         Frictionless Part I paper replication
     plotting.py                Shared chart library
-tests/                         71 tests
+tests/                         75 tests
 results/                       Generated plots + JSON summaries (gitignored inputs: data/, checkpoints/)
 ```
 
@@ -158,24 +158,33 @@ trail:
   used to show, and GRU's own result got worse), showing the original
   "GRU-specific" explanation was never real. Neither generator is
   straightforwardly "better"; see `RESULTS.md` for the full story.
-- **Why every mean wealth in this repo is negative**: this project's wealth
-  formula omits the option premium (P₀). Verified directly against a
-  closed-form Black-Scholes price in Part I and a Monte Carlo estimate in
-  the stress test — both match the measured negative mean wealth to within
-  simulation noise — and this is very likely why the paper's own Part II
-  results report large *positive* mean PnL where this repo's numbers are
-  negative. See `RESULTS.md` for the full derivation and both checks.
+- **The option premium (P₀), and why mean wealth used to be negative
+  everywhere**: this project's wealth formula omitted the option premium
+  (P₀), verified directly against a closed-form Black-Scholes price in
+  Part I and a Monte Carlo estimate in the stress test. P₀ is now
+  implemented (`MarketEnvironment(premium=...)`) and wired into Part I,
+  where the closed-form price is exact — Black-Scholes' mean PnL there is
+  now ≈0 like the paper's, and Part I's CVaR numbers now match the paper's
+  own absolute figures to within 2-9% for three of four architectures, not
+  just the same qualitative shape. Still `0.0` in the stress test and
+  every GAN-driven setting, which have no closed-form price — very likely
+  why the paper's own Part II results report large *positive* mean PnL
+  where this repo's stress-test-style numbers are still negative. See
+  `RESULTS.md` for the full derivation and both checks.
 
 ## Known limitations
 
-- **No option premium (P₀) term in the wealth formula** — this is why every
-  mean wealth in this repo is negative, and verified (not just suspected)
-  to be the likely reason the paper's own Part II results show large
-  *positive* mean PnL where this repo's analogous numbers are negative; see
-  `RESULTS.md` for the direct numerical check.
+- **No option premium (P₀) outside Part I** — implemented and wired into
+  Part I (closed-form, exact), where it fixes the negative mean wealth and
+  brings CVaR within 2-9% of the paper's own absolute figures. Still
+  `0.0` in the stress test and every GAN-driven setting (no closed-form
+  price available there), which is very likely why the paper's own Part
+  II results show large *positive* mean PnL where this repo's
+  stress-test-style numbers stay negative; see `RESULTS.md`.
 - Part I trains for 500 epochs, not the paper's stated 50 — checked
-  directly: 50 epochs is verified insufficient in this implementation
-  (CVaR roughly 2-3x worse across every architecture).
+  directly: 50 epochs is verified insufficient for most architectures
+  (CVaR 3.3x worse for MLP, ~1.3x worse for LSTM/GRU; Basic RNN barely
+  moves — see `RESULTS.md`).
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
 - Basic RNN's stress-test convergence is seed-sensitive (bimodal: some

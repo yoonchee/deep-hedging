@@ -13,6 +13,12 @@ that's exactly what the paper's Part I isolates: can the RL agents replicate
 Black-Scholes under ideal, frictionless conditions before anything realistic
 (transaction costs, a learned market model) is introduced.
 
+Includes the option premium P_0 (the analytic Black-Scholes price at these
+exact params) in the wealth objective -- see math_spec.md section 1.1. This
+is the one experiment in the repo where P_0 is included: constant vol and
+r=0 make the closed-form price exact, unlike the regime-switching/GAN-driven
+settings elsewhere, which have no closed form and still omit it.
+
 Run directly as a CLI:
 
     python src/backtester/replicate_part1.py
@@ -29,7 +35,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
+from common.black_scholes import BlackScholesDeltaPolicy, black_scholes_call_price  # noqa: E402
 from backtester.plotting import (  # noqa: E402
     plot_boxplot_comparison,
     plot_delta_convexity,
@@ -223,7 +229,14 @@ def run_part1_replication(
 ) -> Annotated[Dict, "per-alpha summary, also written to <output_dir>/part1_summary.json"]:
     device = device or torch.device("cpu")
     dt = time_to_maturity / (seq_len - 1)
-    environment = MarketEnvironment(strike=strike, proportional_fee=0.0, dt=dt)
+    # P_0: constant vol and r=0 make the closed-form Black-Scholes price exact
+    # here, unlike the regime-switching/GAN-driven settings elsewhere in this
+    # repo where no closed form exists -- see math_spec.md section 1.1 and
+    # RESULTS.md for why this term was missing and what adding it changes.
+    # A constant additive shift to wealth doesn't change the CVaR-minimizing
+    # policy (same argmin, gradient unaffected), only the reported numbers.
+    premium = black_scholes_call_price(S0=s0, K=strike, tau=time_to_maturity, sigma=vol)
+    environment = MarketEnvironment(strike=strike, proportional_fee=0.0, dt=dt, premium=premium)
     data_source = GBMDataSource(s0=s0, vol=vol, dt=dt)
     bs_policy = BlackScholesDeltaPolicy(strike=strike)
 
@@ -306,6 +319,7 @@ def run_part1_replication(
             "time_to_maturity": time_to_maturity,
             "seq_len": seq_len,
             "proportional_fee": 0.0,
+            "premium": premium,
             "train_epochs": train_epochs,
             "train_batch_size": train_batch_size,
             "test_batch_size": test_batch_size,
