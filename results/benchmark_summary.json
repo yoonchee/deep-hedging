@@ -4,7 +4,7 @@
     "seq_len": 30,
     "strike": 1.0,
     "proportional_fee_bps": 30.0,
-    "implied_vol": 0.3,
+    "implied_vol": 0.2,
     "stress_regime": {
       "low_vol": 0.15,
       "high_vol": 0.6,
@@ -12,19 +12,19 @@
     }
   },
   "deep_hedging": {
-    "mean_wealth": -0.675933301448822,
-    "std_wealth": 0.6603994965553284,
-    "cvar_95": 2.746990919113159,
-    "cvar_99": 5.875246047973633,
-    "mean_transaction_cost": 0.0032018828205764294,
-    "total_transaction_cost": 6.403765678405762
+    "mean_wealth": -0.696794867515564,
+    "std_wealth": 0.3676742613315582,
+    "cvar_95": 1.002601146697998,
+    "cvar_99": 1.0029656887054443,
+    "mean_transaction_cost": 0.0030041614081710577,
+    "total_transaction_cost": 6.008322715759277
   },
   "black_scholes": {
-    "mean_wealth": -0.6933820843696594,
-    "std_wealth": 0.2846370339393616,
-    "cvar_95": 1.5460727214813232,
-    "cvar_99": 1.9445431232452393,
-    "mean_transaction_cost": 0.00566020468249917,
-    "total_transaction_cost": 11.320409774780273
+    "mean_wealth": -0.6950774192810059,
+    "std_wealth": 0.36890190839767456,
+    "cvar_95": 1.816426396369934,
+    "cvar_99": 2.342271327972412,
+    "mean_transaction_cost": 0.006449816282838583,
+    "total_transaction_cost": 12.899632453918457
   }
 }

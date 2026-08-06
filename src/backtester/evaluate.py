@@ -10,8 +10,9 @@ math_spec.md section 2).
 
 import json
 import math
+import sys
 from pathlib import Path
-from typing import Annotated, Dict, Optional, Union
+from typing import Annotated, Dict, Optional, Tuple, Union
 
 import matplotlib
 
@@ -19,11 +20,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 
-from environment.market_env import MarketEnvironment
-from generator.market_gan import Generator
-from loss.cvar import CVaRLoss
-from policy.hedging_agent import HedgingAgent
-from policy.train_policy import PolicyTrainer
+# Allow `python src/backtester/evaluate.py` to resolve sibling packages the
+# same way pytest's `pythonpath = src` does, regardless of invocation style.
+_SRC_DIR = Path(__file__).resolve().parent.parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from environment.market_env import MarketEnvironment  # noqa: E402
+from generator.market_gan import Generator  # noqa: E402
+from loss.cvar import CVaRLoss  # noqa: E402
+from policy.hedging_agent import HedgingAgent  # noqa: E402
+from policy.train_policy import PolicyTrainer  # noqa: E402
 
 # Categorical colors (fixed order, project dataviz palette slots 1 & 2):
 # Deep Hedging is always blue, Black-Scholes Delta is always orange.
@@ -351,9 +358,10 @@ def _train_demo_policy(
 ) -> HedgingAgent:
     """Trains a small HedgingAgent on in-distribution market_gan.py paths.
 
-    In production this would load a checkpoint produced by
-    `policy.train_policy.PolicyTrainer`; here a short training loop gives
-    `run_backtest` a non-trivial policy to stress-test.
+    Fallback for when no checkpoint exists at checkpoints/hedging_agent.pt:
+    a short training loop gives `run_backtest` a non-trivial policy to
+    stress-test. Prefer `python src/policy/train_policy.py` for a properly
+    converged policy.
     """
     policy = HedgingAgent(hidden_dim=32, num_hidden_layers=2)
     generator = Generator(noise_dim=8, hidden_dim=32, num_layers=1, initial_price=strike)
@@ -375,13 +383,38 @@ def _train_demo_policy(
     return policy
 
 
+def _load_or_train_policy(
+    checkpoint_path: Annotated[Path, "path to a checkpoint saved by policy/train_policy.py"],
+    device: torch.device,
+) -> Annotated[Tuple[HedgingAgent, float, float], "(policy, strike, implied_vol)"]:
+    """Loads a pretrained HedgingAgent, or trains a short demo policy as fallback."""
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        policy_args = checkpoint["args"]
+        policy = HedgingAgent(
+            hidden_dim=policy_args["hidden_dim"],
+            num_hidden_layers=policy_args["num_hidden_layers"],
+        )
+        policy.load_state_dict(checkpoint["policy_state_dict"])
+        print(f"Loaded pretrained policy from {checkpoint_path}")
+        return policy, policy_args["strike"], policy_args["implied_vol"]
+
+    strike, implied_vol = 1.0, 0.30
+    print(
+        f"No policy checkpoint found at {checkpoint_path}; training a short demo policy. "
+        "Run `python src/policy/train_policy.py` first for a properly converged policy."
+    )
+    policy = _train_demo_policy(strike, implied_vol, device)
+    return policy, strike, implied_vol
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     device = torch.device("cpu")
-    strike = 1.0
-    implied_vol = 0.30
 
-    demo_policy = _train_demo_policy(strike, implied_vol, device)
+    demo_policy, strike, implied_vol = _load_or_train_policy(
+        Path("checkpoints/hedging_agent.pt"), device
+    )
 
     result = run_backtest(
         deep_hedging_policy=demo_policy,
