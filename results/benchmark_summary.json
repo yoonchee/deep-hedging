@@ -33,14 +33,14 @@
       "total_transaction_cost": 9.99776840209961
     },
     "Basic RNN": {
-      "mean_wealth": -0.5394003987312317,
-      "std_wealth": 2.4456963539123535,
-      "cvar_95": 6.060689926147461,
-      "cvar_99": 19.262922286987305,
-      "skewness": -14.84342098236084,
-      "excess_kurtosis": 257.6462707519531,
-      "mean_transaction_cost": 0.0008036900544539094,
-      "total_transaction_cost": 1.6073801517486572
+      "mean_wealth": -0.676435649394989,
+      "std_wealth": 0.8684080243110657,
+      "cvar_95": 3.0462026596069336,
+      "cvar_99": 7.268894195556641,
+      "skewness": -9.189476013183594,
+      "excess_kurtosis": 120.03793334960938,
+      "mean_transaction_cost": 0.009034781716763973,
+      "total_transaction_cost": 18.069562911987305
     },
     "LSTM": {
       "mean_wealth": -0.6859819889068604,
