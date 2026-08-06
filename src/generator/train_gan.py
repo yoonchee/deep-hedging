@@ -10,6 +10,7 @@ generator is trained with the standard WGAN objective to maximize E[D(fake)].
 Run directly as a training CLI:
 
     python src/generator/train_gan.py --epochs 50
+    python src/generator/train_gan.py --epochs 50 --data-source yfinance
 """
 
 import math
@@ -26,6 +27,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from generator.data import HistoricalPriceLoader  # noqa: E402
 from generator.market_gan import Discriminator, Generator  # noqa: E402
 
 
@@ -144,11 +146,11 @@ def sample_real_prices(
 ) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] strictly positive 'real' price paths"]:
     """Single-regime GBM 'real' market data.
 
-    Stands in for a real historical-price DataLoader, which this project does
-    not yet have; the generator's job is to learn to reproduce this
-    distribution from noise. Swap this for an actual data source once one is
-    available -- the training loop below is agnostic to where `real` comes
-    from as long as it has shape [Batch, Time_Steps, 1].
+    Fallback data source (--data-source synthetic) for offline use or quick
+    smoke tests. For actual historical market data, see
+    `generator.data.HistoricalPriceLoader` (--data-source yfinance) -- the
+    training loop below is agnostic to where `real` comes from as long as it
+    has shape [Batch, Time_Steps, 1].
     """
     # [Batch, Time_Steps - 1] i.i.d. standard normal shocks
     z = torch.randn(batch_size, seq_len - 1)
@@ -178,7 +180,22 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--s0", type=float, default=1.0, help="initial price of 'real' training data")
-    parser.add_argument("--vol", type=float, default=0.2, help="volatility of 'real' training data")
+    parser.add_argument(
+        "--data-source",
+        type=str,
+        choices=["synthetic", "yfinance"],
+        default="synthetic",
+        help="synthetic = single-regime GBM placeholder (offline, deterministic); "
+        "yfinance = real historical OHLCV data via generator.data.HistoricalPriceLoader",
+    )
+    parser.add_argument("--vol", type=float, default=0.2, help="volatility of 'real' training data (synthetic source)")
+    parser.add_argument("--ticker", type=str, default="^GSPC", help="Yahoo Finance ticker (yfinance source)")
+    parser.add_argument("--data-start", type=str, default="1950-01-03", help="history start date (yfinance source)")
+    parser.add_argument("--data-end", type=str, default="2021-01-25", help="history end date (yfinance source)")
+    parser.add_argument(
+        "--price-column", type=str, default="Adj Close", help="OHLCV column used as the price series (yfinance source)"
+    )
+    parser.add_argument("--data-cache-dir", type=str, default="data", help="local CSV cache directory (yfinance source)")
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -208,9 +225,31 @@ def main() -> None:
         device=device,
     )
 
+    if args.data_source == "yfinance":
+        loader = HistoricalPriceLoader(
+            ticker=args.ticker,
+            start=args.data_start,
+            end=args.data_end,
+            price_column=args.price_column,
+            cache_dir=Path(args.data_cache_dir),
+        )
+        print(
+            f"Using real historical data: {args.ticker} [{args.data_start}, {args.data_end}], "
+            f"{loader.prices.shape[0]} observations (cache: {loader.cache_path})"
+        )
+
+        def sample_real(batch_size: int, seq_len: int) -> torch.Tensor:
+            return loader.sample(batch_size, seq_len, initial_price=args.s0)
+
+    else:
+        print("Using synthetic single-regime GBM 'real' data (offline placeholder).")
+
+        def sample_real(batch_size: int, seq_len: int) -> torch.Tensor:
+            return sample_real_prices(batch_size, seq_len, s0=args.s0, vol=args.vol)
+
     print(f"Training WGAN-GP market generator for {args.epochs} epochs on {device}...")
     for epoch in range(1, args.epochs + 1):
-        real = sample_real_prices(args.batch_size, args.seq_len, s0=args.s0, vol=args.vol)
+        real = sample_real(args.batch_size, args.seq_len)
         stats = trainer.train_step(real)
 
         if epoch == 1 or epoch % args.log_every == 0 or epoch == args.epochs:
