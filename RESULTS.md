@@ -19,7 +19,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 | Paper component | This repo | Status |
 |---|---|---|
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
-| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches architecturally; RNN/LSTM don't converge in practice (see below) |
+| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches: all three cell types now replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix (see below) |
 | Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params (S₀=K=100, vol=0.15, T=1/12, 30 steps) |
 | Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results — WGAN-GP+moment-loss is more consistent, TimeGAN's over-dispersed synthetic data produced the single best policy in the project (GRU) and the worst (MLP); see TimeGAN section |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches |
@@ -32,71 +32,100 @@ found, and — deliberately — what didn't work and why, not just what did.
 Paper's exact setup: S₀ = K = 100 (at-the-money), r = 0, vol = 0.15, T = 1/12
 (one month), 30 time steps, batch size 1000, Adam, **zero transaction costs**.
 `RecurrentHedgingAgent` uses `hidden_dim=128` with a single linear readout
-(see [below](#the-rnnlstm-training-failure) for why not the deeper head).
-500 training epochs per (architecture, α) pair; 5000-path out-of-sample test.
+(see [below](#the-rnnlstm-training-failure-and-its-real-fix) for why not the
+deeper head). 500 training epochs per (architecture, α) pair; 5000-path
+out-of-sample test.
 
 CVaR of terminal PnL, lower is better (reproduce with
 `python src/backtester/replicate_part1.py --epochs 500`):
 
 | α | Black-Scholes | MLP | Basic RNN | LSTM | GRU |
 |---|---|---|---|---|---|
-| 0.50 | 1.93 | 2.12 | 2.77 | 2.76 | **2.06** |
-| 0.75 | 2.07 | 2.32 | 3.58 | 3.54 | **2.39** |
-| 0.99 | 2.63 | 3.04 | 6.25 | 6.28 | 4.77 |
+| 0.50 | 1.93 | 2.12 | 2.02 | **1.94** | 1.95 |
+| 0.75 | 2.07 | 2.32 | 2.20 | **2.09** | 2.07 |
+| 0.99 | 2.63 | 3.04 | 2.63 | **2.50** | 2.53 |
 
-**GRU and MLP genuinely work.** GRU's learned delta closely tracks
-Black-Scholes' analytic S-curve (see
-`results/part1_replication/alpha_0_99/delta_convexity.png`), and its CVaR is
-competitive with — sometimes better than — the closed-form baseline. MLP
-learns a real, softer S-curve and improves substantially over an earlier,
-unnormalized-input version (CVaR₉₉ dropped from 12.2 to 3.04 once the price
-input was rescaled to moneyness — see below).
+**All four architectures now replicate the paper's core result**: every
+cell type tracks Black-Scholes-level CVaR at every risk-aversion level, with
+Basic RNN/LSTM/GRU actually slightly *beating* the closed-form baseline at
+α=0.99 (2.50–2.63 vs. 2.63). `delta_convexity.png` for every α confirms this
+visually — all four learned delta curves overlay Black-Scholes' analytic
+S-curve closely at every time step, a complete reversal from the earlier
+flat, input-insensitive RNN/LSTM curves. MLP is the one architecture that
+still trails slightly (a softer S-curve, consistent with its simpler
+per-step state formulation) but is otherwise in the same ballpark.
 
-**Basic RNN and LSTM do not.** Both converge to a policy that is nearly
-input-insensitive — δ ≈ 0.5 regardless of spot or time — and their CVaR is
-close to what an unhedged/statically-hedged position would show. This is the
-paper's central comparison, and it doesn't replicate for these two cell
-types in this codebase, at this scale.
+### The RNN/LSTM training failure, and its real fix
 
-### The RNN/LSTM training failure
+This took two rounds of diagnosis, and the first round's conclusion was
+**wrong** — worth stating plainly rather than only keeping the corrected
+version, since the wrong diagnosis was published in this file for a while
+and the process of finding the error is itself informative.
 
-This was diagnosed, not just observed. In order:
+**Round 1 (five interventions, all either ineffective or only partially
+effective):**
 
-1. **Input scale.** Neither policy network originally normalized price by
-   strike. Every earlier experiment in this project used `strike=1.0`
-   (normalization a no-op), so this never surfaced until Part I's literal
-   S≈100 scale exposed it — raw S~100 saturates RNN/LSTM gate
-   nonlinearities. **Fixing this helped MLP enormously** (CVaR₉₉ 12.2 → 3.04)
-   but did not fix RNN/LSTM.
-2. **Gradient explosion?** Measured directly — gradients are small (0.03–0.3),
-   not exploding. Added gradient clipping to `PolicyTrainer` anyway (now
-   available via `grad_clip_norm`); it isn't the fix here.
+1. **Input scale — believed fixed, actually wasn't.** Dividing price by
+   strike (`S/K`) was applied and did help MLP enormously (CVaR₉₉ 12.2 →
+   3.04), which looked like confirmation. It didn't help RNN/LSTM at all.
+2. **Gradient explosion?** Measured directly — gradients are small
+   (0.03–0.3), not exploding. Gradient clipping added to `PolicyTrainer`
+   regardless (`grad_clip_norm`); not the fix.
 3. **Insufficient training?** Ruled out — 2000 epochs (4x) produced *zero*
-   change in input-sensitivity (delta diff stayed at exactly 0.0000 the
-   entire time). Not slow learning; a genuine dead-end.
-4. **Learning rate?** Tried 5x and 10x higher — made it *worse* (full sigmoid
-   saturation to a constant 0, a classic saturation lockup).
-5. **Orthogonal recurrent-weight initialization** (a standard RNN
-   stabilization trick, per-gate) at three learning rates (1e-3, 3e-3,
-   1e-2): no improvement over the untrained baseline.
-6. **The output head.** The paper's stated "128, 64, 64, 1" node counts were
-   initially read as `RNN(128) → FC(64) → FC(64) → 1`. Direct hidden-state
-   inspection showed the RNN's hidden state *does* carry a little genuine,
-   input-dependent signal — but the deep ReLU head afterward killed it (dead
-   units). Dropping to a single linear readout gave a small, real
-   improvement (input-sensitivity went from exactly 0 to non-zero) — but
-   confirmed via the same flat-prefix-then-jump test the plots use (not a
-   naive "constant price for the whole path" test, which is unrealistic and
-   overstates sensitivity), the improvement is roughly 1–3% of the
-   sensitivity Black-Scholes/GRU/MLP show. Real, but not remotely sufficient
-   to change the qualitative outcome.
+   change in input-sensitivity.
+4. **Learning rate?** Tried 5x and 10x higher — made it *worse* (full
+   sigmoid saturation to a constant 0).
+5. **Orthogonal recurrent-weight initialization**, three learning rates: no
+   improvement.
+6. **The output head.** Reading the paper's "128, 64, 64, 1" node counts as
+   `RNN(128) → FC(64) → FC(64) → 1` turned out to kill a little genuine
+   signal via dead ReLU units; dropping to a single linear readout gave a
+   *small, real* improvement (input-sensitivity went from exactly 0 to
+   non-zero) — but only ~1-3% of the sensitivity Black-Scholes/GRU/MLP show.
 
-Net: five bounded, principled interventions, one genuine partial fix (input
-normalization, which fixed MLP), and Basic RNN/LSTM still don't learn
-dynamic hedging in this setup. Whatever GRU's gating does differently here
-remains an open question — plausibly connected to the paper's own suggested
-future work (actor-critic variance reduction, entropy-bonus exploration),
-which was not attempted.
+Five interventions, one small real effect, RNN/LSTM still fundamentally
+stuck. The conclusion at the time: "whatever GRU's gating does differently
+here remains an open question."
+
+**Round 2: the actual root cause.** `RecurrentHedgingAgent` feeds the RNN
+a single channel — `prices[:, :-1, :] / strike`. Measured directly on Part
+I's own data: this channel has **mean ≈0.998, std ≈0.030**. The informative
+signal is only ~3% of the input's magnitude, buried under a near-constant
+offset of 1.0. Dividing by strike doesn't fix this at all — it's
+scale-invariant with respect to the signal-to-DC ratio; it just moves the
+offset from ~100 down to ~1.0 and leaves the *ratio* of noise to constant
+untouched. This is the actual reason every round-1 intervention either
+failed or barely helped: there was never enough usable signal reaching the
+network to shape an input-sensitive policy. The tiny round-1 improvement
+from the shallower output head is the fingerprint of a real but
+~30-100x-too-small signal, not an absent one. And it explains why MLP and
+GRU escaped this: MLP gets `delta_prev`, `T-t`, and `implied_vol` as
+explicit, well-scaled side features (never just raw price alone); GRU's
+specific gating apparently extracts enough of the attenuated signal to
+still work, where RNN/LSTM's don't.
+
+**The fix**: replace the raw `S/K` channel with standardized log-moneyness,
+`log(S_t/K) / (implied_vol · √T)` (`hedging_agent.py::RecurrentHedgingAgent`,
+now takes `implied_vol`/`time_to_maturity` as constructor hyperparameters
+used only to fix this scaling constant, not fed to the network per-step).
+This is pure preprocessing — no new information the network didn't already
+have access to, still "the RNN sees only the price path" — but it turns a
+signal that's 97% swamped by a constant into an O(1)-scaled quantity.
+Verified directly before touching CVaR: on Part I's exact params, the old
+channel's std was ≈0.03; the new one lands in the 0.1–10 range by
+construction (`tests/test_policy.py::test_recurrent_agent_moneyness_input_is_order_one_scale_for_realistic_params`).
+Delta **span** across the spot grid (the metric that directly measures
+input-sensitivity, unlike CVaR which can move for other reasons) went from
+LSTM ≈0.085 / Basic RNN ≈0 to **LSTM ≈0.96, Basic RNN ≈0.97** at 200
+epochs — matching GRU's ≈1.0 essentially exactly. The CVaR table above (500
+epochs) confirms this translates into the paper's actual claimed result.
+
+The lesson: the round-1 diagnosis mistook "did the input-normalization
+category of fix help *at all*" (yes, for MLP) for "is input normalization
+now correctly solved" (no — the specific normalization applied didn't
+address the actual failure mode). Measuring the raw input tensor's own
+statistics directly, rather than only measuring downstream training
+behavior, is what actually found it.
 
 ## The GAN fidelity story
 
