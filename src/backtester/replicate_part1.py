@@ -29,7 +29,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from backtester.evaluate import BlackScholesDeltaPolicy  # noqa: E402
+from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
 from backtester.plotting import (  # noqa: E402
     plot_boxplot_comparison,
     plot_delta_convexity,

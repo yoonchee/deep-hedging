@@ -19,6 +19,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
 from environment.market_env import MarketEnvironment  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from generator.train_timegan import load_timegan_price_generator  # noqa: E402
@@ -63,6 +64,20 @@ class PolicyTrainer:
             "first few steps onward, with zero further movement no matter how "
             "many epochs follow). None (default) disables clipping.",
         ] = None,
+        use_bs_baseline: Annotated[
+            bool,
+            "if set, trains on CVaR of (policy_wealth - black_scholes_wealth) computed "
+            "on the SAME sampled price batch, instead of raw policy_wealth -- a "
+            "control-variate variance-reduction technique (the paper's suggested "
+            "'actor-critic baseline', adapted to this codebase's direct-backprop "
+            "training rather than REINFORCE: Black-Scholes' wealth on the same path "
+            "serves as a zero-approximation-error state-value baseline). Since both "
+            "wealths are computed on the identical market draw, subtracting them "
+            "cancels shared market-driven variance, leaving a lower-variance signal "
+            "for which paths CVaR's sparse gradient selects as 'worst' batch to "
+            "batch -- see RESULTS.md. mean_wealth in train_step's return is always "
+            "the RAW policy wealth regardless of this flag, for comparability.",
+        ] = False,
     ) -> None:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = policy.to(self.device)
@@ -72,6 +87,8 @@ class PolicyTrainer:
         self.implied_vol = implied_vol
         self.sequence_policy = sequence_policy
         self.grad_clip_norm = grad_clip_norm
+        self.use_bs_baseline = use_bs_baseline
+        self._bs_policy = BlackScholesDeltaPolicy(strike=environment.strike) if use_bs_baseline else None
 
         params = list(self.policy.parameters()) + list(self.cvar_loss.parameters())
         self.optimizer = torch.optim.Adam(params, lr=lr)
@@ -93,7 +110,17 @@ class PolicyTrainer:
         wealth = self.environment.simulate(
             self.policy, prices, self.implied_vol, sequence_policy=self.sequence_policy
         )  # [Batch]
-        loss = self.cvar_loss(wealth)
+
+        if self.use_bs_baseline:
+            # No gradient needed through the fixed analytic baseline; only the
+            # policy's own wealth term carries gradient into loss.backward().
+            with torch.no_grad():
+                bs_wealth = self.environment.simulate(
+                    self._bs_policy, prices, self.implied_vol, sequence_policy=False
+                )
+            loss = self.cvar_loss(wealth - bs_wealth)
+        else:
+            loss = self.cvar_loss(wealth)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -200,6 +227,13 @@ def main() -> None:
         default="checkpoints/timegan.pt",
         help="checkpoint saved by generator/train_timegan.py (--generator-type timegan)",
     )
+    parser.add_argument(
+        "--use-bs-baseline",
+        action="store_true",
+        help="train on CVaR of (policy_wealth - black_scholes_wealth) instead of raw "
+        "policy_wealth -- a control-variate variance-reduction technique for CVaR's "
+        "sparse gradient (see PolicyTrainer's use_bs_baseline and RESULTS.md)",
+    )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -293,6 +327,7 @@ def _train_and_save(
         lr=args.lr,
         device=device,
         sequence_policy=sequence_policy,
+        use_bs_baseline=args.use_bs_baseline,
     )
 
     print(

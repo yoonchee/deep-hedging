@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from common.black_scholes import BlackScholesDeltaPolicy
 from environment.market_env import MarketEnvironment
 from generator.market_gan import Generator
 from loss.cvar import CVaRLoss
@@ -275,3 +276,98 @@ def test_recurrent_agent_gradient_propagates_to_all_policy_parameters(cell_type:
     for name, param in policy.named_parameters():
         assert param.grad is not None, f"no gradient for {name}"
         assert torch.any(param.grad != 0), f"zero gradient for {name}"
+
+
+def test_use_bs_baseline_gradient_still_flows_to_policy() -> None:
+    # The Black-Scholes baseline is a fixed analytic function with no
+    # trainable parameters -- gradients must still reach every policy
+    # parameter when use_bs_baseline is enabled.
+    torch.manual_seed(0)
+    batch_size, seq_len = 16, 12
+
+    policy = RecurrentHedgingAgent(cell_type="rnn", hidden_dim=16, num_layers=1)
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    cvar_loss = CVaRLoss(alpha=0.95)
+
+    trainer = PolicyTrainer(
+        policy,
+        environment,
+        generator,
+        cvar_loss,
+        implied_vol=0.2,
+        lr=1e-2,
+        device=torch.device("cpu"),
+        sequence_policy=True,
+        use_bs_baseline=True,
+    )
+    stats = trainer.train_step(batch_size, seq_len)
+
+    assert isinstance(stats["loss"], float)
+    for name, param in policy.named_parameters():
+        assert param.grad is not None, f"no gradient for {name}"
+        assert torch.any(param.grad != 0), f"zero gradient for {name}"
+
+
+def test_use_bs_baseline_reports_raw_wealth_not_advantage() -> None:
+    # mean_wealth must reflect the policy's actual raw wealth regardless of
+    # use_bs_baseline, so results stay comparable across configurations.
+    torch.manual_seed(0)
+    batch_size, seq_len = 16, 10
+
+    policy = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    initial_state = {k: v.clone() for k, v in policy.state_dict().items()}
+
+    trainer_raw = PolicyTrainer(
+        policy, environment, generator, CVaRLoss(alpha=0.95),
+        implied_vol=0.2, lr=1e-2, device=torch.device("cpu"), use_bs_baseline=False,
+    )
+    torch.manual_seed(0)
+    stats_raw = trainer_raw.train_step(batch_size, seq_len)
+
+    policy2 = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    policy2.load_state_dict(initial_state)
+    trainer_baseline = PolicyTrainer(
+        policy2, environment, generator, CVaRLoss(alpha=0.95),
+        implied_vol=0.2, lr=1e-2, device=torch.device("cpu"), use_bs_baseline=True,
+    )
+    torch.manual_seed(0)
+    stats_baseline = trainer_baseline.train_step(batch_size, seq_len)
+
+    # Same seed, same starting weights, same sampled batch -> raw policy
+    # wealth (pre-update) should match regardless of what the loss trains on.
+    assert stats_raw["mean_wealth"] == pytest.approx(stats_baseline["mean_wealth"], abs=1e-4)
+
+
+def test_use_bs_baseline_reduces_loss_variance_across_batches() -> None:
+    # The core empirical claim of the control-variate technique: across
+    # independent batches, CVaR of (wealth - bs_wealth) should vary less
+    # batch to batch than CVaR of raw wealth, since both wealths share the
+    # same market-driven noise on the same price draw and that shared noise
+    # cancels in the subtraction.
+    torch.manual_seed(0)
+    batch_size, seq_len = 500, 15
+
+    policy = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    bs_policy = BlackScholesDeltaPolicy(strike=1.0)
+
+    raw_losses = []
+    advantage_losses = []
+    for seed in range(20):
+        torch.manual_seed(seed)
+        with torch.no_grad():
+            z = generator.sample_noise(batch_size, seq_len)
+            prices = generator(z)
+            wealth = environment.simulate(policy, prices, 0.2, sequence_policy=False)
+            bs_wealth = environment.simulate(bs_policy, prices, 0.2, sequence_policy=False)
+
+        raw_losses.append(CVaRLoss(alpha=0.95)(wealth).item())
+        advantage_losses.append(CVaRLoss(alpha=0.95)(wealth - bs_wealth).item())
+
+    raw_std = torch.tensor(raw_losses).std().item()
+    advantage_std = torch.tensor(advantage_losses).std().item()
+    assert advantage_std < raw_std

@@ -40,6 +40,7 @@ from backtester.plotting import (  # noqa: E402
     plot_transaction_costs,
     style_axes,
 )
+from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
 from common.stats import excess_kurtosis, skewness  # noqa: E402
 from environment.market_env import MarketEnvironment  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
@@ -59,49 +60,6 @@ ARCHITECTURE_DISPLAY_NAMES: Dict[str, str] = {
 # -----------------------------------------------------------------------------
 # 1. Analytic Black-Scholes delta for a European call
 # -----------------------------------------------------------------------------
-
-
-def _standard_normal_cdf(
-    x: Annotated[torch.Tensor, "any shape"]
-) -> Annotated[torch.Tensor, "same shape, N(x)"]:
-    return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
-
-
-def black_scholes_call_delta(
-    S: Annotated[torch.Tensor, "[Batch, 1] current asset price"],
-    K: Annotated[float, "option strike price"],
-    tau: Annotated[torch.Tensor, "[Batch, 1] time to maturity T - t (> 0)"],
-    sigma: Annotated[torch.Tensor, "[Batch, 1] implied volatility"],
-    r: Annotated[float, "risk-free rate"] = 0.0,
-) -> Annotated[torch.Tensor, "[Batch, 1] analytic call delta N(d1) in [0, 1]"]:
-    # [Batch, 1] -> [Batch, 1]
-    d1 = (torch.log(S / K) + (r + 0.5 * sigma**2) * tau) / (sigma * torch.sqrt(tau))
-    return _standard_normal_cdf(d1)
-
-
-class BlackScholesDeltaPolicy:
-    """Analytic delta-hedging strategy exposing the same interface as HedgingAgent.
-
-    Satisfies `environment.market_env.HedgingPolicy`, so it can be evaluated
-    through `MarketEnvironment` exactly like a trained `HedgingAgent`.
-    """
-
-    def __init__(
-        self,
-        strike: Annotated[float, "option strike price K"],
-        r: Annotated[float, "risk-free rate"] = 0.0,
-    ) -> None:
-        self.strike = strike
-        self.r = r
-
-    def __call__(
-        self,
-        state: Annotated[torch.Tensor, "[Batch, 4] = (S_t, delta_{t-1}, T-t, implied_vol)"],
-    ) -> Annotated[torch.Tensor, "[Batch, 1] delta_t = N(d1)"]:
-        S_t = state[:, 0:1]
-        tau = state[:, 2:3]
-        sigma = state[:, 3:4]
-        return black_scholes_call_delta(S_t, self.strike, tau, sigma, self.r)
 
 
 # -----------------------------------------------------------------------------
