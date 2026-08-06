@@ -18,11 +18,14 @@ what matches the paper, what doesn't, and why is in
   directly, not just what fools the adversarial critic.
 - A **TimeGAN market generator** (Yoon et al. 2019, the paper's actual Part
   II architecture) -- embedder/recovery/generator/supervisor/discriminator
-  over multi-variate OHLCV data, trained via the paper's 3-phase procedure.
-  Its synthetic-data diversity has been hard to calibrate correctly (first
-  too low, then -- after a tanh fix -- too high), and which policy
-  architecture benefits from that miscalibration changed completely after
-  a separate RNN/LSTM bug fix -- see `RESULTS.md` for the full story.
+  over multi-variate OHLCV data, trained via the paper's 3-phase procedure,
+  now with the paper's own hyperparameters (31 hidden nodes, 3 layers) and
+  its own binary cross-entropy discriminator loss as the default
+  (`--discriminator-loss wgan-gp` keeps this repo's earlier deviation
+  available). Its synthetic-data diversity has been hard to calibrate
+  correctly (31% too low, then 214-224% too high, now 130.2% with an
+  explicit diversity-matching loss) -- see `RESULTS.md` for the full,
+  three-attempt story.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
@@ -55,7 +58,7 @@ src/
     timegan.py                TimeGAN: Embedder/Recovery/Generator/Supervisor/Discriminator, multi-feature
     data.py                   Real (yfinance, single- and multi-feature) and synthetic GBM data sources
     train_gan.py              WGAN-GP training CLI (+ moment-matching loss)
-    train_timegan.py          TimeGAN 3-phase training CLI (+ moment-matching loss, policy-training adapter)
+    train_timegan.py          TimeGAN 3-phase training CLI (BCE or WGAN-GP discriminator loss, moment- + diversity-matching loss, policy-training adapter)
     validate.py               GAN fidelity checker (mode collapse / mean bias / tail shape), used by both
   loss/cvar.py                Differentiable CVaR loss (learnable threshold h)
   policy/
@@ -66,7 +69,7 @@ src/
     evaluate.py                Stress-test backtest vs. Black-Scholes (WGAN-GP- and TimeGAN-trained policies)
     replicate_part1.py         Frictionless Part I paper replication
     plotting.py                Shared chart library
-tests/                         75 tests
+tests/                         84 tests
 results/                       Generated plots + JSON summaries (gitignored inputs: data/, checkpoints/)
 ```
 
@@ -107,8 +110,9 @@ python src/backtester/evaluate.py
 # 5. Replicate the paper's frictionless Part I experiment
 python src/backtester/replicate_part1.py --epochs 500
 
-# 6. Optional: train TimeGAN instead (the paper's actual Part II generator)
-# and compare its policies against the WGAN-GP ones from steps 1-4 -- see
+# 6. Optional: train TimeGAN instead (the paper's actual Part II generator,
+# now with the paper's own hyperparameters and BCE discriminator loss) and
+# compare its policies against the WGAN-GP ones from steps 1-4 -- see
 # RESULTS.md for why the two currently disagree on which is "better".
 python src/generator/train_timegan.py --phase1-epochs 500 --phase2-epochs 500 \
     --phase3-epochs 1500 --data-source yfinance
@@ -148,39 +152,44 @@ trail:
   experiment in this project happened to use an unlucky default seed. A
   CVaR control-variate baseline (`--use-bs-baseline`) cuts cross-seed CVaR₉₉
   variance 5.7x and turns the canonical checkpoint's CVaR₉₉ from 19.3 to
-  7.3 — real progress, though still short of LSTM/GRU's ~5.0.
+  6.6 (P₀-inclusive) — real progress, though still short of LSTM/GRU's ~4.4.
 - **TimeGAN vs. WGAN-GP**: TimeGAN's synthetic-data diversity was hard to
   calibrate — first only ~31% of real data's standard deviation (sigmoid
-  latent space), then 214-224% after switching to tanh to fix it. That
-  overshoot produces a "beats Black-Scholes" result for exactly one
+  latent space), then 214-224% after switching to tanh to fix it, then
+  130.2% after adding an explicit diversity-matching loss alongside the
+  paper's own hyperparameters and BCE discriminator loss. The 214-224%
+  overshoot produced a "beats Black-Scholes" result for exactly one
   architecture each time — but *which* architecture changed completely once
   the RNN/LSTM input fix was applied (Basic RNN inherited the effect GRU
-  used to show, and GRU's own result got worse), showing the original
-  "GRU-specific" explanation was never real. Neither generator is
-  straightforwardly "better"; see `RESULTS.md` for the full story.
+  used to show, and GRU's own result got worse). With diversity brought
+  down to 130.2%, that same architecture (Basic RNN) is still separated
+  from the pack by the same signature (lower transaction cost, lower std),
+  just no longer landing exactly at Black-Scholes — a weaker version of
+  the effect, not its absence; suggestive (not conclusive) evidence the
+  attractor's strength scales with how extreme the overshoot is. Neither
+  generator is straightforwardly "better" for hedging; see `RESULTS.md`
+  for the full three-attempt story.
 - **The option premium (P₀), and why mean wealth used to be negative
   everywhere**: this project's wealth formula omitted the option premium
   (P₀), verified directly against a closed-form Black-Scholes price in
   Part I and a Monte Carlo estimate in the stress test. P₀ is now
-  implemented (`MarketEnvironment(premium=...)`) and wired into Part I,
-  where the closed-form price is exact — Black-Scholes' mean PnL there is
-  now ≈0 like the paper's, and Part I's CVaR numbers now match the paper's
-  own absolute figures to within 2-9% for three of four architectures, not
-  just the same qualitative shape. Still `0.0` in the stress test and
-  every GAN-driven setting, which have no closed-form price — very likely
-  why the paper's own Part II results report large *positive* mean PnL
-  where this repo's stress-test-style numbers are still negative. See
-  `RESULTS.md` for the full derivation and both checks.
+  implemented (`MarketEnvironment(premium=...)`) everywhere — Part I uses
+  the exact closed-form price, the stress test and GAN-driven training
+  estimate it via Monte Carlo through whatever simulator/generator is in
+  use. Mean wealth is now ≈0 throughout, matching the paper's convention,
+  and Part I's CVaR numbers match the paper's own absolute figures to
+  within 2-9% for three of four architectures. No retraining was needed
+  for existing checkpoints — a constant additive wealth shift doesn't
+  change the CVaR-minimizing optimal policy. See `RESULTS.md` for the full
+  derivation and both original checks.
 
 ## Known limitations
 
-- **No option premium (P₀) outside Part I** — implemented and wired into
-  Part I (closed-form, exact), where it fixes the negative mean wealth and
-  brings CVaR within 2-9% of the paper's own absolute figures. Still
-  `0.0` in the stress test and every GAN-driven setting (no closed-form
-  price available there), which is very likely why the paper's own Part
-  II results show large *positive* mean PnL where this repo's
-  stress-test-style numbers stay negative; see `RESULTS.md`.
+- ~~No option premium (P₀)~~ — resolved everywhere (Part I: exact
+  closed-form; stress test / GAN-driven training: Monte Carlo estimate).
+  Mean wealth is now ≈0 throughout and Part I's CVaR matches the paper's
+  own absolute figures to within 2-9% for three of four architectures; see
+  `RESULTS.md`.
 - Part I trains for 500 epochs, not the paper's stated 50 — checked
   directly: 50 epochs is verified insufficient for most architectures
   (CVaR 3.3x worse for MLP, ~1.3x worse for LSTM/GRU; Basic RNN barely
@@ -190,10 +199,12 @@ trail:
 - Basic RNN's stress-test convergence is seed-sensitive (bimodal: some
   seeds converge well, others get stuck) — substantially improved by a
   CVaR control-variate baseline, but not fully closed to LSTM/GRU's level.
-- TimeGAN's diversity is miscalibrated (first too low, then too high after
-  a fix) and its fidelity checker has no upper-bound diversity warning to
-  catch the latter — see `RESULTS.md`.
-- Toy-scale networks and training budgets throughout, not the paper's scale.
+- TimeGAN's diversity is improved but still overshoots (31% → 214-224% →
+  130.2% across three calibration attempts), and its fidelity checker still
+  has no upper-bound diversity warning to catch this — see `RESULTS.md`.
+- Toy-scale networks and training budgets throughout, not the paper's scale
+  (the paper's 500k Monte Carlo scenarios and larger networks are out of
+  reach on this project's compute budget, stated plainly rather than chased).
 
 ## References
 

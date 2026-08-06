@@ -82,9 +82,19 @@ $$
 
 computed on terminal log-returns $\log(S_T / S_0)$, with $\text{skew}$/$\text{kurt}$ (excess) the standard third/fourth standardized moments. $\text{skew}(x_{\text{real}})$/$\text{kurt}(x_{\text{real}})$ are fixed targets estimated once from a large real-data sample, not recomputed per minibatch (too few samples to estimate reliably). Used by both the WGAN-GP generator (`generator/train_gan.py`) and TimeGAN (section 5 below).
 
+### 4.2 Diversity-matching penalty
+
+TimeGAN's synthetic-data diversity was historically calibrated indirectly, by choosing a bounded latent activation (sigmoid vs. tanh) and re-measuring the resulting synthetic/real terminal-return std ratio after training -- sigmoid undershot (31% of real), tanh overshot (214-224%), neither landing near the target (see RESULTS.md). This penalty targets the ratio directly instead:
+
+$$
+\mathcal{L}_{\text{diversity}} = \left( \frac{\text{std}(x_{\text{fake}})}{\text{std}(x_{\text{real}})} - 1 \right)^2
+$$
+
+computed on the same terminal log-returns as the moment-matching penalty, with $\text{std}(x_{\text{real}})$ a fixed target estimated once from a large real-data sample. `generator/train_timegan.py::TimeGANTrainer`'s `lambda_diversity`/`target_std` (`0` weight or `None` target disables it, `--disable-diversity-loss`).
+
 ## 5. TimeGAN Losses
 
-Yoon et al. (2019)'s architecture (`generator/timegan.py`): Embedder $E$, Recovery $R$, Generator $G$, Supervisor $S$, Discriminator $D$, trained in three phases (`generator/train_timegan.py`). This repo's $D$ uses the WGAN-GP loss above (section 4) applied to latent codes, rather than the original paper's binary cross-entropy — a deliberate deviation for consistency with this project's existing WGAN-GP machinery and its demonstrated training stability (see RESULTS.md).
+Yoon et al. (2019)'s architecture (`generator/timegan.py`): Embedder $E$, Recovery $R$, Generator $G$, Supervisor $S$, Discriminator $D$, trained in three phases (`generator/train_timegan.py`). $D$'s loss is configurable (`--discriminator-loss {bce,wgan-gp}`): **`bce`** (default) is the paper's own loss, binary cross-entropy on $D$'s per-step realism logit; **`wgan-gp`** applies the WGAN-GP loss from section 4 to latent codes instead — a deviation this project used earlier for consistency with its WGAN-GP machinery and its demonstrated training stability elsewhere (`market_gan.py`), kept available as an option rather than deleted, but no longer the default now that faithfulness to the paper's own model is the priority (see RESULTS.md for a comparison once both have been run).
 
 **Phase 1 — reconstruction loss** (pretrains $E, R$):
 
@@ -98,17 +108,27 @@ $$
 \mathcal{L}_{S} = \mathbb{E}\big[ \lVert h_{t+1} - S(h_{1:t}) \rVert_2^2 \big], \quad h = E(x)
 $$
 
-**Phase 3 — joint adversarial training**, alternating:
+**Phase 3 — joint adversarial training**, alternating. With `--discriminator-loss bce` (default, the paper's own loss):
 
 $$
-\mathcal{L}_D = \mathbb{E}[D(h_{\text{real}})] - \mathbb{E}[D(\hat h)] - \lambda \, \mathbb{E}\Big[ \big( \lVert \nabla_{\hat h} D(\hat h) \rVert_2 - 1 \big)^2 \Big], \quad \hat h = S(G(z))
+\mathcal{L}_D = -\mathbb{E}\big[\log D(h_{\text{real}})\big] - \mathbb{E}\big[\log(1 - D(\hat h))\big], \quad \hat h = S(G(z))
 $$
 
 $$
-\mathcal{L}_{G,S} = -\mathbb{E}[D(\hat h)] + \eta \, \mathcal{L}_{S,\text{fake}} + \mu \, \mathcal{L}_{\text{moment}}
+\mathcal{L}_{G,S} = -\mathbb{E}\big[\log D(\hat h)\big] + \eta \, \mathcal{L}_{S,\text{fake}} + \mu \, \mathcal{L}_{\text{moment}} + \nu \, \mathcal{L}_{\text{diversity}}
 $$
 
-where $\mathcal{L}_{S,\text{fake}}$ is the section-4-style supervised loss applied to $G$'s own output (keeping $\hat h$'s stepwise dynamics realistic as $G$ updates), $\mathcal{L}_{\text{moment}}$ (section 4.1) is applied to the price channel of $R(\hat h)$, and $\eta$/$\mu$ are the `--lambda-supervised`/`--lambda-moment` weights. $E, R$ continue training on $\mathcal{L}_{\text{recon}}$ throughout phase 3 with a small weight, so the embedding doesn't drift while $G$/$D$ train.
+(implemented via `BCEWithLogitsLoss` against $D$'s raw logit output, numerically the same as sigmoid + BCE, and the non-saturating generator loss $-\log D(\hat h)$ rather than $\log(1-D(\hat h))$, both standard GAN convention). With `--discriminator-loss wgan-gp`:
+
+$$
+\mathcal{L}_D = \mathbb{E}[D(h_{\text{real}})] - \mathbb{E}[D(\hat h)] - \lambda \, \mathbb{E}\Big[ \big( \lVert \nabla_{\hat h} D(\hat h) \rVert_2 - 1 \big)^2 \Big]
+$$
+
+$$
+\mathcal{L}_{G,S} = -\mathbb{E}[D(\hat h)] + \eta \, \mathcal{L}_{S,\text{fake}} + \mu \, \mathcal{L}_{\text{moment}} + \nu \, \mathcal{L}_{\text{diversity}}
+$$
+
+In both modes, $\mathcal{L}_{S,\text{fake}}$ is the section-4-style supervised loss applied to $G$'s own output (keeping $\hat h$'s stepwise dynamics realistic as $G$ updates), $\mathcal{L}_{\text{moment}}$ (section 4.1) and $\mathcal{L}_{\text{diversity}}$ (section 4.2) are applied to the price channel of $R(\hat h)$, and $\eta$/$\mu$/$\nu$ are the `--lambda-supervised`/`--lambda-moment`/`--lambda-diversity` weights. $E, R$ continue training on $\mathcal{L}_{\text{recon}}$ throughout phase 3 with a small weight, so the embedding doesn't drift while $G$/$D$ train.
 
 ## 6. CVaR Control-Variate Baseline
 

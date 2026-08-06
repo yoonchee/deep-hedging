@@ -1,23 +1,23 @@
 {
   "real": {
-    "mean": 0.009591474197804928,
-    "std": 0.05139301344752312,
-    "skewness": -1.0139561891555786,
-    "excess_kurtosis": 4.504249095916748
+    "mean": 0.009611055254936218,
+    "std": 0.05256814882159233,
+    "skewness": -1.0093611478805542,
+    "excess_kurtosis": 4.14361047744751
   },
   "synthetic": {
-    "mean": 0.07933252304792404,
-    "std": 0.11532984673976898,
-    "skewness": -1.512699007987976,
-    "excess_kurtosis": 3.7397494316101074
+    "mean": 0.031768422573804855,
+    "std": 0.06844257563352585,
+    "skewness": -1.4641120433807373,
+    "excess_kurtosis": 2.876466751098633
   },
-  "diversity_ratio": 2.2440763637557684,
+  "diversity_ratio": 1.3019780450289151,
   "diversity_warning_threshold": 0.3,
-  "mean_bias_in_std": 1.3570141965178009,
+  "mean_bias_in_std": 0.42149795675832347,
   "mean_bias_warning_threshold_std": 2.0,
-  "skew_diff": -0.49874281883239746,
+  "skew_diff": -0.4547508955001831,
   "skew_warning_threshold": 0.5,
-  "kurtosis_diff": -0.7644996643066406,
+  "kurtosis_diff": -1.267143726348877,
   "kurtosis_warning_threshold": 2.0,
-  "verdict": "OK: diversity is 224.4% of real, mean bias is +1.4 real std devs, skew diff -0.50, kurtosis diff -0.76."
+  "verdict": "OK: diversity is 130.2% of real, mean bias is +0.4 real std devs, skew diff -0.45, kurtosis diff -1.27."
 }

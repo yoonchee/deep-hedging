@@ -1,5 +1,6 @@
 """Tests for TimeGAN (src/generator/timegan.py, src/generator/train_timegan.py)."""
 
+import pytest
 import torch
 
 from common.stats import excess_kurtosis, skewness, terminal_log_return
@@ -135,6 +136,113 @@ def test_train_step_phase3_runs_and_returns_expected_keys() -> None:
 
     for key in ("loss_d", "loss_er", "loss", "loss_adv", "loss_supervised", "loss_moment"):
         assert key in stats
+
+
+def test_discriminator_loss_defaults_to_bce() -> None:
+    batch, seq, feature_dim = 4, 15, 5
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1)
+    trainer = TimeGANTrainer(timegan, n_critic=1, device=torch.device("cpu"))
+
+    assert trainer.discriminator_loss == "bce"
+
+
+def test_wgan_gp_discriminator_loss_mode_still_trains() -> None:
+    batch, seq, feature_dim = 4, 15, 5
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1)
+    trainer = TimeGANTrainer(
+        timegan, discriminator_loss="wgan-gp", n_critic=1, device=torch.device("cpu")
+    )
+
+    stats = trainer.train_step_phase3(torch.rand(batch, seq, feature_dim))
+
+    for key in ("loss_d", "loss_er", "loss", "loss_adv", "loss_supervised", "loss_moment"):
+        assert key in stats
+
+
+def test_invalid_discriminator_loss_raises() -> None:
+    timegan = TimeGAN(feature_dim=5, hidden_dim=12, noise_dim=8, num_layers=1)
+    with pytest.raises(ValueError):
+        TimeGANTrainer(timegan, discriminator_loss="not-a-real-loss", device=torch.device("cpu"))
+
+
+def test_bce_discriminator_step_returns_finite_loss() -> None:
+    batch, seq, feature_dim = 8, 15, 5
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1)
+    trainer = TimeGANTrainer(timegan, n_critic=1, device=torch.device("cpu"))
+
+    loss_d = trainer.train_discriminator_step(torch.rand(batch, seq, feature_dim))
+
+    assert isinstance(loss_d, float)
+    assert loss_d == loss_d  # not NaN
+    assert loss_d >= 0.0  # BCE loss is always non-negative, unlike the WGAN-GP critic loss
+
+
+def test_diversity_loss_is_zero_without_target() -> None:
+    batch, seq, feature_dim = 4, 15, 5
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1)
+    trainer = TimeGANTrainer(timegan, n_critic=1, device=torch.device("cpu"))
+
+    stats = trainer.train_step_phase3(torch.rand(batch, seq, feature_dim))
+
+    assert stats["loss_diversity"] == 0.0
+
+
+def test_diversity_loss_is_nonzero_with_target() -> None:
+    batch, seq, feature_dim = 4, 15, 5
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1, price_index=3)
+    trainer = TimeGANTrainer(
+        timegan,
+        n_critic=1,
+        target_std=0.05,
+        price_min=0.5,
+        price_max=1.5,
+        device=torch.device("cpu"),
+    )
+
+    stats = trainer.train_step_phase3(torch.rand(batch, seq, feature_dim))
+
+    assert stats["loss_diversity"] > 0.0
+
+
+def test_diversity_loss_pulls_synthetic_std_toward_target() -> None:
+    torch.manual_seed(0)
+    seq = 20
+    price_index = 3
+    target_std = 0.05
+
+    real_raw = _synthetic_multivariate_prices(200, seq)
+    scaler = MinMaxScaler(feature_dim=5)
+    scaler.fit(real_raw)
+    price_min = scaler.min_vals[price_index].item()
+    price_max = scaler.max_vals[price_index].item()
+
+    timegan = TimeGAN(feature_dim=5, hidden_dim=12, noise_dim=8, num_layers=1, price_index=price_index)
+    trainer = TimeGANTrainer(
+        timegan,
+        n_critic=1,
+        lr=3e-3,
+        lambda_diversity=10.0,
+        target_std=target_std,
+        price_min=price_min,
+        price_max=price_max,
+        device=torch.device("cpu"),
+    )
+
+    def std_gap() -> float:
+        with torch.no_grad():
+            z = timegan.sample_noise(1000, seq)
+            synthetic_scaled = timegan.generate(z)
+            price_scaled = synthetic_scaled[..., price_index : price_index + 1]
+            price = trainer._invert_price_channel(price_scaled)
+            fake_returns = terminal_log_return(price)
+            return abs(fake_returns.std().item() / target_std - 1.0)
+
+    early_gap = std_gap()
+    for _ in range(250):
+        trainer.train_generator_supervisor_step(batch_size=64, seq_len=seq)
+    later_gap = std_gap()
+
+    assert later_gap < early_gap
 
 
 def test_moment_loss_is_zero_without_target() -> None:

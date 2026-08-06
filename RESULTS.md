@@ -312,24 +312,34 @@ against the new generator checkpoint).
 
 **This table was retrained three times**, and each retrain corrected a
 mistaken conclusion from the previous one — see the RNN/LSTM sequence below
-for the full trail. Current numbers (reproduce with `python
-src/backtester/evaluate.py`):
+for the full trail. Current numbers, **now including P₀** (reproduce with
+`python src/backtester/evaluate.py`):
 
 | Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
 |---|---|---|---|---|---|---|
-| Black-Scholes | -0.695 | 1.82 | 2.34 | -1.97 | 5.34 | 12.90 |
-| MLP | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 | 10.00 |
-| Basic RNN | -0.676 | 3.05 | **7.27** | -9.19 | 120.0 | 18.07 |
-| LSTM | **-0.686** | **3.26** | **5.02** | -2.83 | 11.7 | 15.21 |
-| GRU | -0.710 | 3.07 | 4.52 | -2.48 | 10.2 | 18.60 |
+| Black-Scholes | -0.032 | 1.15 | 1.68 | -1.97 | 5.34 | 12.90 |
+| MLP | -0.004 | 3.92 | 6.60 | -4.00 | 23.8 | 10.00 |
+| Basic RNN | -0.013 | 2.38 | **6.61** | -9.19 | 120.0 | 18.07 |
+| LSTM | **-0.023** | **2.60** | **4.36** | -2.83 | 11.7 | 15.21 |
+| GRU | -0.047 | 2.41 | 3.86 | -2.48 | 10.2 | 18.60 |
 
-**Unlike Part I, these mean-wealth and CVaR numbers omit P₀** — there's no
-closed-form option price under regime-switching volatility, so
-`MarketEnvironment` here still defaults to `premium=0.0`. Every mean wealth
-above carries the same ≈-0.69 offset (this setting's own fair option value,
-verified via Monte Carlo) described in
-[Terminal wealth and the P₀ (premium) term](#terminal-wealth-and-the-p₀-premium-term)
-— it is not comparable to Part I's near-zero means one section up.
+**P₀ is now included here too** ([Terminal wealth and the P₀ (premium)
+term](#terminal-wealth-and-the-p₀-premium-term) covered Part I only when
+first written; `evaluate.py` now estimates it via Monte Carlo —
+`environment/market_env.py::estimate_premium_monte_carlo`, 500,000 paths
+through the same regime-switching simulator used for the backtest itself,
+chunked to keep memory bounded). No retraining was needed to get the table
+above: a constant additive shift to wealth doesn't change the
+CVaR-minimizing optimal policy, only the reported scale, so the *existing*
+checkpoints (trained before this extension) were simply re-evaluated
+through the premium-aware environment. This estimate run's premium was
+0.663 — within the expected ~1% sampling noise of the 0.690 value verified
+earlier, not a different number. Every mean wealth above is now near zero,
+matching Part I's convention, and directly comparable to it for the first
+time. The Basic RNN CVaR₉₉ control-variate numbers in the next subsection
+predate this extension and are offset by this same constant (documented
+there rather than regenerated, since they're presented as a historical
+record of a since-superseded sweep, not current canonical numbers).
 
 **Round 1 (moment-matching loss only)**: produced the table originally
 here, claiming "MLP and GRU condition on market state, Basic RNN/LSTM
@@ -370,7 +380,11 @@ baseline (not a learned critic, since the exact value function is available
 here) to cancel shared market-driven noise and reduce variance in which
 paths CVaR's sparse gradient selects as "worst," batch to batch.
 
-Same 8-seed sweep, with vs. without this flag:
+Same 8-seed sweep, with vs. without this flag (this sweep predates the
+stress test's P₀ extension above; every number below carries the old
+`premium=0.0` convention rather than the current one, a known constant
+-0.663 offset from today's canonical numbers, and is preserved as the
+historical record of this comparison rather than regenerated):
 
 | | No baseline | `--use-bs-baseline` |
 |---|---|---|
@@ -385,11 +399,12 @@ of already-lucky seeds do marginally better without it), but it
 substantially and consistently **reduces the variance of the outcome**:
 mean CVaR₉₉ drops 40%, cross-seed standard deviation drops 5.7x, and —
 critically — the worst-case seed's CVaR₉₉ improves from catastrophic
-(20.14, an essentially unhedged position) to merely mediocre (7.27, in
-MLP's range). Retraining the project's canonical seed-0 checkpoint with
-this flag: CVaR₉₉ 19.26 → **7.27** (the number in the table above). It
-doesn't close the gap to LSTM/GRU's ~5.0, but it turns Basic RNN from a
-coin-flip between "works" and "completely broken" into a consistently
+(20.14, an essentially unhedged position) to merely mediocre (7.27 at the
+time, **6.61 under the current P₀-inclusive convention** — the number in
+the table above). Retraining the project's canonical seed-0 checkpoint with
+this flag: CVaR₉₉ 19.26 → 7.27 (→ 6.61 today). It doesn't close the gap to
+LSTM/GRU's ~5.0 (~4.4 today), but it turns Basic RNN from a coin-flip
+between "works" and "completely broken" into a consistently
 mediocre-but-functional policy — a genuine, measured win for the technique,
 even though it doesn't fully solve Basic RNN's stress-test performance.
 
@@ -410,15 +425,17 @@ at all. Extended by training two more MLP checkpoints
 rerunning the sweep backtest under the same stress-test conditions as the
 main table above (reproduce with `python src/backtester/evaluate.py`):
 
+Includes P₀ (see [above](#terminal-wealth-and-the-p₀-premium-term)):
+
 | α | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
 |---|---|---|---|---|---|
-| 0.50 | -0.698 | 2.67 | 3.62 | -1.82 | 4.95 |
-| 0.75 | -0.700 | 2.60 | 3.58 | -1.94 | 5.54 |
-| 0.90 | -0.689 | 3.50 | 5.03 | -2.28 | 6.50 |
-| 0.95 | -0.697 | 2.74 | 3.77 | -1.90 | 4.59 |
-| 0.99 | -0.644 | 6.60 | 13.86 | -7.17 | 70.1 |
-| 0.995 | -0.604 | 6.39 | **18.49** | -15.5 | 335 |
-| 0.997 | -0.637 | 6.76 | 17.23 | -8.96 | 104 |
+| 0.50 | -0.035 | 2.01 | 2.95 | -1.82 | 4.9 |
+| 0.75 | -0.037 | 1.94 | 2.92 | -1.94 | 5.5 |
+| 0.90 | -0.026 | 2.83 | 4.36 | -2.28 | 6.5 |
+| 0.95 | -0.033 | 2.08 | 3.11 | -1.90 | 4.6 |
+| 0.99 | 0.019 | 5.93 | 13.20 | -7.17 | 70.1 |
+| 0.995 | 0.059 | 5.72 | **17.83** | -15.5 | 335 |
+| 0.997 | 0.027 | 6.10 | 16.56 | -8.96 | 104 |
 
 CVaR₉₉ and tail extremity (skew/kurtosis) are both clearly higher at α ≥
 0.99 than at α ≤ 0.95, but the ordering *within* each of those groups is
@@ -442,22 +459,22 @@ II generator is TimeGAN (Yoon et al. 2019): a 5-network
 embedder/recovery/generator/supervisor/discriminator architecture over
 multi-variate (OHLCV) data, not a single-feature model. `generator/timegan.py`
 implements it (GRU-based Embedder/Recovery/Generator/Supervisor, LSTM-based
-per-timestep Discriminator, all bounded to a shared [0,1] latent space via
-sigmoid — see `math_spec.md` section 5); `generator/train_timegan.py`
+per-timestep Discriminator, all bounded to a shared [-1,1] latent space via
+tanh — see `math_spec.md` section 5). `hidden_dim=31`, `num_layers=3`,
+training `seq_len=31` all match the paper's Table 2 exactly (updated from
+this repo's earlier 24/2/30 — see attempt 3 below). `generator/train_timegan.py`
 implements the paper's 3-phase training procedure (autoencoder pretraining
-→ supervised pretraining → joint adversarial training). One deliberate
-deviation: the discriminator uses this repo's WGAN-GP loss (gradient
-penalty) rather than the original paper's binary cross-entropy, for
-consistency with the existing generator and because WGAN-GP's stability has
-already mattered in this project (see the GAN fidelity story above).
-Features: Open, High, Low, Close, Volume (5, not the paper's 6 — Adj Close
-is dropped since it equals Close for `^GSPC`, a pure index; see known
-limitations). The moment-matching loss (`math_spec.md` section 4.1) is
-reused unchanged, applied to TimeGAN's recovered price channel.
+→ supervised pretraining → joint adversarial training). The discriminator
+now uses the paper's own binary cross-entropy loss by default
+(`--discriminator-loss bce`); this repo's earlier WGAN-GP deviation is
+kept available behind `--discriminator-loss wgan-gp` rather than deleted
+(see attempt 3). Features: Open, High, Low, Close, Volume (5, not the
+paper's 6 — Adj Close is dropped since it equals Close for `^GSPC`, a pure
+index; see known limitations). The moment-matching loss (`math_spec.md`
+section 4.1) and diversity-matching loss (section 4.2) are applied to
+TimeGAN's recovered price channel.
 
-Trained on the same real `^GSPC` data (500+500+1500 epochs, ~9 seconds
-total — TimeGAN trains far faster per epoch than the WGAN-GP here, since
-its default `hidden_dim=24` is much smaller than the WGAN-GP's 64).
+Trained on the same real `^GSPC` data (500+500+1500 epochs).
 
 ### Attempt 1: sigmoid, [0,1] latent space (the paper's literal convention)
 
@@ -565,29 +582,123 @@ it lands on a different architecture each time the input encoding changes
 something structural about training against an over-dispersed generator,
 or is closer to coincidence, is not established.
 
-This is the actual headline finding of the TimeGAN work, revised twice
-now: **neither generator is straightforwardly "better," and claims about
+This was the headline finding of the TimeGAN work through two revisions:
+**neither generator is straightforwardly "better," and claims about
 *which architecture* benefits from a given generator should be treated as
 provisional until checked against every subsequent bug fix** — this
 project found out the hard way that an input-encoding bug can masquerade
-as an architecture-level finding.
+as an architecture-level finding. Attempt 3 below adds a new data point to
+the still-open question of *why* that attractor existed at all.
+
+### Attempt 3: paper hyperparameters, the paper's own BCE loss, and an explicit diversity-matching loss
+
+Prompted by a broader push (this session's `/goal`: implement the paper's
+models faithfully and correctly) to close every known gap between this
+repo and the paper rather than just the diversity-calibration one, three
+changes landed together and were retrained as one combined run rather than
+three separate ones (each would have invalidated the others' numbers):
+
+- **Hyperparameters now match the paper's Table 2** exactly: `hidden_dim`
+  24 → **31**, `num_layers` 2 → **3**, training `seq_len` 30 → **31**
+  (generation at inference time is unaffected — `sample_noise(batch_size,
+  seq_len, device)` takes `seq_len` at call time and every network is
+  GRU/LSTM-based, hence length-agnostic; only the training window
+  changed).
+- **The discriminator now uses the paper's own loss** — binary
+  cross-entropy on a per-step realism logit (`BCEWithLogitsLoss`), not
+  this repo's WGAN-GP deviation — as the default
+  (`--discriminator-loss bce`), with `wgan-gp` kept available behind a
+  flag rather than deleted (`math_spec.md` section 5).
+- **An explicit diversity-matching loss** (`math_spec.md` section 4.2)
+  targets the synthetic/real terminal-return std *ratio* directly (target
+  1.0), rather than the previous approach of picking a bounded latent
+  activation and re-measuring after the fact.
+
+Same training budget (500+500+1500 epochs), same real `^GSPC` data.
+Fidelity check (single seed — the historical 4-seed ranges above predate
+this attempt and weren't rerun at this scale):
+
+| Metric | Real | Synthetic | Verdict |
+|---|---|---|---|
+| Diversity ratio | -- | **130.2%** | Still overshooting, but much closer to 100% than attempt 2's 214-224% |
+| Mean bias | -- | +0.4σ | Well under threshold, smallest bias of the three attempts |
+| Skewness | -1.01 | -1.46 | Diff -0.45, just inside the 0.5 threshold |
+| Excess kurtosis | 4.14 | 2.88 | Diff -1.27, comfortably under threshold |
+
+**Verified via ablation, not assumed**: since hyperparameters, discriminator
+loss, and the diversity loss all changed together, the 214-224% → 130.2%
+improvement could have come from any of the three. A same-budget run with
+identical hyperparameters and BCE loss but `--disable-diversity-loss` gives
+diversity **218.1%** — essentially unchanged from attempt 2's 214-224%,
+confirming the diversity-matching loss specifically (not the BCE switch or
+the larger network) is what drove the improvement, not a confound. It
+still didn't land exactly on 100%, and no claim is made here about why it
+stops short (untried: a higher `--lambda-diversity`, more phase-3 epochs).
+One side note from the ablation, not chased further: without the diversity
+loss, the discriminator loss collapsed to exactly 0.0000 and the
+generator's adversarial loss climbed to 17.6 by epoch 1500 (vs. 0.02-0.2
+and ~7-8 respectively with it) — a much more severe D-dominated imbalance,
+raising the possibility that the diversity loss has a secondary stabilizing
+effect on the adversarial dynamics themselves, not just the final
+diversity number. Speculative, not established.
+
+Retraining all four policies against this generator and rerunning the
+regime-switching stress test:
+
+| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
+|---|---|---|---|---|---|---|
+| Black-Scholes | -0.032 | 1.15 | 1.68 | -1.97 | 5.3 | 12.90 |
+| MLP (TimeGAN) | 0.176 | 7.07 | 25.00 | -15.11 | 265.4 | 2.64 |
+| Basic RNN (TimeGAN) | 0.093 | 4.24 | 15.00 | -15.00 | 262.6 | 6.24 |
+| LSTM (TimeGAN) | 0.170 | 6.99 | 24.73 | -14.38 | 249.3 | 20.12 |
+| GRU (TimeGAN) | 0.179 | 6.91 | 24.66 | -14.58 | 254.6 | 22.91 |
+
+**The attractor weakened but did not disappear.** In attempt 2, one
+architecture landed *at* Black-Scholes (CVaR₉₉ ≈1.0, essentially matching
+the closed-form baseline). Here, no architecture gets remotely close to
+Black-Scholes' 1.68 — but Basic RNN (CVaR₉₉ 15.00) is still clearly
+separated from the other three (24.7-25.0), by the same signature it
+showed in attempt 2: lowest transaction cost (6.24 vs. 20-23), lowest std
+(1.98 vs. ~3.3). Calling this "no outlier" would overstate what changed;
+the honest read is that attempt 3's less extreme diversity overshoot
+(130.2% vs. 214-224%) produced a *smaller* version of the same
+architecture-specific effect, not its absence. This is still a genuinely
+informative data point on the open question from attempt 2 — *is the
+attractor's strength tied to how extreme the diversity overshoot is?* —
+and it's directionally consistent with that (weaker overshoot, weaker
+effect), but it doesn't establish causation: three things changed at once
+(hyperparameters, discriminator loss, diversity loss), and no run isolates
+diversity as the one that matters for *this* effect specifically.
+
+**TimeGAN-trained policies now uniformly underperform WGAN-GP-trained ones
+on this stress test** (compare CVaR₉₉ 15-25 here against 3.9-6.6 in the
+main stress-test table above) — a less confounded comparison than attempts
+1-2 produced, since no architecture here comes close to matching
+Black-Scholes the way one did each time before. Whether this reflects
+TimeGAN genuinely being a worse fit for this stress scenario, or the
+remaining 130.2% diversity overshoot still meaningfully mismatching the
+training and test distributions, is not established — the same
+honest-uncertainty posture as the rest of this section.
 
 ## Known limitations
 
 Roughly in priority order:
 
-1. **No option premium (P₀) outside Part I.** `MarketEnvironment` now
-   supports a `premium` term and Part I wires in the exact closed-form
-   value, which is why Part I's mean wealth now reads ≈0 like the paper's
-   and its CVaR numbers now match the paper's own absolute figures to
-   within 2-9% for three of four architectures (see
-   [above](#terminal-wealth-and-the-p₀-premium-term)). The stress test and
-   every GAN-driven setting still default to `premium=0.0` — there's no
-   closed-form option price under regime-switching or GAN-generated paths
-   — so mean wealth stays negative there, and is very likely why this
-   repo's stress-test-style numbers stay negative while the paper's own
-   Part II results are large and positive. Downgraded from "no P₀
-   anywhere" now that Part I is fixed, but still real outside it.
+1. **~~No option premium (P₀)~~ — resolved.** `MarketEnvironment` supports
+   a `premium` term; Part I wires in the exact closed-form value, and the
+   stress test / GAN-driven training now estimate it via Monte Carlo
+   (`environment/market_env.py::estimate_premium_monte_carlo`, chunked to
+   stay memory-safe through both the cheap analytic regime-switching
+   simulator and slower RNN-based GAN forward passes). Part I's mean
+   wealth now reads ≈0 like the paper's, with CVaR matching the paper's
+   own absolute figures to within 2-9% for three of four architectures
+   (see [above](#terminal-wealth-and-the-p₀-premium-term)); the stress
+   test's mean wealth is now ≈0 too (see
+   [above](#stress-test-backtest)). No retraining was needed for existing
+   checkpoints — a constant additive wealth shift doesn't change the
+   CVaR-minimizing optimal policy. No longer an open limitation; kept
+   first, struck through, as a record of what implementing "faithfully"
+   actually required fixing.
 2. **Part I trains for 10x the paper's stated epoch budget** (500 vs. 50,
    Table 1) — checked directly, not assumed: `--epochs 50` gives CVaR 3.3x
    worse for MLP and ~1.3x worse for LSTM/GRU at α=0.99 (Basic RNN barely
@@ -614,18 +725,24 @@ Roughly in priority order:
    substantially reduces this variance (cross-seed CVaR₉₉ std 6.89 → 1.20)
    and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
    a real improvement, though still short of LSTM/GRU's ~5.0.
-5. **TimeGAN's diversity is miscalibrated, and neither direction tried so
-   far lands correctly.** Sigmoid latents undershot real diversity (31%);
-   switching to tanh overshot it (214-224%) — see the TimeGAN section above
-   for the full before/after. `validate.py`'s fidelity checker also has a
-   real gap surfaced by this: `DIVERSITY_WARNING_THRESHOLD` only catches
-   *low* diversity, nothing currently flags a ratio this far *above* 100%.
-   The overshoot produces one architecture's best stress-test result and
-   another's worst, but *which* architecture benefits changed completely
-   once the RNN/LSTM moneyness fix was applied (Basic RNN now shows the
-   "beats Black-Scholes" behavior GRU used to show, and GRU's own result
-   under the same generator got worse) — this was never a GRU-specific
-   effect, see the TimeGAN section's revised writeup.
+5. **TimeGAN's diversity is improved but still overshoots.** Sigmoid
+   latents undershot real diversity (31%); tanh overshot it (214-224%); an
+   explicit diversity-matching loss (attempt 3) brought it to 130.2% —
+   real progress, still not landing on 100%, and not diagnosed further
+   (untried: higher `--lambda-diversity`, more phase-3 epochs). See the
+   TimeGAN section above for the full three-attempt history. `validate.py`'s
+   fidelity checker also has a real gap surfaced by this:
+   `DIVERSITY_WARNING_THRESHOLD` only catches *low* diversity, nothing
+   currently flags a ratio above 100%. Attempt 2's overshoot produced one
+   architecture's best stress-test result and another's worst, and *which*
+   architecture benefited changed completely after the RNN/LSTM moneyness
+   fix (never a GRU-specific effect); attempt 3's smaller overshoot
+   produced a weaker version of the same effect (Basic RNN still separated
+   from the pack, just no longer matching Black-Scholes outright) rather
+   than its absence — every architecture's TimeGAN CVaR now trails
+   Black-Scholes, but not uniformly — see the TimeGAN section's
+   attempt 3 writeup for why this is suggestive, not conclusive, evidence
+   the earlier attractor was an overshoot artifact.
 6. **Scale** — networks and training budgets throughout are toy-sized
    relative to the paper (500k Monte Carlo scenarios, larger networks).
 7. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
@@ -634,18 +751,16 @@ Roughly in priority order:
 
 ## Ideas for future work
 
-- **Extend P₀ to the stress test and GAN-driven settings.** Part I now
-  includes the exact closed-form premium (see
-  [above](#terminal-wealth-and-the-p₀-premium-term)), but `evaluate.py` and
-  `train_policy.py` still default to `premium=0.0` since regime-switching
-  and GAN-generated paths have no closed-form option price. A Monte Carlo
-  estimate (`E[Payoff(S_T)]` over a large batch from whatever
-  generator/simulator is already in use, the same technique used to derive
-  the 0.690 stress-test check above) would generalize the fix, but its own
-  estimation error would need characterizing — e.g. how many paths are
-  needed for the estimate to be stable enough not to itself distort CVaR
-  training, and whether to hold that estimate fixed per training run or
-  resample it.
+- ~~Extend P₀ to the stress test and GAN-driven settings~~ — **done**: both
+  now estimate it via Monte Carlo
+  (`environment/market_env.py::estimate_premium_monte_carlo`), chunked
+  internally so a single call stays feasible whether the sampler is the
+  cheap analytic regime-switching simulator or a slower RNN-based GAN
+  forward pass (500k paths: ~0.3s analytic, ~10s through the WGAN-GP
+  generator; an earlier un-chunked attempt at 500k through the generator
+  didn't finish in 180s). 500,000 paths was chosen empirically — cross-seed
+  std of the estimate is ~1% relative at that count, vs. 7-10% at 50k/100k
+  (see [above](#terminal-wealth-and-the-p₀-premium-term)).
 - Investigate Basic RNN's 32% CVaR gap vs. the paper's own RNN figure at
   Part I α=0.99 (1.032 vs. 0.781, the one architecture that didn't land
   within the 2-9% band the other three did) — is this the same
@@ -655,25 +770,33 @@ Roughly in priority order:
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.
-- Calibrate TimeGAN's diversity properly instead of guessing a bound width:
-  an explicit diversity-matching loss term (analogous to the skew/kurtosis
-  moment-matching loss, but targeting the ratio of synthetic-to-real
-  terminal-return standard deviation) would let training find the right
-  scale directly rather than relying on which bounded activation happens to
-  land closest.
+- ~~Calibrate TimeGAN's diversity properly instead of guessing a bound
+  width~~ — **done, partially**: the diversity-matching loss (attempt 3,
+  `math_spec.md` section 4.2) brought the ratio from 214-224% to 130.2%.
+  Still not landing on 100% — try a higher `--lambda-diversity`, more
+  phase-3 epochs, or investigate the discriminator-loss-trending-to-zero /
+  generator-loss-climbing pattern observed late in attempt 3's training
+  (a possibly-imbalanced BCE endgame that wasn't diagnosed).
 - Add an upper-bound check to `validate.py`'s diversity signal — currently
-  only mode collapse (too little diversity) is flagged; this session's tanh
-  fix showed a ratio of 214-224% sailing through as "OK".
-- Understand *why* training against TimeGAN's over-dispersed data seems to
-  route exactly one architecture into a "beats Black-Scholes" attractor
-  each time (GRU under the old input scaling, Basic RNN under the fixed
-  scaling) — is this a real, reproducible interaction between
-  over-dispersed training data and CVaR optimization, or closer to which
-  architecture happens to land in a particular local optimum first?
-  Testing against a second, differently-parameterized stress scenario, or
-  multiple random seeds per architecture, would help distinguish the two.
+  only mode collapse (too little diversity) is flagged; attempt 2's tanh
+  fix showed a ratio of 214-224% sailing through as "OK", and attempt 3's
+  130.2% still would too.
+- **Partially answered, one level down**: *why* did training against
+  TimeGAN's over-dispersed data route exactly one architecture into a
+  "beats Black-Scholes" attractor each time (GRU under the old input
+  scaling, Basic RNN under the fixed scaling)? An ablation (paper
+  hyperparameters + BCE loss, `--disable-diversity-loss`) confirmed the
+  diversity loss specifically — not the BCE switch or the larger network —
+  is what took the fidelity diversity ratio from 214-224% to 130.2% (the
+  ablation alone reproduces 218.1%, matching attempt 2). What that
+  ablation does *not* settle is whether the *stress-test attractor's*
+  weakening tracks the diversity number specifically: the ablation checked
+  fidelity only, not the downstream policy-training + stress-test
+  pipeline. Running the ablation checkpoint through the same 4-policy
+  retrain + stress test as attempt 3 would close this remaining gap.
 - Close the remaining gap between Basic RNN's `use_bs_baseline` result
-  (CVaR₉₉ 7.27) and LSTM/GRU's (~5.0): try combining the baseline with
+  (CVaR₉₉ 6.61 under the current P₀-inclusive convention) and LSTM/GRU's
+  (~4.4): try combining the baseline with
   orthogonal init (not re-tested together since the input-scaling fix),
   average over multiple seeds and pick the best rather than a single fixed
   seed, or an entropy bonus per the paper's own future-work section

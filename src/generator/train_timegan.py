@@ -5,9 +5,20 @@ Implements Yoon et al. (2019)'s training procedure for the networks in
 
     Phase 1 -- autoencoder pretraining:  Embedder + Recovery, reconstruction loss
     Phase 2 -- supervised pretraining:   Supervisor, next-step latent loss on real data
-    Phase 3 -- joint adversarial training: D (WGAN-GP critic), G+S (adversarial +
-               supervised + moment-matching on the price channel), and a small
-               continued E+R reconstruction update, alternated each iteration.
+    Phase 3 -- joint adversarial training: D (binary cross-entropy, the paper's own
+               loss, or WGAN-GP), G+S (adversarial + supervised + moment-matching
+               on the price channel), and a small continued E+R reconstruction
+               update, alternated each iteration.
+
+``--discriminator-loss bce`` (the default) is the paper's own loss --
+D outputs a per-step realism logit, trained with binary cross-entropy
+(real -> 1, fake -> 0) via ``BCEWithLogitsLoss`` (numerically the same as
+sigmoid + BCE, without changing the discriminator's forward pass).
+``--discriminator-loss wgan-gp`` keeps the earlier deviation available:
+this project hit real GAN training-stability issues elsewhere
+(market_gan.py) that WGAN-GP's gradient penalty helped with, so it's
+retained as an option rather than deleted, but it is no longer the
+default -- see RESULTS.md for a comparison once both have been run.
 
 Run directly as a training CLI:
 
@@ -40,8 +51,13 @@ class TimeGANTrainer:
         timegan: TimeGAN,
         lr: Annotated[float, "Adam learning rate, all optimizer groups"] = 1e-3,
         betas: Annotated[tuple, "Adam beta coefficients"] = (0.5, 0.9),
-        lambda_gp: Annotated[float, "gradient penalty coefficient (phase 3)"] = 10.0,
-        n_critic: Annotated[int, "discriminator updates per generator update (phase 3)"] = 5,
+        discriminator_loss: Annotated[
+            str, "'bce' (the paper's own loss, default) or 'wgan-gp' (this repo's earlier deviation)"
+        ] = "bce",
+        lambda_gp: Annotated[float, "gradient penalty coefficient, wgan-gp mode only (phase 3)"] = 10.0,
+        n_critic: Annotated[
+            int, "discriminator updates per generator update (phase 3); paper/bce mode uses 1, wgan-gp typically uses more"
+        ] = 1,
         lambda_supervised: Annotated[float, "weight on the fake-data supervised loss (phase 3)"] = 1.0,
         lambda_recon_joint: Annotated[float, "weight on the continued E+R reconstruction update (phase 3)"] = 0.1,
         lambda_moment: Annotated[float, "weight on the skew/kurtosis moment-matching penalty (0 disables it)"] = 1.0,
@@ -51,12 +67,25 @@ class TimeGANTrainer:
         target_excess_kurtosis: Annotated[
             Optional[float], "real price-channel terminal log-return excess kurtosis to match; None disables it"
         ] = None,
+        lambda_diversity: Annotated[
+            float, "weight on the diversity-matching penalty (0 disables it)"
+        ] = 1.0,
+        target_std: Annotated[
+            Optional[float],
+            "real price-channel terminal log-return std to match; None disables diversity loss. Targets the "
+            "synthetic/real std *ratio* directly instead of relying on which bounded latent activation "
+            "(sigmoid vs tanh) happens to land closest -- see RESULTS.md's TimeGAN diversity-calibration history.",
+        ] = None,
         price_min: Annotated[Optional[float], "MinMaxScaler min for the price channel, needed to invert it"] = None,
         price_max: Annotated[Optional[float], "MinMaxScaler max for the price channel, needed to invert it"] = None,
         device: Optional[torch.device] = None,
     ) -> None:
+        if discriminator_loss not in ("bce", "wgan-gp"):
+            raise ValueError(f"discriminator_loss must be 'bce' or 'wgan-gp', got {discriminator_loss!r}")
+
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.timegan = timegan.to(self.device)
+        self.discriminator_loss = discriminator_loss
         self.lambda_gp = lambda_gp
         self.n_critic = n_critic
         self.lambda_supervised = lambda_supervised
@@ -64,11 +93,14 @@ class TimeGANTrainer:
         self.lambda_moment = lambda_moment
         self.target_skewness = target_skewness
         self.target_excess_kurtosis = target_excess_kurtosis
+        self.lambda_diversity = lambda_diversity
+        self.target_std = target_std
         self.price_min = price_min
         self.price_max = price_max
         self.price_index = timegan.price_index
 
         self.mse = nn.MSELoss()
+        self.bce = nn.BCEWithLogitsLoss()
 
         er_params = list(self.timegan.embedder.parameters()) + list(self.timegan.recovery.parameters())
         gs_params = list(self.timegan.generator.parameters()) + list(self.timegan.supervisor.parameters())
@@ -119,7 +151,7 @@ class TimeGANTrainer:
 
     def train_discriminator_step(
         self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
-    ) -> Annotated[float, "critic loss value for this step (-L_D)"]:
+    ) -> Annotated[float, "discriminator loss value for this step"]:
         x_real = x_real.to(self.device)
         batch_size, seq_len, _ = x_real.shape
 
@@ -130,10 +162,14 @@ class TimeGANTrainer:
 
         d_real = self.timegan.discriminator(h_real)
         d_fake = self.timegan.discriminator(h_hat)
-        gp = gradient_penalty(self.timegan.discriminator, h_real, h_hat, self.device)
 
-        # Minimize -L_D = E[D(fake)] - E[D(real)] + lambda * gradient_penalty
-        loss_d = d_fake.mean() - d_real.mean() + self.lambda_gp * gp
+        if self.discriminator_loss == "bce":
+            # Paper's own loss: D(h) is a per-step realism logit, real -> 1, fake -> 0.
+            loss_d = self.bce(d_real, torch.ones_like(d_real)) + self.bce(d_fake, torch.zeros_like(d_fake))
+        else:
+            gp = gradient_penalty(self.timegan.discriminator, h_real, h_hat, self.device)
+            # Minimize -L_D = E[D(fake)] - E[D(real)] + lambda * gradient_penalty
+            loss_d = d_fake.mean() - d_real.mean() + self.lambda_gp * gp
 
         self.optimizer_d.zero_grad()
         loss_d.backward()
@@ -144,31 +180,56 @@ class TimeGANTrainer:
         self,
         batch_size: Annotated[int, "number of paths to sample"],
         seq_len: Annotated[int, "number of time steps per path"],
-    ) -> Annotated[dict, "{'loss': float, 'loss_adv': float, 'loss_supervised': float, 'loss_moment': float}"]:
+    ) -> Annotated[dict, "{'loss': float, 'loss_adv': float, 'loss_supervised': float, 'loss_moment': float, 'loss_diversity': float}"]:
         z = self.timegan.sample_noise(batch_size, seq_len, device=self.device)
         h_hat = self.timegan.generator(z)
         h_hat_supervised = self.timegan.supervisor(h_hat)
 
-        # Maximize E[D(fake)] <=> minimize -E[D(fake)]
-        loss_adv = -self.timegan.discriminator(h_hat_supervised).mean()
+        d_fake = self.timegan.discriminator(h_hat_supervised)
+        if self.discriminator_loss == "bce":
+            # Non-saturating generator loss: minimize BCE(D(fake), 1) instead
+            # of maximizing BCE(D(fake), 0) directly (standard GAN convention,
+            # avoids vanishing gradients early in training).
+            loss_adv = self.bce(d_fake, torch.ones_like(d_fake))
+        else:
+            # Maximize E[D(fake)] <=> minimize -E[D(fake)]
+            loss_adv = -d_fake.mean()
 
         # Keeps G's own stepwise dynamics matching the Supervisor's real-data-
         # trained prediction as G updates (the core TimeGAN mechanism).
         loss_supervised = self.mse(h_hat_supervised[:, :-1, :], h_hat[:, 1:, :])
 
+        needs_moment_loss = self.target_skewness is not None and self.target_excess_kurtosis is not None
+        needs_diversity_loss = self.target_std is not None
+
         loss_moment = torch.zeros((), device=self.device)
-        if self.target_skewness is not None and self.target_excess_kurtosis is not None:
+        loss_diversity = torch.zeros((), device=self.device)
+        if needs_moment_loss or needs_diversity_loss:
             x_hat = self.timegan.recovery(h_hat_supervised)
             price_scaled = x_hat[..., self.price_index : self.price_index + 1]
             price = self._invert_price_channel(price_scaled)
             fake_returns = terminal_log_return(price)
-            fake_skew = skewness_tensor(fake_returns)
-            fake_kurtosis = excess_kurtosis_tensor(fake_returns)
-            loss_moment = (fake_skew - self.target_skewness) ** 2 + (
-                fake_kurtosis - self.target_excess_kurtosis
-            ) ** 2
 
-        loss = loss_adv + self.lambda_supervised * loss_supervised + self.lambda_moment * loss_moment
+            if needs_moment_loss:
+                fake_skew = skewness_tensor(fake_returns)
+                fake_kurtosis = excess_kurtosis_tensor(fake_returns)
+                loss_moment = (fake_skew - self.target_skewness) ** 2 + (
+                    fake_kurtosis - self.target_excess_kurtosis
+                ) ** 2
+
+            if needs_diversity_loss:
+                # Targets the synthetic/real terminal-return std *ratio*
+                # directly (target 1.0), rather than relying on which bounded
+                # latent activation happens to land closest -- see RESULTS.md.
+                fake_std = fake_returns.std()
+                loss_diversity = (fake_std / self.target_std - 1.0) ** 2
+
+        loss = (
+            loss_adv
+            + self.lambda_supervised * loss_supervised
+            + self.lambda_moment * loss_moment
+            + self.lambda_diversity * loss_diversity
+        )
 
         self.optimizer_gs.zero_grad()
         loss.backward()
@@ -178,6 +239,7 @@ class TimeGANTrainer:
             "loss_adv": loss_adv.item(),
             "loss_supervised": loss_supervised.item(),
             "loss_moment": loss_moment.item(),
+            "loss_diversity": loss_diversity.item(),
         }
 
     def train_embedder_recovery_joint_step(
@@ -195,7 +257,7 @@ class TimeGANTrainer:
 
     def train_step_phase3(
         self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
-    ) -> Annotated[dict, "{'loss_d', 'loss_er', 'loss', 'loss_adv', 'loss_supervised', 'loss_moment'}"]:
+    ) -> Annotated[dict, "{'loss_d', 'loss_er', 'loss', 'loss_adv', 'loss_supervised', 'loss_moment', 'loss_diversity'}"]:
         batch_size, seq_len, _ = x_real.shape
 
         loss_d = None
@@ -307,18 +369,32 @@ def main() -> None:
     parser.add_argument("--phase2-epochs", type=int, default=200, help="supervisor pretraining epochs")
     parser.add_argument("--phase3-epochs", type=int, default=500, help="joint adversarial training epochs")
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--seq-len", type=int, default=30)
+    parser.add_argument("--seq-len", type=int, default=31, help="paper Table 2: 31 (training window only -- generation at inference time can use any seq_len, since all five networks are GRU/LSTM-based and length-agnostic)")
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden-dim", type=int, default=24, help="latent dimension H")
+    parser.add_argument("--hidden-dim", type=int, default=31, help="latent dimension H (paper Table 2: 31 hidden nodes)")
     parser.add_argument("--noise-dim", type=int, default=8)
-    parser.add_argument("--num-layers", type=int, default=2, help="stacked recurrent layers, all five networks")
-    parser.add_argument("--n-critic", type=int, default=5, help="critic updates per generator update (phase 3)")
-    parser.add_argument("--lambda-gp", type=float, default=10.0)
+    parser.add_argument("--num-layers", type=int, default=3, help="stacked recurrent layers, all five networks (paper Table 2: 3 layers)")
+    parser.add_argument(
+        "--discriminator-loss",
+        type=str,
+        default="bce",
+        choices=["bce", "wgan-gp"],
+        help="'bce' = paper's own loss (default); 'wgan-gp' = this repo's earlier deviation, kept available",
+    )
+    parser.add_argument(
+        "--n-critic",
+        type=int,
+        default=1,
+        help="discriminator updates per generator update (phase 3); paper/bce mode uses 1, try higher (e.g. 5) with --discriminator-loss wgan-gp",
+    )
+    parser.add_argument("--lambda-gp", type=float, default=10.0, help="gradient penalty coefficient, wgan-gp mode only")
     parser.add_argument("--lambda-supervised", type=float, default=1.0)
     parser.add_argument("--lambda-recon-joint", type=float, default=0.1)
     parser.add_argument("--lambda-moment", type=float, default=1.0)
     parser.add_argument("--disable-moment-loss", action="store_true")
-    parser.add_argument("--moment-target-batch-size", type=int, default=5000)
+    parser.add_argument("--lambda-diversity", type=float, default=1.0, help="weight on the diversity-matching (synthetic/real std ratio) penalty")
+    parser.add_argument("--disable-diversity-loss", action="store_true")
+    parser.add_argument("--moment-target-batch-size", type=int, default=5000, help="real-path sample size for moment- and diversity-loss targets")
     parser.add_argument("--s0", type=float, default=1.0, help="initial asset price of 'real' training data")
     parser.add_argument("--vol", type=float, default=0.2, help="volatility of 'real' training data (synthetic source)")
     parser.add_argument(
@@ -400,27 +476,42 @@ def main() -> None:
 
     target_skewness: Optional[float] = None
     target_excess_kurtosis: Optional[float] = None
+    target_std: Optional[float] = None
     price_min: Optional[float] = None
     price_max: Optional[float] = None
-    if not args.disable_moment_loss:
-        moment_target_raw = sample_real_raw(args.moment_target_batch_size, args.seq_len)
-        moment_target_price = moment_target_raw[..., price_index : price_index + 1]
-        moment_target_returns = terminal_log_return(moment_target_price)
-        target_skewness = skewness(moment_target_returns)
-        target_excess_kurtosis = excess_kurtosis(moment_target_returns)
+    if not args.disable_moment_loss or not args.disable_diversity_loss:
+        target_sample_raw = sample_real_raw(args.moment_target_batch_size, args.seq_len)
+        target_sample_price = target_sample_raw[..., price_index : price_index + 1]
+        target_sample_returns = terminal_log_return(target_sample_price)
         price_min = scaler.min_vals[price_index].item()
         price_max = scaler.max_vals[price_index].item()
-        print(
-            f"Moment-matching enabled (lambda={args.lambda_moment}): target skewness "
-            f"{target_skewness:+.2f}, target excess kurtosis {target_excess_kurtosis:+.2f} "
-            f"(from {args.moment_target_batch_size} real paths)"
-        )
+
+        if not args.disable_moment_loss:
+            target_skewness = skewness(target_sample_returns)
+            target_excess_kurtosis = excess_kurtosis(target_sample_returns)
+            print(
+                f"Moment-matching enabled (lambda={args.lambda_moment}): target skewness "
+                f"{target_skewness:+.2f}, target excess kurtosis {target_excess_kurtosis:+.2f} "
+                f"(from {args.moment_target_batch_size} real paths)"
+            )
+        else:
+            print("Moment-matching disabled (--disable-moment-loss).")
+
+        if not args.disable_diversity_loss:
+            target_std = target_sample_returns.std().item()
+            print(
+                f"Diversity-matching enabled (lambda={args.lambda_diversity}): target "
+                f"terminal log-return std {target_std:.4f} (from {args.moment_target_batch_size} real paths)"
+            )
+        else:
+            print("Diversity-matching disabled (--disable-diversity-loss).")
     else:
-        print("Moment-matching disabled (--disable-moment-loss).")
+        print("Moment-matching and diversity-matching both disabled.")
 
     trainer = TimeGANTrainer(
         timegan,
         lr=args.lr,
+        discriminator_loss=args.discriminator_loss,
         lambda_gp=args.lambda_gp,
         n_critic=args.n_critic,
         lambda_supervised=args.lambda_supervised,
@@ -428,6 +519,8 @@ def main() -> None:
         lambda_moment=args.lambda_moment,
         target_skewness=target_skewness,
         target_excess_kurtosis=target_excess_kurtosis,
+        lambda_diversity=args.lambda_diversity,
+        target_std=target_std,
         price_min=price_min,
         price_max=price_max,
         device=device,
@@ -455,7 +548,8 @@ def main() -> None:
             print(
                 f"  epoch {epoch:4d}/{args.phase3_epochs}  loss_d={stats['loss_d']:.4f}  "
                 f"loss_adv={stats['loss_adv']:.4f}  loss_supervised={stats['loss_supervised']:.4f}  "
-                f"loss_moment={stats['loss_moment']:.4f}  loss_er={stats['loss_er']:.4f}"
+                f"loss_moment={stats['loss_moment']:.4f}  loss_diversity={stats['loss_diversity']:.4f}  "
+                f"loss_er={stats['loss_er']:.4f}"
             )
 
     checkpoint_path = Path(args.checkpoint)
