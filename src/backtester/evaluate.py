@@ -514,18 +514,27 @@ def _load_policy_checkpoint(
 def _load_all_policies(
     checkpoint_dir: Annotated[Path, "directory containing hedging_agent*.pt checkpoints"],
     device: torch.device,
+    suffix: Annotated[
+        str, "checkpoint filename suffix, e.g. '_timegan' for policies trained against TimeGAN"
+    ] = "",
 ) -> Annotated[
     Tuple[Dict[str, Tuple[Any, bool]], float, float],
     "(policies, strike, implied_vol) -- policies maps display name -> (policy, sequence_policy)",
 ]:
-    """Loads every available architecture's checkpoint, falling back to a
-    short demo MLP training run if none exist at all.
+    """Loads every available architecture's checkpoint.
+
+    With the default (empty) suffix, falls back to a short demo MLP training
+    run if none exist at all -- this is the primary WGAN-GP-trained
+    comparison the CLI always runs. A non-empty suffix (e.g. '_timegan')
+    looks for a distinct, parallel set of checkpoints instead and returns an
+    empty dict with no fallback training if none are found, since that's an
+    optional second comparison, not the primary one.
     """
     checkpoint_paths = {
-        "mlp": checkpoint_dir / "hedging_agent.pt",
-        "rnn": checkpoint_dir / "hedging_agent_rnn.pt",
-        "lstm": checkpoint_dir / "hedging_agent_lstm.pt",
-        "gru": checkpoint_dir / "hedging_agent_gru.pt",
+        "mlp": checkpoint_dir / f"hedging_agent{suffix}.pt",
+        "rnn": checkpoint_dir / f"hedging_agent_rnn{suffix}.pt",
+        "lstm": checkpoint_dir / f"hedging_agent_lstm{suffix}.pt",
+        "gru": checkpoint_dir / f"hedging_agent_gru{suffix}.pt",
     }
 
     policies: Dict[str, Tuple[Any, bool]] = {}
@@ -543,7 +552,7 @@ def _load_all_policies(
         strike, implied_vol = policy_args["strike"], policy_args["implied_vol"]
         print(f"Loaded {display_name} from {path}")
 
-    if policies:
+    if policies or suffix:
         return policies, strike, implied_vol
 
     strike, implied_vol = 1.0, 0.30
@@ -599,3 +608,27 @@ if __name__ == "__main__":
         print(json.dumps(sweep_result, indent=2))
     except FileNotFoundError as e:
         print(e)
+
+    # Optional second comparison: policies trained against TimeGAN instead of
+    # the single-feature WGAN-GP (checkpoints/*_timegan.pt, from
+    # `train_policy.py --generator-type timegan`). Same stress-test scenario
+    # (regime-switching GBM, independent of either generator) for a direct,
+    # apples-to-apples comparison against the run above.
+    timegan_policies, timegan_strike, timegan_implied_vol = _load_all_policies(
+        Path("checkpoints"), device, suffix="_timegan"
+    )
+    if timegan_policies:
+        timegan_result = run_backtest(
+            policies=timegan_policies,
+            strike=timegan_strike,
+            batch_size=2000,
+            seq_len=30,
+            proportional_fee=0.003,
+            implied_vol=timegan_implied_vol,
+            low_vol=0.15,
+            high_vol=0.60,
+            switch_prob=0.10,
+            output_dir="results/timegan",
+            seed=42,
+        )
+        print(json.dumps(timegan_result, indent=2))

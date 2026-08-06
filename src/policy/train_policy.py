@@ -9,7 +9,7 @@ Run directly as a training CLI:
 
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Dict, Optional, Union
+from typing import Annotated, Any, Dict, Optional, Protocol, Union
 
 import torch
 
@@ -21,8 +21,22 @@ if str(_SRC_DIR) not in sys.path:
 
 from environment.market_env import MarketEnvironment  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
+from generator.train_timegan import load_timegan_price_generator  # noqa: E402
 from loss.cvar import CVaRLoss  # noqa: E402
 from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent  # noqa: E402
+
+
+class MarketGenerator(Protocol):
+    """Structural type for anything PolicyTrainer can treat as a fixed market
+    simulator: market_gan.Generator (single-feature WGAN-GP) or
+    generator.train_timegan.TimeGANPriceGenerator (TimeGAN adapter).
+    """
+
+    def sample_noise(
+        self, batch_size: int, seq_len: int, device: Optional[torch.device] = None
+    ) -> torch.Tensor: ...
+
+    def __call__(self, z: torch.Tensor) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price path"]: ...
 
 
 class PolicyTrainer:
@@ -32,7 +46,7 @@ class PolicyTrainer:
         self,
         policy: Union[HedgingAgent, RecurrentHedgingAgent],
         environment: MarketEnvironment,
-        generator: Generator,
+        generator: MarketGenerator,
         cvar_loss: CVaRLoss,
         implied_vol: Annotated[float, "implied volatility fed into the policy state"] = 0.2,
         lr: Annotated[float, "Adam learning rate for policy params and CVaR threshold h"] = 1e-3,
@@ -170,7 +184,21 @@ def main() -> None:
         "--generator-checkpoint",
         type=str,
         default="checkpoints/market_gan.pt",
-        help="checkpoint saved by generator/train_gan.py",
+        help="checkpoint saved by generator/train_gan.py (--generator-type wgan)",
+    )
+    parser.add_argument(
+        "--generator-type",
+        type=str,
+        choices=["wgan", "timegan"],
+        default="wgan",
+        help="wgan = single-feature WGAN-GP (generator/train_gan.py); "
+        "timegan = multi-variate TimeGAN (generator/train_timegan.py), sliced to its price channel",
+    )
+    parser.add_argument(
+        "--timegan-checkpoint",
+        type=str,
+        default="checkpoints/timegan.pt",
+        help="checkpoint saved by generator/train_timegan.py (--generator-type timegan)",
     )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
@@ -194,28 +222,34 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    generator = _load_or_init_generator(
-        Path(args.generator_checkpoint),
-        strike=args.strike,
-        noise_dim=args.noise_dim,
-        hidden_dim=args.gen_hidden_dim,
-        num_layers=args.gen_num_layers,
-    )
+    if args.generator_type == "timegan":
+        generator = load_timegan_price_generator(Path(args.timegan_checkpoint))
+        print(f"Loaded pretrained TimeGAN from {args.timegan_checkpoint}")
+        suffix = "_timegan"
+    else:
+        generator = _load_or_init_generator(
+            Path(args.generator_checkpoint),
+            strike=args.strike,
+            noise_dim=args.noise_dim,
+            hidden_dim=args.gen_hidden_dim,
+            num_layers=args.gen_num_layers,
+        )
+        suffix = ""
 
     if args.alpha_sweep is not None:
         alphas = [float(a) for a in args.alpha_sweep.split(",")]
         for alpha in alphas:
             alpha_str = f"{alpha:.4g}".replace(".", "_")
             checkpoint_path = Path(
-                f"checkpoints/hedging_agent_{args.architecture}_alpha{alpha_str}.pt"
+                f"checkpoints/hedging_agent_{args.architecture}_alpha{alpha_str}{suffix}.pt"
             )
             _train_and_save(args, alpha, checkpoint_path, generator, device)
         return
 
     checkpoint_path = Path(args.checkpoint) if args.checkpoint else Path(
-        "checkpoints/hedging_agent.pt"
+        f"checkpoints/hedging_agent{suffix}.pt"
         if args.architecture == "mlp"
-        else f"checkpoints/hedging_agent_{args.architecture}.pt"
+        else f"checkpoints/hedging_agent_{args.architecture}{suffix}.pt"
     )
     _train_and_save(args, args.cvar_alpha, checkpoint_path, generator, device)
 
@@ -224,7 +258,7 @@ def _train_and_save(
     args: Annotated[Any, "parsed argparse Namespace"],
     alpha: Annotated[float, "CVaR confidence level for this training run"],
     checkpoint_path: Path,
-    generator: Generator,
+    generator: MarketGenerator,
     device: torch.device,
 ) -> None:
     if args.architecture == "mlp":
