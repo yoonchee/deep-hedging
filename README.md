@@ -16,6 +16,12 @@ what matches the paper, what doesn't, and why is in
   they cascade into policy training, plus an explicit **moment-matching loss
   term** that trains the generator to reproduce real markets' skew/kurtosis
   directly, not just what fools the adversarial critic.
+- A **TimeGAN market generator** (Yoon et al. 2019, the paper's actual Part
+  II architecture) -- embedder/recovery/generator/supervisor/discriminator
+  over multi-variate OHLCV data, trained via the paper's 3-phase procedure.
+  Achieves better tail-shape fidelity than the WGAN-GP above, but a lower
+  diversity ratio that translates into worse stress-test hedging results --
+  see `RESULTS.md` for the full story.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
@@ -32,24 +38,26 @@ what matches the paper, what doesn't, and why is in
 ## Project structure
 
 ```
-math_spec.md                  Core formulas: payoff, transaction cost, CVaR, WGAN-GP loss
+math_spec.md                  Core formulas: payoff, transaction cost, CVaR, WGAN-GP + TimeGAN losses
 src/
-  common/stats.py             Shared skewness/excess-kurtosis helpers
+  common/stats.py             Shared skewness/excess-kurtosis/terminal-log-return helpers (tensor + float)
   generator/
-    market_gan.py             WGAN-GP Generator (GRU) + Discriminator (LSTM)
-    data.py                   Real (yfinance) and synthetic GBM data sources
-    train_gan.py              WGAN-GP training CLI
-    validate.py               GAN fidelity checker (mode collapse / mean bias / tail shape)
+    market_gan.py             WGAN-GP Generator (GRU) + Discriminator (LSTM), single-feature
+    timegan.py                TimeGAN: Embedder/Recovery/Generator/Supervisor/Discriminator, multi-feature
+    data.py                   Real (yfinance, single- and multi-feature) and synthetic GBM data sources
+    train_gan.py              WGAN-GP training CLI (+ moment-matching loss)
+    train_timegan.py          TimeGAN 3-phase training CLI (+ moment-matching loss, policy-training adapter)
+    validate.py               GAN fidelity checker (mode collapse / mean bias / tail shape), used by both
   loss/cvar.py                Differentiable CVaR loss (learnable threshold h)
   policy/
     hedging_agent.py          HedgingAgent (MLP) + RecurrentHedgingAgent (RNN/LSTM/GRU)
-    train_policy.py           Policy training CLI (single alpha or alpha sweep)
+    train_policy.py           Policy training CLI (--generator-type wgan|timegan, single alpha or alpha sweep)
   environment/market_env.py   MarketEnvironment: wealth/transaction-cost simulation
   backtester/
-    evaluate.py                Stress-test backtest vs. Black-Scholes
+    evaluate.py                Stress-test backtest vs. Black-Scholes (WGAN-GP- and TimeGAN-trained policies)
     replicate_part1.py         Frictionless Part I paper replication
     plotting.py                Shared chart library
-tests/                         37 tests
+tests/                         66 tests
 results/                       Generated plots + JSON summaries (gitignored inputs: data/, checkpoints/)
 ```
 
@@ -86,6 +94,14 @@ python src/backtester/evaluate.py
 
 # 5. Replicate the paper's frictionless Part I experiment
 python src/backtester/replicate_part1.py --epochs 500
+
+# 6. Optional: train TimeGAN instead (the paper's actual Part II generator)
+# and compare its policies against the WGAN-GP ones from steps 1-4 -- see
+# RESULTS.md for why the two currently disagree on which is "better".
+python src/generator/train_timegan.py --phase1-epochs 500 --phase2-epochs 500 \
+    --phase3-epochs 1500 --data-source yfinance
+python src/policy/train_policy.py --architecture mlp --epochs 200 --generator-type timegan
+python src/backtester/evaluate.py  # also runs the TimeGAN comparison if those checkpoints exist
 ```
 
 Run the tests with:
@@ -116,14 +132,22 @@ trail:
   Black-Scholes) — but Basic RNN and LSTM barely moved, confirming their
   failure is structural (they don't condition on market state at all) and
   independent of the generator fix.
+- **TimeGAN vs. WGAN-GP**: TimeGAN (the paper's actual Part II architecture)
+  achieves *better* skew/kurtosis fidelity than the WGAN-GP+moment-loss
+  generator — but its price-channel diversity is only ~31% of real data's
+  (traced to four compounding sigmoid-bounded transformations), and policies
+  trained against it perform noticeably *worse* on the stress test than the
+  WGAN-GP-trained ones. A more paper-faithful architecture didn't translate
+  into better downstream hedging here — see `RESULTS.md` for the full
+  diagnosis.
 
 ## Known limitations
 
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
 - Basic RNN and LSTM policies don't converge in this setup; GRU and MLP do.
-- Market generator is a single-feature WGAN-GP, not the paper's full
-  multi-variate TimeGAN (embedder/recovery/supervisor architecture).
+- TimeGAN's price-channel diversity is well below real data's, despite
+  excellent skew/kurtosis fidelity — see `RESULTS.md`.
 - No option premium (P₀) term in the wealth formula.
 - Toy-scale networks and training budgets throughout, not the paper's scale.
 

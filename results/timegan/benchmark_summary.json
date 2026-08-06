@@ -1,0 +1,66 @@
+{
+  "config": {
+    "batch_size": 2000,
+    "seq_len": 30,
+    "strike": 1.0,
+    "proportional_fee_bps": 30.0,
+    "implied_vol": 0.2,
+    "stress_regime": {
+      "low_vol": 0.15,
+      "high_vol": 0.6,
+      "switch_prob": 0.1
+    }
+  },
+  "strategies": {
+    "Black-Scholes Delta": {
+      "mean_wealth": -0.6950774192810059,
+      "std_wealth": 0.36890190839767456,
+      "cvar_95": 1.816426396369934,
+      "cvar_99": 2.342271327972412,
+      "skewness": -1.9665019512176514,
+      "excess_kurtosis": 5.338501930236816,
+      "mean_transaction_cost": 0.006449816282838583,
+      "total_transaction_cost": 12.899632453918457
+    },
+    "MLP": {
+      "mean_wealth": -0.4821428656578064,
+      "std_wealth": 3.3737127780914307,
+      "cvar_95": 8.260272026062012,
+      "cvar_99": 26.312896728515625,
+      "skewness": -14.641889572143555,
+      "excess_kurtosis": 252.22264099121094,
+      "mean_transaction_cost": 3.747288428712636e-05,
+      "total_transaction_cost": 0.07494577020406723
+    },
+    "Basic RNN": {
+      "mean_wealth": -0.5545529723167419,
+      "std_wealth": 2.226489543914795,
+      "cvar_95": 4.536037921905518,
+      "cvar_99": 15.100192070007324,
+      "skewness": -12.305253982543945,
+      "excess_kurtosis": 249.35104370117188,
+      "mean_transaction_cost": 0.008342573419213295,
+      "total_transaction_cost": 16.68514633178711
+    },
+    "LSTM": {
+      "mean_wealth": -0.5286758542060852,
+      "std_wealth": 3.3162741661071777,
+      "cvar_95": 7.13519287109375,
+      "cvar_99": 23.699312210083008,
+      "skewness": -11.864102363586426,
+      "excess_kurtosis": 206.35804748535156,
+      "mean_transaction_cost": 0.008942211978137493,
+      "total_transaction_cost": 17.884424209594727
+    },
+    "GRU": {
+      "mean_wealth": -0.5189748406410217,
+      "std_wealth": 3.126889705657959,
+      "cvar_95": 6.797563552856445,
+      "cvar_99": 22.333187103271484,
+      "skewness": -11.545083045959473,
+      "excess_kurtosis": 199.77035522460938,
+      "mean_transaction_cost": 0.006171001587063074,
+      "total_transaction_cost": 12.342002868652344
+    }
+  }
+}
