@@ -1,0 +1,30 @@
+{
+  "config": {
+    "batch_size": 2000,
+    "seq_len": 30,
+    "strike": 1.0,
+    "proportional_fee_bps": 30.0,
+    "implied_vol": 0.3,
+    "stress_regime": {
+      "low_vol": 0.15,
+      "high_vol": 0.6,
+      "switch_prob": 0.1
+    }
+  },
+  "deep_hedging": {
+    "mean_wealth": -0.675933301448822,
+    "std_wealth": 0.6603994965553284,
+    "cvar_95": 2.746990919113159,
+    "cvar_99": 5.875246047973633,
+    "mean_transaction_cost": 0.0032018828205764294,
+    "total_transaction_cost": 6.403765678405762
+  },
+  "black_scholes": {
+    "mean_wealth": -0.6933820843696594,
+    "std_wealth": 0.2846370339393616,
+    "cvar_95": 1.5460727214813232,
+    "cvar_99": 1.9445431232452393,
+    "mean_transaction_cost": 0.00566020468249917,
+    "total_transaction_cost": 11.320409774780273
+  }
+}
