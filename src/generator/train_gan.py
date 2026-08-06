@@ -6,13 +6,27 @@ Implements the critic loss from math_spec.md, section 4:
 
 The discriminator is trained to maximize L_D, i.e. minimize -L_D. The
 generator is trained with the standard WGAN objective to maximize E[D(fake)].
+
+Run directly as a training CLI:
+
+    python src/generator/train_gan.py --epochs 50
 """
 
+import math
+import sys
+from pathlib import Path
 from typing import Annotated, Optional
 
 import torch
 
-from generator.market_gan import Discriminator, Generator
+# Allow `python src/generator/train_gan.py` to resolve `generator.market_gan`
+# the same way pytest's `pythonpath = src` does, regardless of invocation
+# style (direct script path vs. `python -m generator.train_gan`).
+_SRC_DIR = Path(__file__).resolve().parent.parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from generator.market_gan import Discriminator, Generator  # noqa: E402
 
 
 def gradient_penalty(
@@ -119,3 +133,101 @@ class WGANGPTrainer:
 
         loss_g = self.train_generator_step(batch_size, seq_len)
         return {"loss_d": loss_d, "loss_g": loss_g}
+
+
+def sample_real_prices(
+    batch_size: Annotated[int, "number of price paths"],
+    seq_len: Annotated[int, "number of price observations per path"],
+    s0: Annotated[float, "initial asset price S_0"] = 1.0,
+    vol: Annotated[float, "single-regime GBM volatility"] = 0.2,
+    dt: Annotated[float, "time increment per step"] = 1.0,
+) -> Annotated[torch.Tensor, "[Batch, Time_Steps, 1] strictly positive 'real' price paths"]:
+    """Single-regime GBM 'real' market data.
+
+    Stands in for a real historical-price DataLoader, which this project does
+    not yet have; the generator's job is to learn to reproduce this
+    distribution from noise. Swap this for an actual data source once one is
+    available -- the training loop below is agnostic to where `real` comes
+    from as long as it has shape [Batch, Time_Steps, 1].
+    """
+    # [Batch, Time_Steps - 1] i.i.d. standard normal shocks
+    z = torch.randn(batch_size, seq_len - 1)
+
+    # [Batch, Time_Steps - 1] -> [Batch, Time_Steps] (cumulative log-return, S_0 fixed)
+    log_returns = -0.5 * vol**2 * dt + vol * math.sqrt(dt) * z
+    log_prices = torch.cat(
+        [torch.zeros(batch_size, 1), torch.cumsum(log_returns, dim=1)], dim=1
+    )
+
+    # [Batch, Time_Steps] -> [Batch, Time_Steps, 1]
+    prices = s0 * torch.exp(log_prices)
+    return prices.unsqueeze(-1)
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train the WGAN-GP market generator.")
+    parser.add_argument("--epochs", type=int, default=100, help="number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--seq-len", type=int, default=30)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--n-critic", type=int, default=5, help="critic updates per generator update")
+    parser.add_argument("--lambda-gp", type=float, default=10.0, help="gradient penalty coefficient")
+    parser.add_argument("--noise-dim", type=int, default=8)
+    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--s0", type=float, default=1.0, help="initial price of 'real' training data")
+    parser.add_argument("--vol", type=float, default=0.2, help="volatility of 'real' training data")
+    parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="checkpoints/market_gan.pt",
+        help="path to save trained generator/discriminator weights",
+    )
+    args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    generator = Generator(
+        noise_dim=args.noise_dim,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        initial_price=args.s0,
+    )
+    discriminator = Discriminator(input_dim=1, hidden_dim=args.hidden_dim, num_layers=args.num_layers)
+    trainer = WGANGPTrainer(
+        generator,
+        discriminator,
+        lr=args.lr,
+        lambda_gp=args.lambda_gp,
+        n_critic=args.n_critic,
+        device=device,
+    )
+
+    print(f"Training WGAN-GP market generator for {args.epochs} epochs on {device}...")
+    for epoch in range(1, args.epochs + 1):
+        real = sample_real_prices(args.batch_size, args.seq_len, s0=args.s0, vol=args.vol)
+        stats = trainer.train_step(real)
+
+        if epoch == 1 or epoch % args.log_every == 0 or epoch == args.epochs:
+            print(f"epoch {epoch:4d}/{args.epochs}  loss_d={stats['loss_d']:.4f}  loss_g={stats['loss_g']:.4f}")
+
+    checkpoint_path = Path(args.checkpoint)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "generator_state_dict": generator.state_dict(),
+            "discriminator_state_dict": discriminator.state_dict(),
+            "args": vars(args),
+        },
+        checkpoint_path,
+    )
+    print(f"Saved checkpoint to {checkpoint_path}")
+
+
+if __name__ == "__main__":
+    main()
