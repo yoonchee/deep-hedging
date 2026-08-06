@@ -28,7 +28,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from common.stats import excess_kurtosis, skewness  # noqa: E402
+from common.stats import excess_kurtosis, skewness, terminal_log_return  # noqa: E402
 from generator.data import HistoricalPriceLoader, sample_real_prices  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 
@@ -59,14 +59,6 @@ MEAN_BIAS_WARNING_THRESHOLD_STD = 2.0
 # backtest (see results/benchmark_summary.json before this fix).
 SKEW_WARNING_THRESHOLD = 0.5
 KURTOSIS_WARNING_THRESHOLD = 2.0
-
-
-def _terminal_log_return(
-    prices: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price paths"]
-) -> Annotated[torch.Tensor, "[Batch] log(S_T / S_0)"]:
-    s0 = prices[:, 0, 0]
-    sT = prices[:, -1, 0]
-    return torch.log(sT / s0)
 
 
 def _return_stats(x: Annotated[torch.Tensor, "[Batch] terminal log-returns"]) -> Dict[str, float]:
@@ -169,8 +161,8 @@ def validate_generator_fidelity(
     All four run automatically after every `train_gan.py` run, before any of
     them can cascade into a policy trained against the generator.
     """
-    real_returns = _terminal_log_return(real_prices)
-    synthetic_returns = _terminal_log_return(synthetic_prices)
+    real_returns = terminal_log_return(real_prices)
+    synthetic_returns = terminal_log_return(synthetic_prices)
 
     real_stats = _return_stats(real_returns)
     synthetic_stats = _return_stats(synthetic_returns)

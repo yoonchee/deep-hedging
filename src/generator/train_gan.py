@@ -26,6 +26,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from common.stats import excess_kurtosis, excess_kurtosis_tensor, skewness, skewness_tensor, terminal_log_return  # noqa: E402
 from generator.data import HistoricalPriceLoader, sample_real_prices  # noqa: E402
 from generator.market_gan import Discriminator, Generator  # noqa: E402
 from generator.validate import validate_generator_fidelity  # noqa: E402
@@ -76,6 +77,15 @@ class WGANGPTrainer:
         betas: Annotated[tuple, "Adam beta coefficients"] = (0.5, 0.9),
         lambda_gp: Annotated[float, "gradient penalty coefficient (lambda)"] = 10.0,
         n_critic: Annotated[int, "number of critic updates per generator update"] = 5,
+        lambda_moment: Annotated[
+            float, "weight on the skew/kurtosis moment-matching penalty (0 disables it)"
+        ] = 1.0,
+        target_skewness: Annotated[
+            Optional[float], "real-data terminal log-return skewness to match; None disables moment loss"
+        ] = None,
+        target_excess_kurtosis: Annotated[
+            Optional[float], "real-data terminal log-return excess kurtosis to match; None disables moment loss"
+        ] = None,
         device: Optional[torch.device] = None,
     ) -> None:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -83,6 +93,9 @@ class WGANGPTrainer:
         self.discriminator = discriminator.to(self.device)
         self.lambda_gp = lambda_gp
         self.n_critic = n_critic
+        self.lambda_moment = lambda_moment
+        self.target_skewness = target_skewness
+        self.target_excess_kurtosis = target_excess_kurtosis
 
         self.optimizer_g = torch.optim.Adam(self.generator.parameters(), lr=lr, betas=betas)
         self.optimizer_d = torch.optim.Adam(self.discriminator.parameters(), lr=lr, betas=betas)
@@ -112,29 +125,45 @@ class WGANGPTrainer:
         self,
         batch_size: Annotated[int, "number of paths to sample"],
         seq_len: Annotated[int, "number of time steps per path"],
-    ) -> Annotated[float, "generator loss value for this step"]:
+    ) -> Annotated[dict, "{'loss_g': float, 'loss_adv': float, 'loss_moment': float}"]:
         z = self.generator.sample_noise(batch_size, seq_len, device=self.device)
         fake = self.generator(z)
 
         # Maximize E[D(fake)] <=> minimize -E[D(fake)]
-        loss_g = -self.discriminator(fake).mean()
+        loss_adv = -self.discriminator(fake).mean()
+
+        # Moment-matching penalty: nudges the generator's terminal log-return
+        # skew/kurtosis toward the real data's, since the adversarial loss
+        # alone under-penalizes missing rare tail events (see RESULTS.md,
+        # "The GAN fidelity story" -- the critic can be fooled by matching
+        # mean/variance while ignoring tail shape entirely).
+        loss_moment = torch.zeros((), device=self.device)
+        if self.target_skewness is not None and self.target_excess_kurtosis is not None:
+            fake_returns = terminal_log_return(fake)
+            fake_skew = skewness_tensor(fake_returns)
+            fake_kurtosis = excess_kurtosis_tensor(fake_returns)
+            loss_moment = (fake_skew - self.target_skewness) ** 2 + (
+                fake_kurtosis - self.target_excess_kurtosis
+            ) ** 2
+
+        loss_g = loss_adv + self.lambda_moment * loss_moment
 
         self.optimizer_g.zero_grad()
         loss_g.backward()
         self.optimizer_g.step()
-        return loss_g.item()
+        return {"loss_g": loss_g.item(), "loss_adv": loss_adv.item(), "loss_moment": loss_moment.item()}
 
     def train_step(
         self, real: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] real price paths"]
-    ) -> Annotated[dict, "{'loss_d': float, 'loss_g': Optional[float]}"]:
+    ) -> Annotated[dict, "{'loss_d': float, 'loss_g': float, 'loss_adv': float, 'loss_moment': float}"]:
         batch_size, seq_len, _ = real.shape
 
         loss_d = None
         for _ in range(self.n_critic):
             loss_d = self.train_discriminator_step(real)
 
-        loss_g = self.train_generator_step(batch_size, seq_len)
-        return {"loss_d": loss_d, "loss_g": loss_g}
+        generator_stats = self.train_generator_step(batch_size, seq_len)
+        return {"loss_d": loss_d, **generator_stats}
 
 
 def main() -> None:
@@ -147,6 +176,23 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--n-critic", type=int, default=5, help="critic updates per generator update")
     parser.add_argument("--lambda-gp", type=float, default=10.0, help="gradient penalty coefficient")
+    parser.add_argument(
+        "--lambda-moment",
+        type=float,
+        default=1.0,
+        help="weight on the skew/kurtosis moment-matching penalty (see RESULTS.md tail-shape gap)",
+    )
+    parser.add_argument(
+        "--disable-moment-loss",
+        action="store_true",
+        help="train with the plain adversarial loss only, no moment-matching penalty",
+    )
+    parser.add_argument(
+        "--moment-target-batch-size",
+        type=int,
+        default=5000,
+        help="real-data sample size used once, up front, to fix the target skew/kurtosis",
+    )
     parser.add_argument("--noise-dim", type=int, default=8)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
@@ -195,14 +241,6 @@ def main() -> None:
         initial_price=args.s0,
     )
     discriminator = Discriminator(input_dim=1, hidden_dim=args.hidden_dim, num_layers=args.num_layers)
-    trainer = WGANGPTrainer(
-        generator,
-        discriminator,
-        lr=args.lr,
-        lambda_gp=args.lambda_gp,
-        n_critic=args.n_critic,
-        device=device,
-    )
 
     if args.data_source == "yfinance":
         loader = HistoricalPriceLoader(
@@ -226,13 +264,44 @@ def main() -> None:
         def sample_real(batch_size: int, seq_len: int) -> torch.Tensor:
             return sample_real_prices(batch_size, seq_len, s0=args.s0, vol=args.vol)
 
+    target_skewness = None
+    target_excess_kurtosis = None
+    if not args.disable_moment_loss:
+        moment_target_real = sample_real(args.moment_target_batch_size, args.seq_len)
+        moment_target_returns = terminal_log_return(moment_target_real)
+        target_skewness = skewness(moment_target_returns)
+        target_excess_kurtosis = excess_kurtosis(moment_target_returns)
+        print(
+            f"Moment-matching enabled (lambda={args.lambda_moment}): target skewness "
+            f"{target_skewness:+.2f}, target excess kurtosis {target_excess_kurtosis:+.2f} "
+            f"(from {args.moment_target_batch_size} real paths)"
+        )
+    else:
+        print("Moment-matching disabled (--disable-moment-loss): plain adversarial loss only.")
+
+    trainer = WGANGPTrainer(
+        generator,
+        discriminator,
+        lr=args.lr,
+        lambda_gp=args.lambda_gp,
+        n_critic=args.n_critic,
+        lambda_moment=args.lambda_moment,
+        target_skewness=target_skewness,
+        target_excess_kurtosis=target_excess_kurtosis,
+        device=device,
+    )
+
     print(f"Training WGAN-GP market generator for {args.epochs} epochs on {device}...")
     for epoch in range(1, args.epochs + 1):
         real = sample_real(args.batch_size, args.seq_len)
         stats = trainer.train_step(real)
 
         if epoch == 1 or epoch % args.log_every == 0 or epoch == args.epochs:
-            print(f"epoch {epoch:4d}/{args.epochs}  loss_d={stats['loss_d']:.4f}  loss_g={stats['loss_g']:.4f}")
+            print(
+                f"epoch {epoch:4d}/{args.epochs}  loss_d={stats['loss_d']:.4f}  "
+                f"loss_g={stats['loss_g']:.4f}  loss_adv={stats['loss_adv']:.4f}  "
+                f"loss_moment={stats['loss_moment']:.4f}"
+            )
 
     checkpoint_path = Path(args.checkpoint)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,8 +319,12 @@ def main() -> None:
         print("Running real-vs-synthetic fidelity check...")
         generator.eval()
         with torch.no_grad():
-            real_check = sample_real(args.batch_size, args.seq_len)
-            z = generator.sample_noise(args.batch_size, args.seq_len)
+            # Skew/kurtosis are high-order moments with high sampling
+            # variance -- args.batch_size (the WGAN minibatch, e.g. 64) is
+            # far too small to estimate them reliably, so this reuses the
+            # larger moment_target_batch_size sample instead.
+            real_check = sample_real(args.moment_target_batch_size, args.seq_len)
+            z = generator.sample_noise(args.moment_target_batch_size, args.seq_len)
             synthetic_check = generator(z)
         validate_generator_fidelity(
             real_check, synthetic_check, output_dir=Path(args.fidelity_output_dir)
