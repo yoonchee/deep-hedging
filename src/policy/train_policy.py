@@ -9,7 +9,7 @@ Run directly as a training CLI:
 
 import sys
 from pathlib import Path
-from typing import Annotated, Dict, Optional
+from typing import Annotated, Any, Dict, Optional, Union
 
 import torch
 
@@ -22,7 +22,7 @@ if str(_SRC_DIR) not in sys.path:
 from environment.market_env import MarketEnvironment  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from loss.cvar import CVaRLoss  # noqa: E402
-from policy.hedging_agent import HedgingAgent  # noqa: E402
+from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent  # noqa: E402
 
 
 class PolicyTrainer:
@@ -30,13 +30,16 @@ class PolicyTrainer:
 
     def __init__(
         self,
-        policy: HedgingAgent,
+        policy: Union[HedgingAgent, RecurrentHedgingAgent],
         environment: MarketEnvironment,
         generator: Generator,
         cvar_loss: CVaRLoss,
         implied_vol: Annotated[float, "implied volatility fed into the policy state"] = 0.2,
         lr: Annotated[float, "Adam learning rate for policy params and CVaR threshold h"] = 1e-3,
         device: Optional[torch.device] = None,
+        sequence_policy: Annotated[
+            bool, "True for a RecurrentHedgingAgent (whole-path) policy"
+        ] = False,
     ) -> None:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = policy.to(self.device)
@@ -44,6 +47,7 @@ class PolicyTrainer:
         self.environment = environment
         self.cvar_loss = cvar_loss.to(self.device)
         self.implied_vol = implied_vol
+        self.sequence_policy = sequence_policy
 
         params = list(self.policy.parameters()) + list(self.cvar_loss.parameters())
         self.optimizer = torch.optim.Adam(params, lr=lr)
@@ -59,7 +63,9 @@ class PolicyTrainer:
             z = self.generator.sample_noise(batch_size, seq_len, device=self.device)
             prices = self.generator(z)  # [Batch, seq_len, 1]
 
-        wealth = self.environment.simulate(self.policy, prices, self.implied_vol)  # [Batch]
+        wealth = self.environment.simulate(
+            self.policy, prices, self.implied_vol, sequence_policy=self.sequence_policy
+        )  # [Batch]
         loss = self.cvar_loss(wealth)
 
         self.optimizer.zero_grad()
@@ -121,8 +127,18 @@ def main() -> None:
     parser.add_argument("--implied-vol", type=float, default=0.2)
     parser.add_argument("--cvar-alpha", type=float, default=0.95)
     parser.add_argument("--dt", type=float, default=1.0)
-    parser.add_argument("--hidden-dim", type=int, default=32, help="policy hidden layer width")
-    parser.add_argument("--num-hidden-layers", type=int, default=2, help="policy hidden layer count")
+    parser.add_argument(
+        "--architecture",
+        type=str,
+        choices=["mlp", "rnn", "lstm", "gru"],
+        default="mlp",
+        help="mlp = feed-forward HedgingAgent (delta_{t-1} fed explicitly); "
+        "rnn/lstm/gru = RecurrentHedgingAgent, a true recurrent policy over the whole path",
+    )
+    parser.add_argument("--hidden-dim", type=int, default=32, help="policy hidden layer width (mlp)")
+    parser.add_argument("--num-hidden-layers", type=int, default=2, help="policy hidden layer count (mlp)")
+    parser.add_argument("--rnn-hidden-dim", type=int, default=64, help="recurrent hidden state size (rnn/lstm/gru)")
+    parser.add_argument("--rnn-num-layers", type=int, default=2, help="stacked recurrent layers (rnn/lstm/gru)")
     parser.add_argument("--noise-dim", type=int, default=8, help="fallback generator noise dim")
     parser.add_argument("--gen-hidden-dim", type=int, default=64, help="fallback generator hidden dim")
     parser.add_argument("--gen-num-layers", type=int, default=2, help="fallback generator layer count")
@@ -137,8 +153,17 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="checkpoints/hedging_agent.pt",
-        help="path to save the trained policy weights",
+        default=None,
+        help="path to save the trained policy weights "
+        "(default: checkpoints/hedging_agent.pt for mlp, checkpoints/hedging_agent_<architecture>.pt otherwise)",
+    )
+    parser.add_argument(
+        "--alpha-sweep",
+        type=str,
+        default=None,
+        help="comma-separated CVaR alphas to train separate checkpoints for "
+        "(e.g. '0.5,0.75,0.9,0.95,0.99'), overriding --cvar-alpha and --checkpoint; "
+        "saves to checkpoints/hedging_agent_<architecture>_alpha<alpha>.pt per value",
     )
     args = parser.parse_args()
 
@@ -152,11 +177,47 @@ def main() -> None:
         hidden_dim=args.gen_hidden_dim,
         num_layers=args.gen_num_layers,
     )
-    policy = HedgingAgent(hidden_dim=args.hidden_dim, num_hidden_layers=args.num_hidden_layers)
+
+    if args.alpha_sweep is not None:
+        alphas = [float(a) for a in args.alpha_sweep.split(",")]
+        for alpha in alphas:
+            alpha_str = f"{alpha:.4g}".replace(".", "_")
+            checkpoint_path = Path(
+                f"checkpoints/hedging_agent_{args.architecture}_alpha{alpha_str}.pt"
+            )
+            _train_and_save(args, alpha, checkpoint_path, generator, device)
+        return
+
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else Path(
+        "checkpoints/hedging_agent.pt"
+        if args.architecture == "mlp"
+        else f"checkpoints/hedging_agent_{args.architecture}.pt"
+    )
+    _train_and_save(args, args.cvar_alpha, checkpoint_path, generator, device)
+
+
+def _train_and_save(
+    args: Annotated[Any, "parsed argparse Namespace"],
+    alpha: Annotated[float, "CVaR confidence level for this training run"],
+    checkpoint_path: Path,
+    generator: Generator,
+    device: torch.device,
+) -> None:
+    if args.architecture == "mlp":
+        policy = HedgingAgent(hidden_dim=args.hidden_dim, num_hidden_layers=args.num_hidden_layers)
+        sequence_policy = False
+    else:
+        policy = RecurrentHedgingAgent(
+            cell_type=args.architecture,
+            hidden_dim=args.rnn_hidden_dim,
+            num_layers=args.rnn_num_layers,
+        )
+        sequence_policy = True
+
     environment = MarketEnvironment(
         strike=args.strike, proportional_fee=args.proportional_fee_bps / 1e4, dt=args.dt
     )
-    cvar_loss = CVaRLoss(alpha=args.cvar_alpha)
+    cvar_loss = CVaRLoss(alpha=alpha)
 
     trainer = PolicyTrainer(
         policy,
@@ -166,9 +227,13 @@ def main() -> None:
         implied_vol=args.implied_vol,
         lr=args.lr,
         device=device,
+        sequence_policy=sequence_policy,
     )
 
-    print(f"Training Deep Hedging policy for {args.epochs} epochs on {device}...")
+    print(
+        f"Training Deep Hedging policy ({args.architecture}, alpha={alpha}) "
+        f"for {args.epochs} epochs on {device}..."
+    )
     for epoch in range(1, args.epochs + 1):
         stats = trainer.train_step(args.batch_size, args.seq_len)
 
@@ -178,13 +243,14 @@ def main() -> None:
                 f"cvar_loss={stats['loss']:.4f}  mean_wealth={stats['mean_wealth']:.4f}"
             )
 
-    checkpoint_path = Path(args.checkpoint)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    saved_args = dict(vars(args))
+    saved_args["cvar_alpha"] = alpha  # reflect the actual alpha used for this checkpoint
     torch.save(
         {
             "policy_state_dict": policy.state_dict(),
             "cvar_h": cvar_loss.h.item(),
-            "args": vars(args),
+            "args": saved_args,
         },
         checkpoint_path,
     )

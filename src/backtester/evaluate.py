@@ -1,18 +1,21 @@
-"""Backtesting suite: Deep Hedging vs. analytic Black-Scholes delta hedging.
+"""Backtesting suite: Deep Hedging (MLP / Basic RNN / LSTM / GRU) vs. analytic
+Black-Scholes delta hedging.
 
-Stress-tests a trained Deep Hedging policy (src/policy/hedging_agent.py)
+Stress-tests every available trained policy (src/policy/hedging_agent.py)
 against the closed-form Black-Scholes delta strategy on synthetic price
 paths with regime-switching volatility and high transaction friction (10-50
-bps), then reports PnL distributions, CVaR 95%/99% risk metrics (per
-math_spec.md section 3), and total transaction costs incurred (per
-math_spec.md section 2).
+bps), then reports PnL distributions, CVaR 95%/99% + skewness/excess
+kurtosis (per math_spec.md section 3), and total transaction costs incurred
+(per math_spec.md section 2) -- mirroring the result tables and comparison
+charts in Kim (2021), "Deep Hedging, Generative Adversarial Networks, and
+Beyond", which compares exactly these architectures against Black-Scholes.
 """
 
 import json
 import math
 import sys
 from pathlib import Path
-from typing import Annotated, Dict, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib
 
@@ -29,18 +32,32 @@ if str(_SRC_DIR) not in sys.path:
 from environment.market_env import MarketEnvironment  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from loss.cvar import CVaRLoss  # noqa: E402
-from policy.hedging_agent import HedgingAgent  # noqa: E402
+from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent  # noqa: E402
 from policy.train_policy import PolicyTrainer  # noqa: E402
 
-# Categorical colors (fixed order, project dataviz palette slots 1 & 2):
-# Deep Hedging is always blue, Black-Scholes Delta is always orange.
-COLOR_DEEP_HEDGING = "#2a78d6"
-COLOR_BLACK_SCHOLES = "#eb6834"
+# Fixed per-strategy colors (project dataviz palette, categorical slots 1-5).
+# Color follows the entity, never its rank: a strategy keeps its color
+# whether it's plotted alongside all four others or alone.
+STRATEGY_COLORS: Dict[str, str] = {
+    "Black-Scholes Delta": "#2a78d6",  # slot 1 blue -- fixed baseline reference
+    "MLP": "#eb6834",  # slot 2 orange
+    "Basic RNN": "#1baf7a",  # slot 3 aqua
+    "LSTM": "#eda100",  # slot 4 yellow
+    "GRU": "#e87ba4",  # slot 5 magenta
+}
 COLOR_SURFACE = "#fcfcfb"
 COLOR_TEXT_PRIMARY = "#0b0b0b"
 COLOR_TEXT_SECONDARY = "#52514e"
 COLOR_GRID = "#e1e0d9"
 COLOR_BASELINE = "#c3c2b7"
+
+# Maps train_policy.py's --architecture choice to a display name.
+ARCHITECTURE_DISPLAY_NAMES: Dict[str, str] = {
+    "mlp": "MLP",
+    "rnn": "Basic RNN",
+    "lstm": "LSTM",
+    "gru": "GRU",
+}
 
 
 # -----------------------------------------------------------------------------
@@ -158,6 +175,16 @@ def empirical_cvar(
     return tail.mean().item()
 
 
+def _skewness(x: Annotated[torch.Tensor, "[Batch] samples"]) -> float:
+    centered = x - x.mean()
+    return (centered.pow(3).mean() / centered.pow(2).mean().pow(1.5)).item()
+
+
+def _excess_kurtosis(x: Annotated[torch.Tensor, "[Batch] samples"]) -> float:
+    centered = x - x.mean()
+    return (centered.pow(4).mean() / centered.pow(2).mean().pow(2) - 3.0).item()
+
+
 def _summarize_strategy(
     wealth: Annotated[torch.Tensor, "[Batch] terminal wealth"],
     total_cost: Annotated[torch.Tensor, "[Batch] total transaction cost per path"],
@@ -167,6 +194,8 @@ def _summarize_strategy(
         "std_wealth": wealth.std().item(),
         "cvar_95": empirical_cvar(wealth, 0.95),
         "cvar_99": empirical_cvar(wealth, 0.99),
+        "skewness": _skewness(wealth),
+        "excess_kurtosis": _excess_kurtosis(wealth),
         "mean_transaction_cost": total_cost.mean().item(),
         "total_transaction_cost": total_cost.sum().item(),
     }
@@ -192,31 +221,28 @@ def _style_axes(ax: "plt.Axes") -> None:
     ax.title.set_color(COLOR_TEXT_PRIMARY)
 
 
-def _plot_pnl_distribution(
-    wealth_dh: torch.Tensor, wealth_bs: torch.Tensor, path: Path
-) -> None:
-    fig, ax = plt.subplots(figsize=(8, 5), facecolor=COLOR_SURFACE)
+def _ordered_strategy_names(names: Annotated[Any, "iterable of strategy names present"]) -> List[str]:
+    """Orders strategy names by their fixed slot in STRATEGY_COLORS."""
+    present = set(names)
+    return [name for name in STRATEGY_COLORS if name in present]
+
+
+def _plot_pnl_distribution(wealth_by_strategy: Dict[str, torch.Tensor], path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(9, 5.5), facecolor=COLOR_SURFACE)
     bins = 40
-    ax.hist(
-        wealth_dh.detach().numpy(),
-        bins=bins,
-        alpha=0.6,
-        color=COLOR_DEEP_HEDGING,
-        label="Deep Hedging",
-        zorder=2,
-    )
-    ax.hist(
-        wealth_bs.detach().numpy(),
-        bins=bins,
-        alpha=0.6,
-        color=COLOR_BLACK_SCHOLES,
-        label="Black-Scholes Delta",
-        zorder=2,
-    )
+    for name in _ordered_strategy_names(wealth_by_strategy):
+        ax.hist(
+            wealth_by_strategy[name].detach().numpy(),
+            bins=bins,
+            alpha=0.55,
+            color=STRATEGY_COLORS[name],
+            label=name,
+            zorder=2,
+        )
     ax.axvline(0.0, color=COLOR_BASELINE, linewidth=1.0, zorder=1)
     ax.set_xlabel("Terminal Wealth")
     ax.set_ylabel("Frequency")
-    ax.set_title("Final PnL Distribution: Deep Hedging vs. Black-Scholes Delta")
+    ax.set_title("Final PnL Distribution")
     _style_axes(ax)
     ax.legend(frameon=False, labelcolor=COLOR_TEXT_PRIMARY)
     fig.tight_layout()
@@ -224,30 +250,25 @@ def _plot_pnl_distribution(
     plt.close(fig)
 
 
-def _plot_cvar_comparison(summary: Dict, path: Path) -> None:
+def _plot_cvar_comparison(summary: Dict[str, Dict[str, float]], path: Path) -> None:
+    names = _ordered_strategy_names(summary.keys())
     labels = ["CVaR 95%", "CVaR 99%"]
-    dh_values = [summary["deep_hedging"]["cvar_95"], summary["deep_hedging"]["cvar_99"]]
-    bs_values = [summary["black_scholes"]["cvar_95"], summary["black_scholes"]["cvar_99"]]
-
     x = list(range(len(labels)))
-    width = 0.35
-    fig, ax = plt.subplots(figsize=(6, 5), facecolor=COLOR_SURFACE)
-    ax.bar(
-        [i - width / 2 for i in x],
-        dh_values,
-        width,
-        color=COLOR_DEEP_HEDGING,
-        label="Deep Hedging",
-        zorder=2,
-    )
-    ax.bar(
-        [i + width / 2 for i in x],
-        bs_values,
-        width,
-        color=COLOR_BLACK_SCHOLES,
-        label="Black-Scholes Delta",
-        zorder=2,
-    )
+    n = len(names)
+    width = 0.8 / max(n, 1)
+
+    fig, ax = plt.subplots(figsize=(7, 5.5), facecolor=COLOR_SURFACE)
+    for i, name in enumerate(names):
+        offset = (i - (n - 1) / 2) * width
+        values = [summary[name]["cvar_95"], summary[name]["cvar_99"]]
+        ax.bar(
+            [xi + offset for xi in x],
+            values,
+            width,
+            color=STRATEGY_COLORS[name],
+            label=name,
+            zorder=2,
+        )
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("CVaR (Expected Shortfall of Loss)")
@@ -259,15 +280,13 @@ def _plot_cvar_comparison(summary: Dict, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_transaction_costs(
-    cost_dh: torch.Tensor, cost_bs: torch.Tensor, path: Path
-) -> None:
-    labels = ["Deep Hedging", "Black-Scholes Delta"]
-    totals = [cost_dh.sum().item(), cost_bs.sum().item()]
-    colors = [COLOR_DEEP_HEDGING, COLOR_BLACK_SCHOLES]
+def _plot_transaction_costs(cost_by_strategy: Dict[str, torch.Tensor], path: Path) -> None:
+    names = _ordered_strategy_names(cost_by_strategy)
+    totals = [cost_by_strategy[name].sum().item() for name in names]
+    colors = [STRATEGY_COLORS[name] for name in names]
 
-    fig, ax = plt.subplots(figsize=(6, 5), facecolor=COLOR_SURFACE)
-    ax.bar(labels, totals, color=colors, width=0.5, zorder=2)
+    fig, ax = plt.subplots(figsize=(7, 5.5), facecolor=COLOR_SURFACE)
+    ax.bar(names, totals, color=colors, width=0.5, zorder=2)
     ax.set_ylabel("Total Transaction Cost (aggregate over all paths)")
     ax.set_title("Transaction Costs Incurred")
     _style_axes(ax)
@@ -277,17 +296,129 @@ def _plot_transaction_costs(
 
 
 # -----------------------------------------------------------------------------
+# Delta-convexity diagnostic (paper Figures 5/8/11): confirms the learned
+# policy recovers a Black-Scholes-like convex Delta-vs-Spot curve.
+# -----------------------------------------------------------------------------
+
+
+def _delta_grid_stepwise(
+    policy_obj: Annotated[Any, "a stepwise HedgingPolicy callable"],
+    spot_grid: Annotated[torch.Tensor, "[Grid] spot prices to sweep"],
+    t: Annotated[int, "hedge step index"],
+    n_steps: Annotated[int, "total number of hedge steps"],
+    strike: float,
+    implied_vol: float,
+    dt: float,
+) -> Annotated[torch.Tensor, "[Grid] delta_t as a function of spot"]:
+    grid_size = spot_grid.shape[0]
+    S = spot_grid.reshape(grid_size, 1)
+    delta_prev = torch.zeros(grid_size, 1)
+    tau = torch.full((grid_size, 1), dt * (n_steps - t))
+    iv = torch.full((grid_size, 1), implied_vol)
+    state = torch.cat([S, delta_prev, tau, iv], dim=-1)  # [Grid, 4]
+    with torch.no_grad():
+        return policy_obj(state).squeeze(-1)  # [Grid]
+
+
+def _delta_grid_sequence(
+    policy_obj: Annotated[Any, "a SequenceHedgingPolicy callable"],
+    spot_grid: Annotated[torch.Tensor, "[Grid] spot prices to sweep"],
+    t: Annotated[int, "hedge step index"],
+    strike: float,
+) -> Annotated[torch.Tensor, "[Grid] delta_t as a function of spot"]:
+    # Synthetic price path: flat at strike for steps 0..t-1, then the swept
+    # spot value at step t, with one trailing duplicate (the policy's
+    # forward pass drops the final price -- no hedge decision is needed at
+    # the path's last observation, so a spare value is appended to recover
+    # delta_t from history S_0..S_t).
+    grid_size = spot_grid.shape[0]
+    flat_part = torch.full((grid_size, t), strike)
+    spot_col = spot_grid.reshape(grid_size, 1)
+    prices = torch.cat([flat_part, spot_col, spot_col], dim=1).unsqueeze(-1)  # [Grid, t+2, 1]
+    with torch.no_grad():
+        delta_path = policy_obj(prices)  # [Grid, t+1, 1]
+    return delta_path[:, -1, 0]  # [Grid]
+
+
+def _plot_delta_convexity(
+    all_strategies: Dict[str, Tuple[Any, bool]],
+    strike: float,
+    implied_vol: float,
+    n_steps: Annotated[int, "total number of hedge steps (seq_len - 1)"],
+    dt: float,
+    path: Path,
+    time_steps: Optional[List[int]] = None,
+) -> None:
+    if time_steps is None:
+        candidates = [0, 1, 5, 10, 15, n_steps - 1]
+        time_steps = sorted({t for t in candidates if 0 <= t < n_steps})
+
+    spot_grid = torch.linspace(0.8 * strike, 1.2 * strike, 60)
+
+    n_plots = len(time_steps)
+    n_cols = min(3, n_plots)
+    n_rows = math.ceil(n_plots / n_cols)
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=(4.2 * n_cols, 3.6 * n_rows), facecolor=COLOR_SURFACE
+    )
+    axes = [axes] if n_plots == 1 else axes.flatten()
+
+    for ax, t in zip(axes, time_steps):
+        for name in _ordered_strategy_names(all_strategies.keys()):
+            policy_obj, sequence_policy = all_strategies[name]
+            if hasattr(policy_obj, "eval"):
+                policy_obj.eval()
+            if sequence_policy:
+                deltas = _delta_grid_sequence(policy_obj, spot_grid, t, strike)
+            else:
+                deltas = _delta_grid_stepwise(
+                    policy_obj, spot_grid, t, n_steps, strike, implied_vol, dt
+                )
+            ax.scatter(
+                spot_grid.numpy(),
+                deltas.numpy(),
+                s=10,
+                alpha=0.8,
+                color=STRATEGY_COLORS[name],
+                label=name,
+                zorder=2,
+            )
+        ax.set_title(f"Delta at Time {t}")
+        ax.set_xlabel("Spot")
+        ax.set_ylabel("Delta")
+        ax.set_ylim(-0.05, 1.05)
+        _style_axes(ax)
+
+    for ax in axes[n_plots:]:
+        ax.axis("off")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="upper center", ncol=len(labels), frameon=False,
+        labelcolor=COLOR_TEXT_PRIMARY, bbox_to_anchor=(0.5, 1.05),
+    )
+    fig.suptitle("Delta Convexity Across Time Steps", color=COLOR_TEXT_PRIMARY, y=1.10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=COLOR_SURFACE, bbox_inches="tight")
+    plt.close(fig)
+
+
+# -----------------------------------------------------------------------------
 # 4. Backtest orchestration
 # -----------------------------------------------------------------------------
 
 
 def run_backtest(
-    deep_hedging_policy: HedgingAgent,
+    policies: Annotated[
+        Dict[str, Tuple[Any, bool]],
+        "{display_name: (policy_object, sequence_policy_bool)}; "
+        "'Black-Scholes Delta' is added automatically and should not be included",
+    ],
     strike: Annotated[float, "option strike price K"],
     batch_size: Annotated[int, "number of stress test paths"] = 2000,
     seq_len: Annotated[int, "number of price observations per path"] = 30,
     proportional_fee: Annotated[float, "kappa; e.g. 0.003 = 30 bps"] = 0.003,
-    implied_vol: Annotated[float, "implied vol fed into both policies' state"] = 0.30,
+    implied_vol: Annotated[float, "implied vol fed into every policy's state"] = 0.30,
     low_vol: Annotated[float, "stress regime: calm-period volatility"] = 0.15,
     high_vol: Annotated[float, "stress regime: turbulent-period volatility"] = 0.60,
     switch_prob: Annotated[float, "stress regime: per-step switch probability"] = 0.10,
@@ -308,14 +439,26 @@ def run_backtest(
     )
 
     environment = MarketEnvironment(strike=strike, proportional_fee=proportional_fee, dt=dt)
-    bs_policy = BlackScholesDeltaPolicy(strike=strike)
 
-    deep_hedging_policy.eval()
-    with torch.no_grad():
-        wealth_dh, cost_dh = environment.simulate_with_costs(
-            deep_hedging_policy, prices, implied_vol
-        )
-        wealth_bs, cost_bs = environment.simulate_with_costs(bs_policy, prices, implied_vol)
+    all_strategies: Dict[str, Tuple[Any, bool]] = {
+        "Black-Scholes Delta": (BlackScholesDeltaPolicy(strike=strike), False)
+    }
+    all_strategies.update(policies)
+
+    wealth_by_strategy: Dict[str, torch.Tensor] = {}
+    cost_by_strategy: Dict[str, torch.Tensor] = {}
+    strategy_summary: Dict[str, Dict[str, float]] = {}
+
+    for name, (policy_obj, sequence_policy) in all_strategies.items():
+        if hasattr(policy_obj, "eval"):
+            policy_obj.eval()
+        with torch.no_grad():
+            wealth, cost = environment.simulate_with_costs(
+                policy_obj, prices, implied_vol, sequence_policy=sequence_policy
+            )
+        wealth_by_strategy[name] = wealth
+        cost_by_strategy[name] = cost
+        strategy_summary[name] = _summarize_strategy(wealth, cost)
 
     summary = {
         "config": {
@@ -330,16 +473,23 @@ def run_backtest(
                 "switch_prob": switch_prob,
             },
         },
-        "deep_hedging": _summarize_strategy(wealth_dh, cost_dh),
-        "black_scholes": _summarize_strategy(wealth_bs, cost_bs),
+        "strategies": strategy_summary,
     }
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _plot_pnl_distribution(wealth_dh, wealth_bs, output_dir / "pnl_distribution.png")
-    _plot_cvar_comparison(summary, output_dir / "cvar_comparison.png")
-    _plot_transaction_costs(cost_dh, cost_bs, output_dir / "transaction_costs.png")
+    _plot_pnl_distribution(wealth_by_strategy, output_dir / "pnl_distribution.png")
+    _plot_cvar_comparison(strategy_summary, output_dir / "cvar_comparison.png")
+    _plot_transaction_costs(cost_by_strategy, output_dir / "transaction_costs.png")
+    _plot_delta_convexity(
+        all_strategies,
+        strike,
+        implied_vol,
+        n_steps=seq_len - 1,
+        dt=dt,
+        path=output_dir / "delta_convexity.png",
+    )
 
     with open(output_dir / "benchmark_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
@@ -348,20 +498,177 @@ def run_backtest(
 
 
 # -----------------------------------------------------------------------------
-# Demo entrypoint: train a policy on market_gan.py paths, then backtest it
-# under stress conditions
+# 5. Multi-alpha sweep (paper Figures 20-21): one architecture trained at
+# several CVaR risk-aversion levels, visualizing the risk-return trade-off.
+# -----------------------------------------------------------------------------
+
+# Sequential blue ramp, light -> dark (ordinal steps >= 250 per the project's
+# dataviz guide), one hue for the ordered "risk aversion" magnitude.
+_SEQUENTIAL_RAMP = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
+
+
+def _sequential_color(index: int, n: int) -> str:
+    if n <= 1:
+        return _SEQUENTIAL_RAMP[len(_SEQUENTIAL_RAMP) // 2]
+    step = (len(_SEQUENTIAL_RAMP) - 1) / (n - 1)
+    return _SEQUENTIAL_RAMP[round(index * step)]
+
+
+def load_alpha_sweep_checkpoints(
+    architecture: Annotated[str, "'mlp', 'rnn', 'lstm', or 'gru'"],
+    alphas: List[float],
+    checkpoint_dir: Path,
+) -> Dict[float, Tuple[Any, bool]]:
+    """Loads per-alpha checkpoints saved by `train_policy.py --alpha-sweep ...`."""
+    policies: Dict[float, Tuple[Any, bool]] = {}
+    for alpha in alphas:
+        alpha_str = f"{alpha:.4g}".replace(".", "_")
+        path = checkpoint_dir / f"hedging_agent_{architecture}_alpha{alpha_str}.pt"
+        loaded = _load_policy_checkpoint(path)
+        if loaded is None:
+            print(f"No checkpoint at {path} -- skipping alpha={alpha}.")
+            continue
+        policy, sequence_policy, _ = loaded
+        policies[alpha] = (policy, sequence_policy)
+    return policies
+
+
+def _plot_alpha_sweep_density(wealth_by_alpha: Dict[float, torch.Tensor], path: Path) -> None:
+    alphas = sorted(wealth_by_alpha)
+    fig, ax = plt.subplots(figsize=(8, 5.5), facecolor=COLOR_SURFACE)
+    bins = 40
+    for i, alpha in enumerate(alphas):
+        ax.hist(
+            wealth_by_alpha[alpha].detach().numpy(),
+            bins=bins,
+            alpha=0.55,
+            color=_sequential_color(i, len(alphas)),
+            label=f"alpha = {alpha}",
+            zorder=2,
+        )
+    ax.axvline(0.0, color=COLOR_BASELINE, linewidth=1.0, zorder=1)
+    ax.set_xlabel("Terminal Wealth")
+    ax.set_ylabel("Frequency")
+    ax.set_title("PnL Distribution Across Risk Aversion Parameters")
+    _style_axes(ax)
+    ax.legend(frameon=False, labelcolor=COLOR_TEXT_PRIMARY)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=COLOR_SURFACE)
+    plt.close(fig)
+
+
+def _plot_alpha_sweep_boxplot(wealth_by_alpha: Dict[float, torch.Tensor], path: Path) -> None:
+    alphas = sorted(wealth_by_alpha)
+    data = [wealth_by_alpha[a].detach().numpy() for a in alphas]
+    colors = [_sequential_color(i, len(alphas)) for i in range(len(alphas))]
+
+    fig, ax = plt.subplots(figsize=(8, 5.5), facecolor=COLOR_SURFACE)
+    bplot = ax.boxplot(data, patch_artist=True, tick_labels=[str(a) for a in alphas], widths=0.5)
+    for patch, color in zip(bplot["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.85)
+    for median in bplot["medians"]:
+        median.set_color(COLOR_TEXT_PRIMARY)
+    ax.set_xlabel("Risk Aversion Parameter (alpha)")
+    ax.set_ylabel("Terminal Wealth")
+    ax.set_title("Risk-Return Trade-off Across Risk Aversion Parameters")
+    _style_axes(ax)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=COLOR_SURFACE)
+    plt.close(fig)
+
+
+def run_alpha_sweep_backtest(
+    architecture: Annotated[str, "'mlp', 'rnn', 'lstm', or 'gru'"],
+    alphas: Annotated[List[float], "CVaR alphas to compare, e.g. [0.5, 0.75, 0.9, 0.95, 0.99]"],
+    strike: Annotated[float, "option strike price K"],
+    batch_size: Annotated[int, "number of stress test paths"] = 2000,
+    seq_len: Annotated[int, "number of price observations per path"] = 30,
+    proportional_fee: Annotated[float, "kappa; e.g. 0.003 = 30 bps"] = 0.003,
+    implied_vol: Annotated[float, "implied vol fed into every policy's state"] = 0.30,
+    low_vol: Annotated[float, "stress regime: calm-period volatility"] = 0.15,
+    high_vol: Annotated[float, "stress regime: turbulent-period volatility"] = 0.60,
+    switch_prob: Annotated[float, "stress regime: per-step switch probability"] = 0.10,
+    dt: Annotated[float, "time increment per step"] = 1.0,
+    checkpoint_dir: Annotated[Union[str, Path], "directory with hedging_agent_*_alpha*.pt files"] = "checkpoints",
+    output_dir: Annotated[Union[str, Path], "directory for plots and JSON summary"] = "results",
+    seed: Optional[int] = 0,
+) -> Annotated[Dict, "per-alpha summary, also written to <output_dir>/alpha_sweep_<architecture>_summary.json"]:
+    policies = load_alpha_sweep_checkpoints(architecture, alphas, Path(checkpoint_dir))
+    if not policies:
+        raise FileNotFoundError(
+            f"No alpha-sweep checkpoints found for architecture={architecture!r} in {checkpoint_dir}. "
+            f"Run `python src/policy/train_policy.py --architecture {architecture} "
+            f"--alpha-sweep {','.join(str(a) for a in alphas)}` first."
+        )
+
+    path_generator = torch.Generator().manual_seed(seed) if seed is not None else None
+    prices = simulate_regime_switching_paths(
+        batch_size,
+        seq_len,
+        s0=strike,
+        dt=dt,
+        low_vol=low_vol,
+        high_vol=high_vol,
+        switch_prob=switch_prob,
+        generator=path_generator,
+    )
+    environment = MarketEnvironment(strike=strike, proportional_fee=proportional_fee, dt=dt)
+
+    wealth_by_alpha: Dict[float, torch.Tensor] = {}
+    summary_by_alpha: Dict[str, Dict[str, float]] = {}
+    for alpha, (policy_obj, sequence_policy) in policies.items():
+        if hasattr(policy_obj, "eval"):
+            policy_obj.eval()
+        with torch.no_grad():
+            wealth, cost = environment.simulate_with_costs(
+                policy_obj, prices, implied_vol, sequence_policy=sequence_policy
+            )
+        wealth_by_alpha[alpha] = wealth
+        summary_by_alpha[str(alpha)] = _summarize_strategy(wealth, cost)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _plot_alpha_sweep_density(
+        wealth_by_alpha, output_dir / f"alpha_sweep_{architecture}_density.png"
+    )
+    _plot_alpha_sweep_boxplot(
+        wealth_by_alpha, output_dir / f"alpha_sweep_{architecture}_boxplot.png"
+    )
+
+    summary = {
+        "config": {
+            "architecture": architecture,
+            "batch_size": batch_size,
+            "seq_len": seq_len,
+            "strike": strike,
+            "proportional_fee_bps": proportional_fee * 1e4,
+            "implied_vol": implied_vol,
+        },
+        "alphas": summary_by_alpha,
+    }
+    with open(output_dir / f"alpha_sweep_{architecture}_summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+
+    return summary
+
+
+# -----------------------------------------------------------------------------
+# Demo entrypoint: load every available trained policy checkpoint (mlp, rnn,
+# lstm, gru), falling back to a short demo MLP training run if none exist,
+# then backtest all of them together under stress conditions
 # -----------------------------------------------------------------------------
 
 
 def _train_demo_policy(
     strike: float, implied_vol: float, device: torch.device
 ) -> HedgingAgent:
-    """Trains a small HedgingAgent on in-distribution market_gan.py paths.
+    """Trains a small HedgingAgent (MLP) on in-distribution market_gan.py paths.
 
     Fallback for when no checkpoint exists at checkpoints/hedging_agent.pt:
     a short training loop gives `run_backtest` a non-trivial policy to
     stress-test. Prefer `python src/policy/train_policy.py` for a properly
-    converged policy.
+    converged policy, and for the RNN/LSTM/GRU variants.
     """
     policy = HedgingAgent(hidden_dim=32, num_hidden_layers=2)
     generator = Generator(noise_dim=8, hidden_dim=32, num_layers=1, initial_price=strike)
@@ -383,41 +690,93 @@ def _train_demo_policy(
     return policy
 
 
-def _load_or_train_policy(
+def _load_policy_checkpoint(
     checkpoint_path: Annotated[Path, "path to a checkpoint saved by policy/train_policy.py"],
-    device: torch.device,
-) -> Annotated[Tuple[HedgingAgent, float, float], "(policy, strike, implied_vol)"]:
-    """Loads a pretrained HedgingAgent, or trains a short demo policy as fallback."""
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        policy_args = checkpoint["args"]
+) -> Annotated[
+    Optional[Tuple[Any, bool, Dict[str, Any]]],
+    "(policy, sequence_policy, saved_args) or None if the checkpoint doesn't exist",
+]:
+    """Loads a policy checkpoint, reconstructing the right class from its saved
+    `architecture` field ('mlp' -> HedgingAgent, 'rnn'/'lstm'/'gru' -> RecurrentHedgingAgent).
+    """
+    if not checkpoint_path.exists():
+        return None
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    policy_args = checkpoint["args"]
+    architecture = policy_args.get("architecture", "mlp")
+
+    if architecture == "mlp":
         policy = HedgingAgent(
             hidden_dim=policy_args["hidden_dim"],
             num_hidden_layers=policy_args["num_hidden_layers"],
         )
-        policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(f"Loaded pretrained policy from {checkpoint_path}")
-        return policy, policy_args["strike"], policy_args["implied_vol"]
+        sequence_policy = False
+    else:
+        policy = RecurrentHedgingAgent(
+            cell_type=architecture,
+            hidden_dim=policy_args["rnn_hidden_dim"],
+            num_layers=policy_args["rnn_num_layers"],
+        )
+        sequence_policy = True
+
+    policy.load_state_dict(checkpoint["policy_state_dict"])
+    return policy, sequence_policy, policy_args
+
+
+def _load_all_policies(
+    checkpoint_dir: Annotated[Path, "directory containing hedging_agent*.pt checkpoints"],
+    device: torch.device,
+) -> Annotated[
+    Tuple[Dict[str, Tuple[Any, bool]], float, float],
+    "(policies, strike, implied_vol) -- policies maps display name -> (policy, sequence_policy)",
+]:
+    """Loads every available architecture's checkpoint, falling back to a
+    short demo MLP training run if none exist at all.
+    """
+    checkpoint_paths = {
+        "mlp": checkpoint_dir / "hedging_agent.pt",
+        "rnn": checkpoint_dir / "hedging_agent_rnn.pt",
+        "lstm": checkpoint_dir / "hedging_agent_lstm.pt",
+        "gru": checkpoint_dir / "hedging_agent_gru.pt",
+    }
+
+    policies: Dict[str, Tuple[Any, bool]] = {}
+    strike: Optional[float] = None
+    implied_vol: Optional[float] = None
+
+    for architecture, path in checkpoint_paths.items():
+        loaded = _load_policy_checkpoint(path)
+        if loaded is None:
+            print(f"No checkpoint at {path} -- skipping {ARCHITECTURE_DISPLAY_NAMES[architecture]}.")
+            continue
+        policy, sequence_policy, policy_args = loaded
+        display_name = ARCHITECTURE_DISPLAY_NAMES[architecture]
+        policies[display_name] = (policy, sequence_policy)
+        strike, implied_vol = policy_args["strike"], policy_args["implied_vol"]
+        print(f"Loaded {display_name} from {path}")
+
+    if policies:
+        return policies, strike, implied_vol
 
     strike, implied_vol = 1.0, 0.30
     print(
-        f"No policy checkpoint found at {checkpoint_path}; training a short demo policy. "
-        "Run `python src/policy/train_policy.py` first for a properly converged policy."
+        "No policy checkpoints found; training a short demo MLP policy. "
+        "Run `python src/policy/train_policy.py --architecture {mlp,rnn,lstm,gru}` "
+        "first for properly converged policies across all architectures."
     )
-    policy = _train_demo_policy(strike, implied_vol, device)
-    return policy, strike, implied_vol
+    demo_policy = _train_demo_policy(strike, implied_vol, device)
+    return {"MLP": (demo_policy, False)}, strike, implied_vol
 
 
 if __name__ == "__main__":
     torch.manual_seed(0)
     device = torch.device("cpu")
 
-    demo_policy, strike, implied_vol = _load_or_train_policy(
-        Path("checkpoints/hedging_agent.pt"), device
-    )
+    policies, strike, implied_vol = _load_all_policies(Path("checkpoints"), device)
 
     result = run_backtest(
-        deep_hedging_policy=demo_policy,
+        policies=policies,
         strike=strike,
         batch_size=2000,
         seq_len=30,
@@ -431,3 +790,25 @@ if __name__ == "__main__":
     )
 
     print(json.dumps(result, indent=2))
+
+    # Multi-alpha sweep demonstration (paper Figures 20-21): requires
+    # checkpoints from `train_policy.py --architecture mlp --alpha-sweep ...`.
+    sweep_alphas = [0.5, 0.75, 0.9, 0.95, 0.99]
+    try:
+        sweep_result = run_alpha_sweep_backtest(
+            architecture="mlp",
+            alphas=sweep_alphas,
+            strike=strike,
+            batch_size=2000,
+            seq_len=30,
+            proportional_fee=0.003,
+            implied_vol=implied_vol,
+            low_vol=0.15,
+            high_vol=0.60,
+            switch_prob=0.10,
+            output_dir="results",
+            seed=42,
+        )
+        print(json.dumps(sweep_result, indent=2))
+    except FileNotFoundError as e:
+        print(e)

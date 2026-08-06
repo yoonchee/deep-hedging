@@ -1,0 +1,62 @@
+{
+  "config": {
+    "architecture": "mlp",
+    "batch_size": 2000,
+    "seq_len": 30,
+    "strike": 1.0,
+    "proportional_fee_bps": 30.0,
+    "implied_vol": 0.2
+  },
+  "alphas": {
+    "0.5": {
+      "mean_wealth": -0.6967963576316833,
+      "std_wealth": 0.36769574880599976,
+      "cvar_95": 1.0026015043258667,
+      "cvar_99": 1.0029656887054443,
+      "skewness": 1.0075510740280151,
+      "excess_kurtosis": -0.5827586650848389,
+      "mean_transaction_cost": 0.0030037537217140198,
+      "total_transaction_cost": 6.00750732421875
+    },
+    "0.75": {
+      "mean_wealth": -0.6968030333518982,
+      "std_wealth": 0.36777162551879883,
+      "cvar_95": 1.0026025772094727,
+      "cvar_99": 1.0029656887054443,
+      "skewness": 1.0077372789382935,
+      "excess_kurtosis": -0.582556962966919,
+      "mean_transaction_cost": 0.0030021625570952892,
+      "total_transaction_cost": 6.004324913024902
+    },
+    "0.9": {
+      "mean_wealth": -0.6968094110488892,
+      "std_wealth": 0.36786985397338867,
+      "cvar_95": 1.0026053190231323,
+      "cvar_99": 1.002966046333313,
+      "skewness": 1.007832407951355,
+      "excess_kurtosis": -0.5825405120849609,
+      "mean_transaction_cost": 0.0030003623105585575,
+      "total_transaction_cost": 6.000724792480469
+    },
+    "0.95": {
+      "mean_wealth": -0.6968106031417847,
+      "std_wealth": 0.3678818941116333,
+      "cvar_95": 1.0026054382324219,
+      "cvar_99": 1.002966046333313,
+      "skewness": 1.0078688859939575,
+      "excess_kurtosis": -0.5824906826019287,
+      "mean_transaction_cost": 0.0030000759288668633,
+      "total_transaction_cost": 6.000151634216309
+    },
+    "0.99": {
+      "mean_wealth": -0.6967760324478149,
+      "std_wealth": 0.3673544228076935,
+      "cvar_95": 1.0025889873504639,
+      "cvar_99": 1.0029654502868652,
+      "skewness": 1.0065256357192993,
+      "excess_kurtosis": -0.5842642784118652,
+      "mean_transaction_cost": 0.0030098971910774708,
+      "total_transaction_cost": 6.019794464111328
+    }
+  }
+}

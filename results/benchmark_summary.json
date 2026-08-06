@@ -11,20 +11,56 @@
       "switch_prob": 0.1
     }
   },
-  "deep_hedging": {
-    "mean_wealth": -0.696794867515564,
-    "std_wealth": 0.3676742613315582,
-    "cvar_95": 1.002601146697998,
-    "cvar_99": 1.0029656887054443,
-    "mean_transaction_cost": 0.0030041614081710577,
-    "total_transaction_cost": 6.008322715759277
-  },
-  "black_scholes": {
-    "mean_wealth": -0.6950774192810059,
-    "std_wealth": 0.36890190839767456,
-    "cvar_95": 1.816426396369934,
-    "cvar_99": 2.342271327972412,
-    "mean_transaction_cost": 0.006449816282838583,
-    "total_transaction_cost": 12.899632453918457
+  "strategies": {
+    "Black-Scholes Delta": {
+      "mean_wealth": -0.6950774192810059,
+      "std_wealth": 0.36890190839767456,
+      "cvar_95": 1.816426396369934,
+      "cvar_99": 2.342271327972412,
+      "skewness": -1.9665019512176514,
+      "excess_kurtosis": 5.338501930236816,
+      "mean_transaction_cost": 0.006449816282838583,
+      "total_transaction_cost": 12.899632453918457
+    },
+    "MLP": {
+      "mean_wealth": -0.6967949271202087,
+      "std_wealth": 0.3676756024360657,
+      "cvar_95": 1.002601146697998,
+      "cvar_99": 1.0029656887054443,
+      "skewness": 1.007489562034607,
+      "excess_kurtosis": -0.5828509330749512,
+      "mean_transaction_cost": 0.003004136262461543,
+      "total_transaction_cost": 6.008272647857666
+    },
+    "Basic RNN": {
+      "mean_wealth": -0.6967439651489258,
+      "std_wealth": 0.36748260259628296,
+      "cvar_95": 1.0022562742233276,
+      "cvar_99": 1.0026501417160034,
+      "skewness": 1.0071241855621338,
+      "excess_kurtosis": -0.5841758251190186,
+      "mean_transaction_cost": 0.0029990775510668755,
+      "total_transaction_cost": 5.998155117034912
+    },
+    "LSTM": {
+      "mean_wealth": -0.6967406272888184,
+      "std_wealth": 0.3670685291290283,
+      "cvar_95": 1.0120669603347778,
+      "cvar_99": 1.029249906539917,
+      "skewness": 1.008243203163147,
+      "excess_kurtosis": -0.576289176940918,
+      "mean_transaction_cost": 0.002999672433361411,
+      "total_transaction_cost": 5.999344825744629
+    },
+    "GRU": {
+      "mean_wealth": -0.6967768669128418,
+      "std_wealth": 0.3676181137561798,
+      "cvar_95": 1.0025447607040405,
+      "cvar_99": 1.0037249326705933,
+      "skewness": 1.0077277421951294,
+      "excess_kurtosis": -0.5827233791351318,
+      "mean_transaction_cost": 0.0029995993245393038,
+      "total_transaction_cost": 5.9991984367370605
+    }
   }
 }
