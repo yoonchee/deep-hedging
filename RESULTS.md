@@ -19,9 +19,9 @@ found, and — deliberately — what didn't work and why, not just what did.
 | Paper component | This repo | Status |
 |---|---|---|
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
-| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches: all three cell types now replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix (see below) |
+| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match but Basic RNN still doesn't converge — see below |
 | Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params (S₀=K=100, vol=0.15, T=1/12, 30 steps) |
-| Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results — WGAN-GP+moment-loss is more consistent, TimeGAN's over-dispersed synthetic data produced the single best policy in the project (GRU) and the worst (MLP); see TimeGAN section |
+| Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results that shifted after the RNN/LSTM fix — see TimeGAN section |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches |
 | Delta-convexity diagnostic (paper Figs. 5/8/11) | `backtester/plotting.py::plot_delta_convexity` | Matches, and was the tool that caught the RNN/LSTM failure |
 | Option premium P₀ in the wealth objective | *(not implemented)* | Open — wealth excludes premium collected, per this project's original `math_spec.md` |
@@ -196,28 +196,38 @@ Regime-switching volatility (15%/60%, 10% per-step switch probability), 30
 bps transaction friction, policies retrained against the moment-matched
 real-data WGAN-GP generator described above (reproduce with `python
 src/backtester/evaluate.py`, after retraining each policy so it's trained
-against the new generator checkpoint):
+against the new generator checkpoint).
+
+**This table was retrained twice.** The first retrain (moment-matching loss
+only) produced the table originally here, with a narrative claiming "MLP
+and GRU condition on market state, Basic RNN/LSTM structurally don't." Once
+the RNN/LSTM DC-dominance bug was found and fixed (see Part I above), every
+`RecurrentHedgingAgent` — RNN, LSTM, *and* GRU — needed retraining, since the
+input transform changed for all three cell types, not just the two that
+were visibly broken. Current numbers, after that retrain:
 
 | Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
 |---|---|---|---|---|---|---|
 | Black-Scholes | -0.695 | 1.82 | 2.34 | -1.97 | 5.34 | 12.90 |
 | MLP | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 | 10.00 |
-| Basic RNN | -0.536 | 6.17 | 19.61 | -14.83 | 257.3 | 1.53 |
-| LSTM | -0.548 | 5.77 | 18.37 | -14.90 | 259.6 | 2.77 |
-| GRU | -0.712 | 3.14 | **4.52** | -2.19 | 6.7 | 15.49 |
+| Basic RNN | -0.539 | 6.06 | 19.26 | -14.84 | 257.6 | 1.61 |
+| LSTM | **-0.686** | **3.26** | **5.02** | -2.83 | 11.7 | 15.21 |
+| GRU | -0.710 | 3.07 | 4.52 | -2.48 | 10.2 | 18.60 |
 
-Compare against the pre-fix table (MLP CVaR₉₉ 19.96 → **7.26**; GRU CVaR₉₉
-18.41 → **4.52**, kurtosis 271.8 → **6.7** — essentially Black-Scholes-level
-tail behavior now). **This is the same split found in Part I, closing the
-loop**: MLP and GRU actually condition their hedge on the market state, so
-giving them a generator with real crash risk taught them to defend against
-one. Basic RNN and LSTM barely moved (CVaR₉₉ 18.9 → 19.6 and 19.9 → 18.4 —
-noise-level, not improvement) because — per the Part I diagnosis — they
-never learned to read the market state in the first place; a better
-generator can't teach a policy something it structurally isn't sensing. The
-tail-shape gap and the RNN/LSTM non-convergence turn out to be two
-independent problems that only *looked* like one shared explanation when
-both were present simultaneously.
+**LSTM's fix generalized**: its CVaR₉₉ dropped from 18.37 to **5.02** — now
+essentially matching GRU (4.52), a complete turnaround, and direct evidence
+the DC-dominance fix (not something GRU-gating-specific) was the real lever
+all along. **Basic RNN did not improve** (19.61 → 19.26, unchanged within
+noise) — checked with 5x more training (500 vs. 200 epochs): still no
+change. This narrows the open question considerably: it's not "RNN/LSTM
+can't condition on market state" (LSTM clearly can, once its input is
+scaled correctly) — it's specifically vanilla RNN's own well-known
+architectural limitation (single-gate recurrence, weaker gradient
+propagation than LSTM/GRU's gating) resurfacing once the DC-dominance
+confound is removed. In Part I's simpler frictionless setting even vanilla
+RNN converged; in this harder setting (real market data, transaction costs,
+a CVaR objective at α=0.95), it doesn't. This is now a materially narrower,
+better-evidenced open problem than "RNN/LSTM as a pair, unexplained."
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -293,56 +303,68 @@ diversity ratio this far *above* 100%, so this run's checker output still
 prints "OK" even though the distribution is clearly miscalibrated in the
 other direction.
 
-**And yet the stress-test backtest is a genuinely different story here.**
-Retraining all four policies against the tanh-fixed TimeGAN:
+**And yet the stress-test backtest is a genuinely different story here** —
+and it changed again after the RNN/LSTM moneyness fix above, in a way that
+overturns this section's original conclusion. Retraining all four policies
+against the tanh-fixed TimeGAN, first attempt (before the moneyness fix):
 
 | Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
 |---|---|---|---|---|---|---|
-| Black-Scholes | -0.695 | 1.82 | 2.34 | -1.97 | 5.34 | 12.90 |
-| MLP (WGAN-GP) | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 | 10.00 |
 | MLP (TimeGAN) | -0.511 | 5.50 | 19.05 | -16.47 | 315.2 | 5.98 |
-| Basic RNN (WGAN-GP) | -0.536 | 6.17 | 19.61 | -14.83 | 257.3 | 1.53 |
 | Basic RNN (TimeGAN) | -0.556 | 5.77 | 17.96 | -14.44 | 246.8 | 11.50 |
-| LSTM (WGAN-GP) | -0.548 | 5.77 | 18.37 | -14.90 | 259.6 | 2.77 |
 | LSTM (TimeGAN) | -0.566 | 5.70 | 18.34 | -13.45 | 226.4 | 12.60 |
-| GRU (WGAN-GP) | -0.712 | 3.14 | 4.52 | -2.19 | 6.7 | 15.49 |
 | GRU (TimeGAN) | **-0.697** | **1.00** | **1.00** | **+1.01** | **-0.58** | 6.00 |
 
-Basic RNN and LSTM land in roughly the same place as their WGAN-GP
-counterparts (a bit better on CVaR₉₉, a bit worse on transaction cost — no
-clear winner). MLP is still worse than its WGAN-GP counterpart, though far
-better than the sigmoid-TimeGAN attempt. **GRU is the real finding here**:
-its mean wealth (-0.697) and standard deviation (0.367, not shown above)
-now sit almost exactly on top of Black-Scholes' own (-0.695 / 0.369), and
-its CVaR₉₅/CVaR₉₉ (both ≈1.00) actually *beat* the closed-form analytic
-hedge (1.82 / 2.34) — with positive skew and negative excess kurtosis,
-the opposite signature from every other policy's crash-driven left tail.
-This was checked for seed-sensitivity across 4 different stress-test seeds
-(not just the canonical seed 42 used above) and is completely stable —
-CVaR₉₅/CVaR₉₉ landed at 1.00/1.00-1.003 every time, not a fluke of one
-particular random path draw.
+At the time, GRU's result looked like the headline finding: mean/std
+essentially matching Black-Scholes exactly, CVaR beating it outright, the
+opposite skew/kurtosis signature from every crash-exposed policy — and the
+write-up here attributed it to *GRU's gating specifically* interacting well
+with TimeGAN's over-dispersed training distribution, tying it to the "GRU
+genuinely conditions on market state" finding from Part I.
 
-The likely explanation ties back to the fidelity table above: GRU was
-trained against a generator that showed it price paths *far* wilder
-(214-224% of real diversity) than the stress test's actual regime-switching
-scenario ever produces. For GRU specifically — the one architecture that
-Part I already showed genuinely conditions on market state rather than
-learning a near-constant policy — that over-exposure appears to have acted
-like a domain-randomization regularizer, teaching a hedge robust enough
-that the real stress test looks comparatively tame by contrast. Basic
-RNN/LSTM don't share this benefit because (per the Part I diagnosis) they
-were never conditioning on market state to begin with, so a wilder training
-distribution has nothing to teach them; MLP sits in between.
+**That explanation is now known to be wrong.** Once the RNN/LSTM
+DC-dominance bug was fixed (see the Stress-test backtest section above),
+every `RecurrentHedgingAgent` needed retraining against TimeGAN too —
+including GRU, since the input transform changed for all three cell types.
+Retrained numbers, same tanh-fixed TimeGAN checkpoint, moneyness-fixed
+policies:
 
-This is the actual headline finding of the TimeGAN work, revised from the
-sigmoid attempt: **neither generator is straightforwardly "better"** —
-WGAN-GP+moment-loss is the safer, more consistent choice across
-architectures, but TimeGAN(tanh)'s badly-overshot diversity, almost by
-accident, produced the single best-performing policy in this entire
-project (GRU, beating even the analytic Black-Scholes benchmark on tail
-risk). Whether that generalizes past this exact regime-switching stress
-scenario, or is a fortunate match between this scenario's volatility range
-and TimeGAN's overshoot, is not established — see known limitations.
+| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
+|---|---|---|---|---|---|---|
+| MLP (TimeGAN) | -0.511 | 5.50 | 19.05 | -16.47 | 315.2 | 5.98 |
+| Basic RNN (TimeGAN) | **-0.697** | **1.00** | **1.00** | **+1.01** | **-0.58** | 6.00 |
+| LSTM (TimeGAN) | -0.571 | 4.91 | 15.65 | -15.00 | 262.0 | 4.46 |
+| GRU (TimeGAN) | -0.507 | 6.53 | 22.56 | -13.85 | 231.9 | 14.22 |
+
+**Basic RNN now shows the exact numbers GRU used to show** — mean wealth
+-0.6968 vs. GRU's old -0.6967, CVaR₉₅/₉₉ at 1.0025/1.0029 vs. GRU's old
+1.0022/1.0025, transaction cost 6.00 vs. 6.00, matching to 3-4 significant
+figures. **GRU's own performance under the identical generator got *worse*
+with its input scaling fixed** — CVaR₉₉ 1.00 → 22.56. LSTM improved
+moderately (18.34 → 15.65) but nowhere near Basic RNN's jump; MLP is
+unaffected (not a `RecurrentHedgingAgent`).
+
+This means the original "GRU-specific gating advantage" explanation was
+never real — it was an artifact of the *old, buggy* input scaling
+happening to route GRU specifically into a particular low-sensitivity
+policy that, by luck, generalized well against this exact stress scenario.
+Once every cell type sees correctly-scaled input, that same lucky
+attractor moved to a *different* architecture (Basic RNN this time), not
+consistently to "whichever architecture conditions best on market state"
+as the earlier write-up assumed. The genuinely interesting, still-open
+question is *why* this particular attractor exists at all under TimeGAN's
+badly over-dispersed (214-224% of real diversity) training data, and why
+it lands on a different architecture each time the input encoding changes
+— not which architecture's gating is "better." Whether it reflects
+something structural about training against an over-dispersed generator,
+or is closer to coincidence, is not established.
+
+This is the actual headline finding of the TimeGAN work, revised twice
+now: **neither generator is straightforwardly "better," and claims about
+*which architecture* benefits from a given generator should be treated as
+provisional until checked against every subsequent bug fix** — this
+project found out the hard way that an input-encoding bug can masquerade
+as an architecture-level finding.
 
 ## Known limitations
 
@@ -355,21 +377,30 @@ Roughly in priority order:
    still runs a bit low (~3.1 vs. ~4.0-5.5, itself a noisy target — see
    above). A learned, per-batch-adaptive weighting (vs. the current fixed
    `--lambda-moment`) could plausibly tighten this further.
-2. **Basic RNN / LSTM non-convergence** in the frictionless setting — root
-   cause not fully identified (GRU-specific gating advantage, unconfirmed).
-   Confirmed independent of the generator fidelity issue: retraining RNN/LSTM
-   against the fixed generator left their stress-test tail risk unchanged
-   (they don't condition on market state at all, so a better generator has
-   nothing to teach them).
+2. **Basic RNN non-convergence in the stress-test setting — resolved in
+   Part I, still open for the harder real-generator training.** The
+   original RNN/LSTM failure was a DC-dominated RNN input (fixed via
+   standardized log-moneyness; see Part I above), and this fix closed the
+   gap completely for both cell types in Part I's frictionless setting, and
+   for LSTM in the harder WGAN-GP stress-test setting too (CVaR₉₉ 18.37 →
+   5.02). Basic RNN specifically still doesn't converge in the stress-test
+   setting even after the fix, confirmed with 5x more training (500 vs. 200
+   epochs, no change) — likely vanilla RNN's own well-known weaker gradient
+   propagation (a single gate vs. LSTM/GRU's more sophisticated gating),
+   now unmasked as the sole remaining bottleneck rather than being confused
+   with the input-scaling bug.
 3. **TimeGAN's diversity is miscalibrated, and neither direction tried so
    far lands correctly.** Sigmoid latents undershot real diversity (31%);
    switching to tanh overshot it (214-224%) — see the TimeGAN section above
-   for the full before/after. The overshoot happened to produce this
-   project's single best-performing policy (GRU, beating Black-Scholes on
-   stress-test CVaR) but also its worst (MLP). `validate.py`'s fidelity
-   checker also has a real gap surfaced by this: `DIVERSITY_WARNING_THRESHOLD`
-   only catches *low* diversity, nothing currently flags a ratio this far
-   *above* 100%.
+   for the full before/after. `validate.py`'s fidelity checker also has a
+   real gap surfaced by this: `DIVERSITY_WARNING_THRESHOLD` only catches
+   *low* diversity, nothing currently flags a ratio this far *above* 100%.
+   The overshoot produces one architecture's best stress-test result and
+   another's worst, but *which* architecture benefits changed completely
+   once the RNN/LSTM moneyness fix was applied (Basic RNN now shows the
+   "beats Black-Scholes" behavior GRU used to show, and GRU's own result
+   under the same generator got worse) — this was never a GRU-specific
+   effect, see the TimeGAN section's revised writeup.
 4. **No option premium (P₀)** in the wealth formula — `Wealth_T` excludes
    the premium collected for writing the option, so mean wealth is
    persistently negative across every experiment in this repo. Consistent
@@ -394,15 +425,19 @@ Roughly in priority order:
 - Add an upper-bound check to `validate.py`'s diversity signal — currently
   only mode collapse (too little diversity) is flagged; this session's tanh
   fix showed a ratio of 214-224% sailing through as "OK".
-- Understand *why* GRU specifically benefits so dramatically from
-  TimeGAN's over-dispersed training data while Basic RNN/LSTM/MLP don't —
-  is this really about GRU's gating (tying back to the unexplained Part I
-  GRU advantage), or a coincidental match between TimeGAN's overshoot and
-  this specific stress scenario's volatility range? Testing against a
-  second, differently-parameterized stress scenario would help distinguish
-  the two.
-- Actor-critic variance reduction or an entropy bonus for RNN/LSTM training,
-  per the paper's own future-work section.
+- Understand *why* training against TimeGAN's over-dispersed data seems to
+  route exactly one architecture into a "beats Black-Scholes" attractor
+  each time (GRU under the old input scaling, Basic RNN under the fixed
+  scaling) — is this a real, reproducible interaction between
+  over-dispersed training data and CVaR optimization, or closer to which
+  architecture happens to land in a particular local optimum first?
+  Testing against a second, differently-parameterized stress scenario, or
+  multiple random seeds per architecture, would help distinguish the two.
+- Investigate vanilla RNN's now-isolated stress-test non-convergence
+  (input scaling confirmed fixed, more training confirmed not to help) —
+  actor-critic variance reduction or an entropy bonus, per the paper's own
+  future-work section, or simply accepting that plain RNN's weaker gating
+  is a genuine architectural limitation in this harder training regime.
 - Add the P₀ premium term to the wealth objective.
 - Scale up: more Monte Carlo scenarios, larger networks, longer training,
   matching the paper's actual computational budget.

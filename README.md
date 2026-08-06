@@ -20,14 +20,17 @@ what matches the paper, what doesn't, and why is in
   II architecture) -- embedder/recovery/generator/supervisor/discriminator
   over multi-variate OHLCV data, trained via the paper's 3-phase procedure.
   Its synthetic-data diversity has been hard to calibrate correctly (first
-  too low, then -- after a tanh fix -- too high), and the results are
-  architecture-dependent: it produced this project's single best hedging
-  policy (GRU) and its worst (MLP) -- see `RESULTS.md` for the full story.
+  too low, then -- after a tanh fix -- too high), and which policy
+  architecture benefits from that miscalibration changed completely after
+  a separate RNN/LSTM bug fix -- see `RESULTS.md` for the full story.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
   policies (RNN/LSTM/GRU) that consume the whole price path in one pass,
-  matching the paper's own architecture comparison.
+  matching the paper's own architecture comparison. All three recurrent
+  cell types now replicate the paper's frictionless Part I result after a
+  standardized-log-moneyness input fix; Basic RNN alone still doesn't
+  converge in the harder stress-test setting.
 - A **differentiable CVaR loss** (Rockafellar-Uryasev) with a jointly-learned
   auxiliary threshold.
 - A **stress-test backtester** comparing all four architectures against
@@ -116,39 +119,42 @@ pytest tests/ -v
 See [`RESULTS.md`](RESULTS.md) for the full numbers, plots, and diagnostic
 trail:
 
-- **Frictionless replication (Part I)**: MLP and especially GRU learn a
-  genuine, Black-Scholes-like delta response and post competitive CVaR.
-  Basic RNN and LSTM do not — despite five targeted interventions (gradient
-  clipping, extended training, learning-rate sweeps, orthogonal
-  initialization, and removing an over-deep readout head), they converge to
-  a near-constant policy in this exact setup. That failure is real,
-  reproducible, and documented, not swept under the rug.
+- **Frictionless replication (Part I)**: initially, MLP and GRU worked while
+  Basic RNN/LSTM converged to a near-constant, input-insensitive policy
+  despite five targeted interventions. The real root cause turned out to be
+  a DC-dominated RNN input (the raw price channel was 97% a constant offset,
+  3% signal) that a naive strike-normalization didn't fix. A standardized
+  log-moneyness transform closed the gap completely — **all four
+  architectures now replicate Black-Scholes-level CVaR at every
+  risk-aversion level**, some slightly beating it.
 - **GAN tail-shape fidelity**: the real-data generator originally captured
   the right mean and spread but not real markets' fat-tail crash risk
   (skew/kurtosis), caught by the built-in fidelity checker. Fixed with an
   explicit moment-matching loss term (`generator/train_gan.py`) that pulls
   the generator's terminal-return skew/kurtosis toward the real data's.
-- **Stress-test backtest**: retrained against the fixed generator, MLP and
-  GRU's tail risk dropped sharply (GRU's CVaR₉₉ 18.4 → 4.5, now close to
-  Black-Scholes) — but Basic RNN and LSTM barely moved, confirming their
-  failure is structural (they don't condition on market state at all) and
-  independent of the generator fix.
+- **Stress-test backtest**: after the RNN/LSTM input fix, LSTM's stress-test
+  tail risk also improved dramatically (CVaR₉₉ 18.4 → 5.0, now matching
+  GRU) — but Basic RNN specifically still doesn't converge in this harder
+  setting even with 5x more training, narrowing the open question to
+  vanilla RNN's own architectural limitation rather than an unexplained
+  RNN/LSTM pairing.
 - **TimeGAN vs. WGAN-GP**: TimeGAN's synthetic-data diversity was hard to
   calibrate — first only ~31% of real data's standard deviation (sigmoid
   latent space), then 214-224% after switching to tanh to fix it. That
-  overshoot happened to produce the single best-performing policy in this
-  project: GRU trained against the tanh-fixed TimeGAN nearly matches
-  Black-Scholes' mean/std exactly and *beats* it on stress-test CVaR
-  (confirmed stable across 4 backtest seeds) — while MLP trained the same
-  way is the worst-performing policy in the whole comparison. Neither
-  generator is straightforwardly "better"; see `RESULTS.md` for the full
-  three-act story.
+  overshoot produces a "beats Black-Scholes" result for exactly one
+  architecture each time — but *which* architecture changed completely once
+  the RNN/LSTM input fix was applied (Basic RNN inherited the effect GRU
+  used to show, and GRU's own result got worse), showing the original
+  "GRU-specific" explanation was never real. Neither generator is
+  straightforwardly "better"; see `RESULTS.md` for the full story.
 
 ## Known limitations
 
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
-- Basic RNN and LSTM policies don't converge in this setup; GRU and MLP do.
+- Basic RNN still doesn't converge in the stress-test setting (unlike
+  Part I, where it does) — likely its own architectural limitation, not the
+  input-scaling bug that affected all three recurrent cell types before.
 - TimeGAN's diversity is miscalibrated (first too low, then too high after
   a fix) and its fidelity checker has no upper-bound diversity warning to
   catch the latter — see `RESULTS.md`.
