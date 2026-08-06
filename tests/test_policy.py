@@ -21,6 +21,44 @@ def test_hedging_agent_output_shape_and_range() -> None:
     assert torch.all(delta_t >= 0.0) and torch.all(delta_t <= 1.0)
 
 
+def test_hedging_agent_strike_normalization_matches_equivalent_moneyness() -> None:
+    # An agent hedging S~100 against strike=100 should behave the same as an
+    # agent hedging S~1 against strike=1, given the same weights -- i.e. the
+    # network should only ever see moneyness-scale inputs internally.
+    torch.manual_seed(0)
+    agent_raw = HedgingAgent(hidden_dim=16, num_hidden_layers=2, strike=1.0)
+    agent_scaled = HedgingAgent(hidden_dim=16, num_hidden_layers=2, strike=100.0)
+    agent_scaled.load_state_dict(agent_raw.state_dict())
+
+    delta_prev = torch.rand(8, 1)
+    time_to_maturity = torch.rand(8, 1) * 0.08
+    implied_vol = torch.full((8, 1), 0.15)
+
+    S_normalized = torch.rand(8, 1) * 0.4 + 0.8  # moneyness in [0.8, 1.2]
+    state_raw = torch.cat([S_normalized, delta_prev, time_to_maturity, implied_vol], dim=-1)
+    state_scaled = torch.cat(
+        [S_normalized * 100.0, delta_prev, time_to_maturity, implied_vol], dim=-1
+    )
+
+    delta_raw = agent_raw(state_raw)
+    delta_scaled = agent_scaled(state_scaled)
+
+    assert torch.allclose(delta_raw, delta_scaled, atol=1e-5)
+
+
+def test_hedging_agent_default_strike_is_backward_compatible_noop() -> None:
+    # strike=1.0 (the default) must be a pure no-op: S_t / 1.0 == S_t.
+    torch.manual_seed(0)
+    agent = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    state = torch.rand(8, HedgingAgent.STATE_DIM) + 0.5
+
+    with torch.no_grad():
+        expected = agent.net(state)
+    delta_t = agent(state)
+
+    assert torch.allclose(delta_t, torch.sigmoid(expected))
+
+
 def test_market_environment_wealth_shape() -> None:
     batch_size, seq_len = 8, 10
     agent = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
@@ -100,6 +138,37 @@ def test_recurrent_agent_output_shape_and_range(cell_type: str) -> None:
 def test_recurrent_agent_rejects_unknown_cell_type() -> None:
     with pytest.raises(ValueError):
         RecurrentHedgingAgent(cell_type="transformer")
+
+
+def test_recurrent_agent_output_head_matches_paper_node_counts() -> None:
+    # Kim (2021)'s stated "128, 64, 64, 1" node counts, read as
+    # RNN(128) -> FC(64) -> FC(64) -> 1 since nn.RNN/LSTM/GRU require a
+    # single hidden_size per recurrent layer.
+    batch_size, seq_len = 8, 10
+    agent = RecurrentHedgingAgent(
+        cell_type="gru", hidden_dim=128, num_layers=1, output_hidden_dims=[64, 64]
+    )
+
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+    delta_path = agent(prices)
+
+    assert delta_path.shape == (batch_size, seq_len - 1, 1)
+    assert torch.all(delta_path >= 0.0) and torch.all(delta_path <= 1.0)
+    linear_layers = [m for m in agent.output_layer if isinstance(m, torch.nn.Linear)]
+    assert [layer.out_features for layer in linear_layers] == [64, 64, 1]
+
+
+def test_recurrent_agent_strike_normalization_matches_equivalent_moneyness() -> None:
+    torch.manual_seed(0)
+    agent_raw = RecurrentHedgingAgent(cell_type="gru", hidden_dim=16, num_layers=1, strike=1.0)
+    agent_scaled = RecurrentHedgingAgent(cell_type="gru", hidden_dim=16, num_layers=1, strike=100.0)
+    agent_scaled.load_state_dict(agent_raw.state_dict())
+
+    prices_normalized = torch.rand(8, 10, 1) * 0.4 + 0.8  # moneyness in [0.8, 1.2]
+    delta_raw = agent_raw(prices_normalized)
+    delta_scaled = agent_scaled(prices_normalized * 100.0)
+
+    assert torch.allclose(delta_raw, delta_scaled, atol=1e-5)
 
 
 @pytest.mark.parametrize("cell_type", ["rnn", "lstm", "gru"])

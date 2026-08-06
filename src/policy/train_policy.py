@@ -40,6 +40,15 @@ class PolicyTrainer:
         sequence_policy: Annotated[
             bool, "True for a RecurrentHedgingAgent (whole-path) policy"
         ] = False,
+        grad_clip_norm: Annotated[
+            Optional[float],
+            "if set, clips the policy's gradient norm to this value before each "
+            "optimizer step -- combats early gradient explosion permanently "
+            "saturating recurrent gates (a classic RNN/LSTM training failure: "
+            "the policy gets stuck outputting a near-constant value from the "
+            "first few steps onward, with zero further movement no matter how "
+            "many epochs follow). None (default) disables clipping.",
+        ] = None,
     ) -> None:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = policy.to(self.device)
@@ -48,6 +57,7 @@ class PolicyTrainer:
         self.cvar_loss = cvar_loss.to(self.device)
         self.implied_vol = implied_vol
         self.sequence_policy = sequence_policy
+        self.grad_clip_norm = grad_clip_norm
 
         params = list(self.policy.parameters()) + list(self.cvar_loss.parameters())
         self.optimizer = torch.optim.Adam(params, lr=lr)
@@ -56,7 +66,10 @@ class PolicyTrainer:
         self,
         batch_size: Annotated[int, "number of synthetic paths per step"],
         seq_len: Annotated[int, "number of price observations per path"],
-    ) -> Annotated[Dict[str, float], "{'loss': CVaR loss, 'mean_wealth': mean terminal wealth}"]:
+    ) -> Annotated[
+        Dict[str, float],
+        "{'loss': CVaR loss, 'mean_wealth': mean terminal wealth, 'grad_norm': pre-clip policy grad norm}",
+    ]:
         # The generator acts as a fixed, pretrained market simulator here: no
         # gradient is needed through its parameters when training the policy.
         with torch.no_grad():
@@ -70,9 +83,20 @@ class PolicyTrainer:
 
         self.optimizer.zero_grad()
         loss.backward()
+
+        # Always measured (even with clipping off) so callers can diagnose
+        # whether explosion is actually happening.
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.policy.parameters(), self.grad_clip_norm or float("inf")
+        )
+
         self.optimizer.step()
 
-        return {"loss": loss.item(), "mean_wealth": wealth.mean().item()}
+        return {
+            "loss": loss.item(),
+            "mean_wealth": wealth.mean().item(),
+            "grad_norm": grad_norm.item(),
+        }
 
 
 def _load_or_init_generator(
@@ -204,13 +228,18 @@ def _train_and_save(
     device: torch.device,
 ) -> None:
     if args.architecture == "mlp":
-        policy = HedgingAgent(hidden_dim=args.hidden_dim, num_hidden_layers=args.num_hidden_layers)
+        policy = HedgingAgent(
+            hidden_dim=args.hidden_dim,
+            num_hidden_layers=args.num_hidden_layers,
+            strike=args.strike,
+        )
         sequence_policy = False
     else:
         policy = RecurrentHedgingAgent(
             cell_type=args.architecture,
             hidden_dim=args.rnn_hidden_dim,
             num_layers=args.rnn_num_layers,
+            strike=args.strike,
         )
         sequence_policy = True
 
