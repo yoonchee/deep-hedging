@@ -1,0 +1,19 @@
+{
+  "real": {
+    "mean": 0.010224714875221252,
+    "std": 0.05164024978876114,
+    "skewness": -0.9035423398017883,
+    "excess_kurtosis": 4.1980695724487305
+  },
+  "synthetic": {
+    "mean": -0.04627449810504913,
+    "std": 0.06707507371902466,
+    "skewness": 0.08417777717113495,
+    "excess_kurtosis": 0.08148813247680664
+  },
+  "diversity_ratio": 1.2988913491588632,
+  "diversity_warning_threshold": 0.3,
+  "mean_bias_in_std": -1.0940925578668819,
+  "mean_bias_warning_threshold_std": 2.0,
+  "verdict": "OK: diversity is 129.9% of real, mean bias is -1.1 real std devs."
+}

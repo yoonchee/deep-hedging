@@ -9,54 +9,54 @@
   },
   "alphas": {
     "0.5": {
-      "mean_wealth": -0.6967963576316833,
-      "std_wealth": 0.36769574880599976,
-      "cvar_95": 1.0026015043258667,
-      "cvar_99": 1.0029656887054443,
-      "skewness": 1.0075510740280151,
-      "excess_kurtosis": -0.5827586650848389,
-      "mean_transaction_cost": 0.0030037537217140198,
-      "total_transaction_cost": 6.00750732421875
+      "mean_wealth": -0.48200854659080505,
+      "std_wealth": 3.374913454055786,
+      "cvar_95": 8.27256965637207,
+      "cvar_99": 26.318445205688477,
+      "skewness": -14.630121231079102,
+      "excess_kurtosis": 251.91622924804688,
+      "mean_transaction_cost": 8.272912168649782e-07,
+      "total_transaction_cost": 0.001654582447372377
     },
     "0.75": {
-      "mean_wealth": -0.6968030333518982,
-      "std_wealth": 0.36777162551879883,
-      "cvar_95": 1.0026025772094727,
-      "cvar_99": 1.0029656887054443,
-      "skewness": 1.0077372789382935,
-      "excess_kurtosis": -0.582556962966919,
-      "mean_transaction_cost": 0.0030021625570952892,
-      "total_transaction_cost": 6.004324913024902
+      "mean_wealth": -0.4820285737514496,
+      "std_wealth": 3.3748905658721924,
+      "cvar_95": 8.272383689880371,
+      "cvar_99": 26.31842041015625,
+      "skewness": -14.63037109375,
+      "excess_kurtosis": 251.92234802246094,
+      "mean_transaction_cost": 4.657599674828816e-06,
+      "total_transaction_cost": 0.009315199218690395
     },
     "0.9": {
-      "mean_wealth": -0.6968094110488892,
-      "std_wealth": 0.36786985397338867,
-      "cvar_95": 1.0026053190231323,
-      "cvar_99": 1.002966046333313,
-      "skewness": 1.007832407951355,
-      "excess_kurtosis": -0.5825405120849609,
-      "mean_transaction_cost": 0.0030003623105585575,
-      "total_transaction_cost": 6.000724792480469
+      "mean_wealth": -0.49471065402030945,
+      "std_wealth": 3.0675365924835205,
+      "cvar_95": 7.073425769805908,
+      "cvar_99": 23.41084861755371,
+      "skewness": -15.636726379394531,
+      "excess_kurtosis": 283.213623046875,
+      "mean_transaction_cost": 0.0009413860971108079,
+      "total_transaction_cost": 1.8827722072601318
     },
     "0.95": {
-      "mean_wealth": -0.6968106031417847,
-      "std_wealth": 0.3678818941116333,
-      "cvar_95": 1.0026054382324219,
-      "cvar_99": 1.002966046333313,
-      "skewness": 1.0078688859939575,
-      "excess_kurtosis": -0.5824906826019287,
-      "mean_transaction_cost": 0.0030000759288668633,
-      "total_transaction_cost": 6.000151634216309
+      "mean_wealth": -0.5026499629020691,
+      "std_wealth": 2.803771734237671,
+      "cvar_95": 6.338583946228027,
+      "cvar_99": 21.056373596191406,
+      "skewness": -16.227380752563477,
+      "excess_kurtosis": 305.28466796875,
+      "mean_transaction_cost": 0.0013868194073438644,
+      "total_transaction_cost": 2.7736387252807617
     },
     "0.99": {
-      "mean_wealth": -0.6967760324478149,
-      "std_wealth": 0.3673544228076935,
-      "cvar_95": 1.0025889873504639,
-      "cvar_99": 1.0029654502868652,
-      "skewness": 1.0065256357192993,
-      "excess_kurtosis": -0.5842642784118652,
-      "mean_transaction_cost": 0.0030098971910774708,
-      "total_transaction_cost": 6.019794464111328
+      "mean_wealth": -0.4870898723602295,
+      "std_wealth": 3.2723207473754883,
+      "cvar_95": 7.808070182800293,
+      "cvar_99": 25.30630874633789,
+      "skewness": -15.114861488342285,
+      "excess_kurtosis": 267.7143859863281,
+      "mean_transaction_cost": 0.0005554583622142673,
+      "total_transaction_cost": 1.1109167337417603
     }
   }
 }
