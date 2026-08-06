@@ -75,3 +75,15 @@ $$
 $$
 
 where $\mathcal{L}_{S,\text{fake}}$ is the section-4-style supervised loss applied to $G$'s own output (keeping $\hat h$'s stepwise dynamics realistic as $G$ updates), $\mathcal{L}_{\text{moment}}$ (section 4.1) is applied to the price channel of $R(\hat h)$, and $\eta$/$\mu$ are the `--lambda-supervised`/`--lambda-moment` weights. $E, R$ continue training on $\mathcal{L}_{\text{recon}}$ throughout phase 3 with a small weight, so the embedding doesn't drift while $G$/$D$ train.
+
+## 6. CVaR Control-Variate Baseline
+
+Kim (2021)'s own suggested future work proposes an actor-critic (A2C/A3C) baseline to reduce policy-gradient variance, in a REINFORCE-style stochastic-policy setting (`math_spec.md`'s framing assumes $\pi(a \mid s)$, a probability distribution over actions). This repo's policies are deterministic and trained by direct backpropagation through a differentiable simulator (Buehler et al. 2018's convention, `policy/train_policy.py::PolicyTrainer`) — an exact pathwise gradient with no REINFORCE-style variance to reduce. The adapted technique targets a different, real source of noise present in *this* training paradigm: the Rockafellar-Uryasev CVaR loss (section 3) has a gradient that flows only through the worst $(1-\alpha)$ fraction of each minibatch, making *which* paths get selected as "worst" — and hence the realized gradient — noisy from batch to batch.
+
+Let $X_i$ be the policy's terminal wealth and $X_i^{BS}$ the closed-form Black-Scholes delta-hedge's terminal wealth, both computed on the *same* sampled price path $i$ (so both share the same market-driven randomness). Training minimizes:
+
+$$
+\text{CVaR}_\alpha\big(X - X^{BS}\big) = \inf_h \left\{ h + \frac{1}{1-\alpha} \, \mathbb{E}\big[ \max(-(X - X^{BS}) - h, 0) \big] \right\}
+$$
+
+with no gradient through $X^{BS}$ (a fixed, zero-approximation-error analytic baseline — not a learned critic, since the true value function is available in closed form here). Since $X^{BS}$ is a constant with respect to policy parameters, each individual path's gradient direction is unchanged from the unadjusted loss ($\nabla_\theta (X_i - X_i^{BS}) = \nabla_\theta X_i$); what changes is which paths the batch's tail selection picks out, since $X_i - X_i^{BS}$ isolates policy-attributable underperformance from shared market-level noise (a classical control-variate argument: $\text{Var}(X - Y) < \text{Var}(X)$ when $\text{Cov}(X, Y)$ is large, as it is here since both wealths are driven by the same underlying path). See `policy/train_policy.py::PolicyTrainer`'s `use_bs_baseline` and RESULTS.md for the measured effect.

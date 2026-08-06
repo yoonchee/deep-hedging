@@ -29,8 +29,11 @@ what matches the paper, what doesn't, and why is in
   policies (RNN/LSTM/GRU) that consume the whole price path in one pass,
   matching the paper's own architecture comparison. All three recurrent
   cell types now replicate the paper's frictionless Part I result after a
-  standardized-log-moneyness input fix; Basic RNN alone still doesn't
-  converge in the harder stress-test setting.
+  standardized-log-moneyness input fix; Basic RNN's stress-test performance
+  is seed-sensitive, substantially improved by a CVaR control-variate
+  baseline (`--use-bs-baseline`, an adaptation of the paper's suggested
+  actor-critic variance reduction to this codebase's direct-backprop
+  training).
 - A **differentiable CVaR loss** (Rockafellar-Uryasev) with a jointly-learned
   auxiliary threshold.
 - A **stress-test backtester** comparing all four architectures against
@@ -42,9 +45,11 @@ what matches the paper, what doesn't, and why is in
 ## Project structure
 
 ```
-math_spec.md                  Core formulas: payoff, transaction cost, CVaR, WGAN-GP + TimeGAN losses
+math_spec.md                  Core formulas: payoff, transaction cost, CVaR, WGAN-GP + TimeGAN losses, CVaR baseline
 src/
-  common/stats.py             Shared skewness/excess-kurtosis/terminal-log-return helpers (tensor + float)
+  common/
+    stats.py                   Shared skewness/excess-kurtosis/terminal-log-return helpers (tensor + float)
+    black_scholes.py           Analytic Black-Scholes call delta (also used as a CVaR control-variate baseline)
   generator/
     market_gan.py             WGAN-GP Generator (GRU) + Discriminator (LSTM), single-feature
     timegan.py                TimeGAN: Embedder/Recovery/Generator/Supervisor/Discriminator, multi-feature
@@ -61,7 +66,7 @@ src/
     evaluate.py                Stress-test backtest vs. Black-Scholes (WGAN-GP- and TimeGAN-trained policies)
     replicate_part1.py         Frictionless Part I paper replication
     plotting.py                Shared chart library
-tests/                         66 tests
+tests/                         71 tests
 results/                       Generated plots + JSON summaries (gitignored inputs: data/, checkpoints/)
 ```
 
@@ -89,7 +94,10 @@ python src/generator/validate.py --generator-checkpoint checkpoints/market_gan.p
 
 # 3. Train each policy architecture against the generator
 python src/policy/train_policy.py --architecture mlp  --epochs 200
-python src/policy/train_policy.py --architecture rnn  --epochs 200
+# Basic RNN's stress-test convergence is seed-sensitive; --use-bs-baseline
+# (a CVaR control-variate variance-reduction technique, see RESULTS.md)
+# substantially improves and stabilizes it:
+python src/policy/train_policy.py --architecture rnn  --epochs 200 --use-bs-baseline
 python src/policy/train_policy.py --architecture lstm --epochs 200
 python src/policy/train_policy.py --architecture gru  --epochs 200
 
@@ -134,10 +142,13 @@ trail:
   the generator's terminal-return skew/kurtosis toward the real data's.
 - **Stress-test backtest**: after the RNN/LSTM input fix, LSTM's stress-test
   tail risk also improved dramatically (CVaR₉₉ 18.4 → 5.0, now matching
-  GRU) — but Basic RNN specifically still doesn't converge in this harder
-  setting even with 5x more training, narrowing the open question to
-  vanilla RNN's own architectural limitation rather than an unexplained
-  RNN/LSTM pairing.
+  GRU). Basic RNN looked architecturally stuck at first (single-seed
+  testing), but an 8-seed sweep revealed it's actually highly
+  seed-sensitive and bimodal, not deterministically broken — every prior
+  experiment in this project happened to use an unlucky default seed. A
+  CVaR control-variate baseline (`--use-bs-baseline`) cuts cross-seed CVaR₉₉
+  variance 5.7x and turns the canonical checkpoint's CVaR₉₉ from 19.3 to
+  7.3 — real progress, though still short of LSTM/GRU's ~5.0.
 - **TimeGAN vs. WGAN-GP**: TimeGAN's synthetic-data diversity was hard to
   calibrate — first only ~31% of real data's standard deviation (sigmoid
   latent space), then 214-224% after switching to tanh to fix it. That
@@ -152,9 +163,9 @@ trail:
 
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
-- Basic RNN still doesn't converge in the stress-test setting (unlike
-  Part I, where it does) — likely its own architectural limitation, not the
-  input-scaling bug that affected all three recurrent cell types before.
+- Basic RNN's stress-test convergence is seed-sensitive (bimodal: some
+  seeds converge well, others get stuck) — substantially improved by a
+  CVaR control-variate baseline, but not fully closed to LSTM/GRU's level.
 - TimeGAN's diversity is miscalibrated (first too low, then too high after
   a fix) and its fidelity checker has no upper-bound diversity warning to
   catch the latter — see `RESULTS.md`.

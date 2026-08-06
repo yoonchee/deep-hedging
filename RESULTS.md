@@ -19,7 +19,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 | Paper component | This repo | Status |
 |---|---|---|
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
-| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match but Basic RNN still doesn't converge — see below |
+| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match, Basic RNN is seed-sensitive and improved (not fully closed) by a CVaR control-variate baseline — see below |
 | Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params (S₀=K=100, vol=0.15, T=1/12, 30 steps) |
 | Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results that shifted after the RNN/LSTM fix — see TimeGAN section |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches |
@@ -198,36 +198,87 @@ real-data WGAN-GP generator described above (reproduce with `python
 src/backtester/evaluate.py`, after retraining each policy so it's trained
 against the new generator checkpoint).
 
-**This table was retrained twice.** The first retrain (moment-matching loss
-only) produced the table originally here, with a narrative claiming "MLP
-and GRU condition on market state, Basic RNN/LSTM structurally don't." Once
-the RNN/LSTM DC-dominance bug was found and fixed (see Part I above), every
-`RecurrentHedgingAgent` — RNN, LSTM, *and* GRU — needed retraining, since the
-input transform changed for all three cell types, not just the two that
-were visibly broken. Current numbers, after that retrain:
+**This table was retrained three times**, and each retrain corrected a
+mistaken conclusion from the previous one — see the RNN/LSTM sequence below
+for the full trail. Current numbers (reproduce with `python
+src/backtester/evaluate.py`):
 
 | Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
 |---|---|---|---|---|---|---|
 | Black-Scholes | -0.695 | 1.82 | 2.34 | -1.97 | 5.34 | 12.90 |
 | MLP | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 | 10.00 |
-| Basic RNN | -0.539 | 6.06 | 19.26 | -14.84 | 257.6 | 1.61 |
+| Basic RNN | -0.676 | 3.05 | **7.27** | -9.19 | 120.0 | 18.07 |
 | LSTM | **-0.686** | **3.26** | **5.02** | -2.83 | 11.7 | 15.21 |
 | GRU | -0.710 | 3.07 | 4.52 | -2.48 | 10.2 | 18.60 |
 
-**LSTM's fix generalized**: its CVaR₉₉ dropped from 18.37 to **5.02** — now
-essentially matching GRU (4.52), a complete turnaround, and direct evidence
-the DC-dominance fix (not something GRU-gating-specific) was the real lever
-all along. **Basic RNN did not improve** (19.61 → 19.26, unchanged within
-noise) — checked with 5x more training (500 vs. 200 epochs): still no
-change. This narrows the open question considerably: it's not "RNN/LSTM
-can't condition on market state" (LSTM clearly can, once its input is
-scaled correctly) — it's specifically vanilla RNN's own well-known
-architectural limitation (single-gate recurrence, weaker gradient
-propagation than LSTM/GRU's gating) resurfacing once the DC-dominance
-confound is removed. In Part I's simpler frictionless setting even vanilla
-RNN converged; in this harder setting (real market data, transaction costs,
-a CVaR objective at α=0.95), it doesn't. This is now a materially narrower,
-better-evidenced open problem than "RNN/LSTM as a pair, unexplained."
+**Round 1 (moment-matching loss only)**: produced the table originally
+here, claiming "MLP and GRU condition on market state, Basic RNN/LSTM
+structurally don't."
+
+**Round 2 (the RNN/LSTM DC-dominance fix)**: every `RecurrentHedgingAgent`
+needed retraining since the input transform changed for all three cell
+types. LSTM's CVaR₉₉ dropped from 18.37 to 5.02 — a complete turnaround,
+matching GRU, and direct evidence the DC-dominance fix (not something
+GRU-gating-specific) was the real lever all along. **Basic RNN did not
+improve** (19.61 → 19.26) even with 5x more training, and the conclusion at
+the time was "vanilla RNN's own well-known architectural limitation."
+
+**That conclusion was also wrong**, and the error is instructive: every
+single training run in this project, for every architecture and every
+experiment, used the same default `--seed 0`. Testing Basic RNN's
+stress-test training across 8 seeds (`--seed 0` through `7`, otherwise
+identical settings) reveals its convergence is not architecturally blocked
+at all — it's **highly seed-sensitive and bimodal**: some seeds converge to
+a GRU/LSTM-competitive policy (delta span up to 0.999, CVaR₉₉ as low as
+4.25), others get fully stuck (span exactly 0.0000, CVaR₉₉ ≈ 19-20). Seed 0
+— the one every prior experiment in this repo happened to use — is one of
+the stuck ones. A single-seed test cannot distinguish "architecturally
+impossible" from "unlucky initialization," and round 2 mistook the latter
+for the former.
+
+### Fixing the seed-sensitivity: a CVaR control-variate baseline
+
+Kim (2021)'s own suggested future work is an actor-critic (A2C/A3C)
+variance-reduction baseline — but that assumes a stochastic-policy,
+REINFORCE-style training setup this codebase doesn't use (see
+`math_spec.md` section 6 for the full adaptation). The version implemented
+here (`PolicyTrainer`'s `use_bs_baseline`) trains on
+`CVaR_alpha(policy_wealth - black_scholes_wealth)`, both wealths computed on
+the identical sampled price path, instead of raw `CVaR_alpha(policy_wealth)`
+— using the closed-form Black-Scholes hedge as a zero-approximation-error
+baseline (not a learned critic, since the exact value function is available
+here) to cancel shared market-driven noise and reduce variance in which
+paths CVaR's sparse gradient selects as "worst," batch to batch.
+
+Same 8-seed sweep, with vs. without this flag:
+
+| | No baseline | `--use-bs-baseline` |
+|---|---|---|
+| CVaR₉₉ mean | 8.57 | **5.18** |
+| CVaR₉₉ std across seeds | 6.89 | **1.20** (5.7x lower) |
+| CVaR₉₉ worst seed | 20.14 | **7.27** |
+| CVaR₉₉ best seed | 4.25 | 3.91 |
+| Fully-stuck seeds (span < 0.1) | 2/8 (25%) | 1/8 (12.5%, and less severe) |
+
+The technique doesn't uniformly outperform every individual seed (a couple
+of already-lucky seeds do marginally better without it), but it
+substantially and consistently **reduces the variance of the outcome**:
+mean CVaR₉₉ drops 40%, cross-seed standard deviation drops 5.7x, and —
+critically — the worst-case seed's CVaR₉₉ improves from catastrophic
+(20.14, an essentially unhedged position) to merely mediocre (7.27, in
+MLP's range). Retraining the project's canonical seed-0 checkpoint with
+this flag: CVaR₉₉ 19.26 → **7.27** (the number in the table above). It
+doesn't close the gap to LSTM/GRU's ~5.0, but it turns Basic RNN from a
+coin-flip between "works" and "completely broken" into a consistently
+mediocre-but-functional policy — a genuine, measured win for the technique,
+even though it doesn't fully solve Basic RNN's stress-test performance.
+
+This is the third correction of this kind in this project's RNN/LSTM
+investigation (see the moneyness-fix self-correction in Part I, and the
+TimeGAN GRU-attribution retraction below) — worth stating plainly rather
+than smoothing over: single-seed conclusions about *why* a specific
+architecture fails are unreliable in this codebase's training regime, and
+should be treated as provisional until checked across multiple seeds.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -377,18 +428,19 @@ Roughly in priority order:
    still runs a bit low (~3.1 vs. ~4.0-5.5, itself a noisy target — see
    above). A learned, per-batch-adaptive weighting (vs. the current fixed
    `--lambda-moment`) could plausibly tighten this further.
-2. **Basic RNN non-convergence in the stress-test setting — resolved in
-   Part I, still open for the harder real-generator training.** The
-   original RNN/LSTM failure was a DC-dominated RNN input (fixed via
-   standardized log-moneyness; see Part I above), and this fix closed the
-   gap completely for both cell types in Part I's frictionless setting, and
-   for LSTM in the harder WGAN-GP stress-test setting too (CVaR₉₉ 18.37 →
-   5.02). Basic RNN specifically still doesn't converge in the stress-test
-   setting even after the fix, confirmed with 5x more training (500 vs. 200
-   epochs, no change) — likely vanilla RNN's own well-known weaker gradient
-   propagation (a single gate vs. LSTM/GRU's more sophisticated gating),
-   now unmasked as the sole remaining bottleneck rather than being confused
-   with the input-scaling bug.
+2. **Basic RNN's stress-test performance is improved but not fully closed
+   to LSTM/GRU's level.** The DC-dominance input fix (Part I) closed the
+   gap completely in Part I's frictionless setting and for LSTM in the
+   harder WGAN-GP stress-test setting (CVaR₉₉ 18.37 → 5.02). Basic RNN was
+   initially believed to have a separate, deterministic architectural
+   limitation in the stress-test setting — that diagnosis was wrong: it's
+   actually extreme seed-sensitivity (bimodal outcomes across random
+   seeds, confirmed via an 8-seed sweep), masked because every experiment
+   in this project used the same default seed. A CVaR control-variate
+   baseline (`PolicyTrainer`'s `use_bs_baseline`, math_spec.md section 6)
+   substantially reduces this variance (cross-seed CVaR₉₉ std 6.89 → 1.20)
+   and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
+   a real improvement, though still short of LSTM/GRU's ~5.0.
 3. **TimeGAN's diversity is miscalibrated, and neither direction tried so
    far lands correctly.** Sigmoid latents undershot real diversity (31%);
    switching to tanh overshot it (214-224%) — see the TimeGAN section above
@@ -433,11 +485,19 @@ Roughly in priority order:
   architecture happens to land in a particular local optimum first?
   Testing against a second, differently-parameterized stress scenario, or
   multiple random seeds per architecture, would help distinguish the two.
-- Investigate vanilla RNN's now-isolated stress-test non-convergence
-  (input scaling confirmed fixed, more training confirmed not to help) —
-  actor-critic variance reduction or an entropy bonus, per the paper's own
-  future-work section, or simply accepting that plain RNN's weaker gating
-  is a genuine architectural limitation in this harder training regime.
+- Close the remaining gap between Basic RNN's `use_bs_baseline` result
+  (CVaR₉₉ 7.27) and LSTM/GRU's (~5.0): try combining the baseline with
+  orthogonal init (not re-tested together since the input-scaling fix),
+  average over multiple seeds and pick the best rather than a single fixed
+  seed, or an entropy bonus per the paper's own future-work section
+  (untried; this project only adapted the actor-critic-baseline half of
+  the paper's two suggestions).
+- Apply the same 8-seed-sweep methodology used to catch Basic RNN's
+  seed-sensitivity to every other single-seed claim in this document —
+  it's the third time in this project a single-seed conclusion turned out
+  to be wrong (see the moneyness-fix self-correction and the TimeGAN
+  GRU-attribution retraction), so other still-standing single-seed claims
+  should be treated as provisional, not just this one.
 - Add the P₀ premium term to the wealth objective.
 - Scale up: more Monte Carlo scenarios, larger networks, longer training,
   matching the paper's actual computational budget.
