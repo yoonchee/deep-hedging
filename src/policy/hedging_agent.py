@@ -12,6 +12,7 @@ Two families:
   cell types against Black-Scholes.
 """
 
+import math
 from typing import Annotated, List, Literal, Optional
 
 import torch
@@ -105,13 +106,11 @@ class RecurrentHedgingAgent(nn.Module):
         ] = None,
         strike: Annotated[
             float,
-            "option strike K; the price path is divided by this before the "
-            "RNN sees it, so its input is always moneyness-scale (~1) "
-            "regardless of the underlying's raw price level -- raw prices "
-            "far from 1 (e.g. S~100) saturate the RNN's gating "
-            "nonlinearities and can collapse the policy to an "
-            "input-insensitive constant. Default 1.0 is a no-op for "
-            "already-normalized prices.",
+            "option strike K, used in the log-moneyness input transform "
+            "log(S_t / K); K itself only recenters the ratio, it doesn't fix "
+            "the DC-dominance problem alone (see implied_vol/time_to_maturity "
+            "below). Default 1.0 matches this project's normalized-price "
+            "convention (S_0 = strike = 1.0).",
         ] = 1.0,
         orthogonal_init: Annotated[
             bool,
@@ -122,6 +121,30 @@ class RecurrentHedgingAgent(nn.Module):
             "matrices don't, and can otherwise leave the network stuck at an "
             "input-insensitive constant output no matter how long it trains.",
         ] = False,
+        implied_vol: Annotated[
+            float,
+            "implied volatility, used only to scale the log-moneyness input "
+            "(see time_to_maturity below) -- NOT fed to the network as a "
+            "per-step feature; it's a fixed hyperparameter of this policy "
+            "instance, matching whatever implied_vol PolicyTrainer uses "
+            "during training and stress-testing so the same instance is "
+            "used consistently. Default 0.2 matches this project's typical "
+            "CLI default (--implied-vol).",
+        ] = 0.2,
+        time_to_maturity: Annotated[
+            float,
+            "T, the option's total time to maturity, used only to scale the "
+            "log-moneyness input: dividing log(S_t/K) by implied_vol * "
+            "sqrt(T) turns a signal whose raw variation is a tiny fraction "
+            "of S_t's magnitude (e.g. ~3% for Part I's S0=K=100, vol=0.15, "
+            "T=1/12) into an O(1)-scaled quantity the RNN can actually learn "
+            "from -- dividing raw price by strike alone (the previous "
+            "approach) is scale-invariant to this signal-to-DC ratio and "
+            "does not fix it. See RESULTS.md's RNN/LSTM diagnostic for the "
+            "measured before/after. Default 1.0 is a generic placeholder for "
+            "callers (e.g. shape/gradient tests) that don't care about "
+            "matching a specific market scenario.",
+        ] = 1.0,
     ) -> None:
         super().__init__()
         if cell_type not in self.CELL_TYPES:
@@ -132,6 +155,9 @@ class RecurrentHedgingAgent(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.strike = strike
+        self.implied_vol = implied_vol
+        self.time_to_maturity = time_to_maturity
+        self.moneyness_scale = implied_vol * math.sqrt(time_to_maturity)
 
         rnn_cls = self.CELL_TYPES[cell_type]
         self.rnn = rnn_cls(
@@ -170,8 +196,9 @@ class RecurrentHedgingAgent(nn.Module):
         # [Batch, Time_Steps, 1] -> [Batch, Time_Steps - 1, 1] (no decision needed at S_N)
         inputs = prices[:, :-1, :]
 
-        # [Batch, Time_Steps - 1, 1] -> [Batch, Time_Steps - 1, 1] (rescale to moneyness, ~1 scale)
-        inputs = inputs / self.strike
+        # [Batch, Time_Steps - 1, 1] -> [Batch, Time_Steps - 1, 1] (standardized
+        # log-moneyness: log(S_t/K) / (implied_vol * sqrt(T)), O(1)-scaled)
+        inputs = torch.log(inputs / self.strike) / self.moneyness_scale
 
         # [Batch, Time_Steps - 1, 1] -> [Batch, Time_Steps - 1, hidden_dim]
         hidden_states, _ = self.rnn(inputs)

@@ -274,6 +274,8 @@ def _train_and_save(
             hidden_dim=args.rnn_hidden_dim,
             num_layers=args.rnn_num_layers,
             strike=args.strike,
+            implied_vol=args.implied_vol,
+            time_to_maturity=args.dt * (args.seq_len - 1),
         )
         sequence_policy = True
 

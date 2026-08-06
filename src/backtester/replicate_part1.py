@@ -90,6 +90,8 @@ def build_policy(
     rnn_hidden_dim: Annotated[int, "recurrent hidden state size"],
     rnn_output_hidden_dims: Annotated[List[int], "FC head widths after the RNN, e.g. [64, 64]"],
     strike: Annotated[float, "option strike K, used to normalize the price input to ~1 scale"],
+    implied_vol: Annotated[float, "implied volatility, used to scale the RNN's log-moneyness input"] = 0.2,
+    time_to_maturity: Annotated[float, "T, used to scale the RNN's log-moneyness input"] = 1.0,
 ) -> Annotated[Tuple[Any, bool], "(policy, sequence_policy)"]:
     if architecture == "mlp":
         return (
@@ -105,6 +107,8 @@ def build_policy(
             num_layers=1,
             output_hidden_dims=rnn_output_hidden_dims,
             strike=strike,
+            implied_vol=implied_vol,
+            time_to_maturity=time_to_maturity,
         ),
         True,
     )
@@ -126,10 +130,18 @@ def train_policy(
     rnn_hidden_dim: int,
     rnn_output_hidden_dims: List[int],
     strike: Annotated[float, "option strike K, used to normalize the price input to ~1 scale"],
+    time_to_maturity: Annotated[float, "T, used to scale the RNN's log-moneyness input"] = 1.0,
     log_every: int = 0,
 ) -> Annotated[Tuple[Any, bool], "(trained policy, sequence_policy)"]:
     policy, sequence_policy = build_policy(
-        architecture, hidden_dim, num_hidden_layers, rnn_hidden_dim, rnn_output_hidden_dims, strike
+        architecture,
+        hidden_dim,
+        num_hidden_layers,
+        rnn_hidden_dim,
+        rnn_output_hidden_dims,
+        strike,
+        implied_vol=implied_vol,
+        time_to_maturity=time_to_maturity,
     )
     cvar_loss = CVaRLoss(alpha=alpha)
     trainer = PolicyTrainer(
@@ -242,6 +254,7 @@ def run_part1_replication(
                 num_hidden_layers=num_hidden_layers,
                 rnn_hidden_dim=rnn_hidden_dim,
                 rnn_output_hidden_dims=list(rnn_output_hidden_dims),
+                time_to_maturity=time_to_maturity,
                 strike=strike,
             )
             policies[display_name] = (policy, sequence_policy)

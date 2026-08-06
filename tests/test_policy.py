@@ -171,6 +171,64 @@ def test_recurrent_agent_strike_normalization_matches_equivalent_moneyness() -> 
     assert torch.allclose(delta_raw, delta_scaled, atol=1e-5)
 
 
+def test_recurrent_agent_rnn_input_is_standardized_log_moneyness() -> None:
+    # Captures the actual tensor fed into self.rnn via a forward hook and
+    # checks it matches log(S_t/K) / (implied_vol * sqrt(T)) exactly -- a
+    # regression test protecting the fix for the DC-dominance bug (raw S/K
+    # has ~3% signal buried under a ~1.0 constant offset for realistic
+    # option params; this transform is what makes the RNN's input O(1)-scaled
+    # instead of dominated by that offset). See RESULTS.md.
+    strike, implied_vol, time_to_maturity = 100.0, 0.15, 1.0 / 12.0
+    agent = RecurrentHedgingAgent(
+        cell_type="gru",
+        hidden_dim=8,
+        num_layers=1,
+        strike=strike,
+        implied_vol=implied_vol,
+        time_to_maturity=time_to_maturity,
+    )
+
+    captured = {}
+
+    def hook(module, args):
+        captured["rnn_input"] = args[0]
+
+    agent.rnn.register_forward_pre_hook(hook)
+
+    prices = torch.tensor([[[95.0], [100.0], [105.0], [110.0]]])  # [1, 4, 1]
+    agent(prices)
+
+    expected = torch.log(prices[:, :-1, :] / strike) / (implied_vol * time_to_maturity**0.5)
+    assert torch.allclose(captured["rnn_input"], expected, atol=1e-6)
+
+
+def test_recurrent_agent_moneyness_input_is_order_one_scale_for_realistic_params() -> None:
+    # The regression this fix targets: raw S/K for Part I's params (S0=K=100,
+    # vol=0.15, T=1/12) has std ~0.03 (measured directly on real GBM paths --
+    # see RESULTS.md) -- a signal 97% dominated by a constant DC offset of
+    # 1.0. The standardized log-moneyness transform must turn this into an
+    # O(1)-scaled quantity instead.
+    torch.manual_seed(0)
+    strike, implied_vol, time_to_maturity = 100.0, 0.15, 1.0 / 12.0
+    agent = RecurrentHedgingAgent(
+        cell_type="gru", hidden_dim=8, num_layers=1, strike=strike,
+        implied_vol=implied_vol, time_to_maturity=time_to_maturity,
+    )
+
+    # GBM-like price path around S0=100 at this vol/maturity, matching
+    # replicate_part1.py's actual training distribution.
+    log_returns = torch.cumsum(torch.randn(500, 29) * implied_vol * (time_to_maturity / 29) ** 0.5, dim=1)
+    prices = 100.0 * torch.exp(torch.cat([torch.zeros(500, 1), log_returns], dim=1)).unsqueeze(-1)
+
+    captured = {}
+    agent.rnn.register_forward_pre_hook(lambda module, args: captured.update(rnn_input=args[0]))
+    agent(prices)
+
+    # Raw S/K would have std ~0.03 (the bug); standardized log-moneyness
+    # should land within an order of magnitude of 1.0.
+    assert 0.1 < captured["rnn_input"].std().item() < 10.0
+
+
 @pytest.mark.parametrize("cell_type", ["rnn", "lstm", "gru"])
 def test_recurrent_agent_gradient_propagates_to_every_price_timestep(cell_type: str) -> None:
     # Same rationale as the stepwise HedgingAgent test above, but for a
