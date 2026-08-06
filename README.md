@@ -13,7 +13,9 @@ what matches the paper, what doesn't, and why is in
   paths, trainable on either a synthetic GBM placeholder or real historical
   data (via `yfinance`), with an automatic **fidelity checker** that catches
   mode collapse, mean bias, and tail-shape (skew/kurtosis) mismatches before
-  they cascade into policy training.
+  they cascade into policy training, plus an explicit **moment-matching loss
+  term** that trains the generator to reproduce real markets' skew/kurtosis
+  directly, not just what fools the adversarial critic.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
@@ -94,9 +96,8 @@ pytest tests/ -v
 
 ## Results, in brief
 
-Two independent experiments this session, with two very different (and
-equally honest) outcomes — see [`RESULTS.md`](RESULTS.md) for the full
-numbers, plots, and diagnostic trail:
+See [`RESULTS.md`](RESULTS.md) for the full numbers, plots, and diagnostic
+trail:
 
 - **Frictionless replication (Part I)**: MLP and especially GRU learn a
   genuine, Black-Scholes-like delta response and post competitive CVaR.
@@ -105,16 +106,21 @@ numbers, plots, and diagnostic trail:
   initialization, and removing an over-deep readout head), they converge to
   a near-constant policy in this exact setup. That failure is real,
   reproducible, and documented, not swept under the rug.
-- **Stress-test backtest**: all four trained policies currently underperform
-  Black-Scholes on tail risk. This traces directly to a known, *diagnosed*
-  gap in the real-data market generator — it captures the right mean and
-  spread but not real markets' fat-tail crash risk (skewness/kurtosis) — caught
-  by the fidelity checker itself, not discovered by accident.
+- **GAN tail-shape fidelity**: the real-data generator originally captured
+  the right mean and spread but not real markets' fat-tail crash risk
+  (skew/kurtosis), caught by the built-in fidelity checker. Fixed with an
+  explicit moment-matching loss term (`generator/train_gan.py`) that pulls
+  the generator's terminal-return skew/kurtosis toward the real data's.
+- **Stress-test backtest**: retrained against the fixed generator, MLP and
+  GRU's tail risk dropped sharply (GRU's CVaR₉₉ 18.4 → 4.5, now close to
+  Black-Scholes) — but Basic RNN and LSTM barely moved, confirming their
+  failure is structural (they don't condition on market state at all) and
+  independent of the generator fix.
 
 ## Known limitations
 
-- Real-data generator doesn't capture tail asymmetry (skew/kurtosis) yet —
-  the single biggest open item; see `RESULTS.md`.
+- Generator tail-shape fidelity is improved but not exact — synthetic skew
+  now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
 - Basic RNN and LSTM policies don't converge in this setup; GRU and MLP do.
 - Market generator is a single-feature WGAN-GP, not the paper's full
   multi-variate TimeGAN (embedder/recovery/supervisor architecture).

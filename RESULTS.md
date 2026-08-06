@@ -117,51 +117,95 @@ mismatches (wrong tail shape). It runs automatically after every
    30-day return). Fixed by retraining with more epochs (200→1500) and a
    higher learning rate (1e-4→3e-4); mean bias dropped to **-1.1σ**,
    confirmed by the same tool.
-3. **Tail shape — found, not yet fixed.** Real 30-day log-returns: skew
-   -0.90, excess kurtosis +4.20 (real markets' crash risk). Synthetic: skew
-   +0.08, kurtosis +0.08 — essentially symmetric and thin-tailed. This is
-   the single biggest reason the stress-test backtest (below) shows all
-   four trained policies underperforming Black-Scholes: they were trained
-   against a generator that doesn't know crashes happen.
+3. **Tail shape — found, then substantially fixed.** Real 30-day
+   log-returns: skew ≈ -0.91, excess kurtosis ≈ +4.0-5.5 (real markets'
+   crash risk; see the note on estimator noise below). The
+   adversarially-trained generator had learned skew +0.08, kurtosis +0.08 —
+   essentially symmetric and thin-tailed. The critic alone doesn't penalize
+   this: matching the first two moments (mean, variance) is enough to fool
+   it, so nothing in the WGAN-GP objective pushed the generator toward real
+   markets' asymmetric crash risk.
 
-Current verdict (`results/gan_fidelity_summary.json`):
+   **The fix**: `train_gan.py` now adds an explicit moment-matching term to
+   the generator loss — `(skew_fake - skew_real)² + (kurtosis_fake -
+   kurtosis_real)²`, computed each step directly on the generated batch (see
+   `common/stats.py::skewness_tensor` / `excess_kurtosis_tensor`, and
+   `WGANGPTrainer.train_generator_step` in `train_gan.py`). The real-data
+   targets are fixed once, up front, from a large (5000-path) sample
+   (`--moment-target-batch-size`), not recomputed per minibatch — the WGAN's
+   own 64-path training minibatch is far too small to estimate a 3rd/4th
+   moment without enormous noise. Retraining the real-data generator with
+   this term (same 1500 epochs, lr 3e-4) moved synthetic skew from +0.08 to
+   **≈ -1.65** and kurtosis from +0.08 to **≈ 3.1** — the sign is now right
+   and the magnitude is in the real ballpark, though skew overshoots
+   (real's -0.91 vs. synthetic's -1.65) and kurtosis still runs a bit low.
+
+   **A bug found along the way**: the automatic post-training fidelity check
+   was comparing real vs. synthetic using only `args.batch_size` (64) real
+   paths — nowhere near enough to estimate kurtosis reliably (a
+   rare-event-dominated statistic). This made the auto-check's verdict
+   noisy independent of any actual generator quality change. Fixed by
+   reusing the larger `moment_target_batch_size` sample for the check
+   instead. Even at N=5000, kurtosis estimates on ^GSPC vary
+   seed-to-seed (real: 4.0 to 5.5 across three re-samples) because 70 years
+   of daily data contains only a handful of independent crash episodes
+   (1987, 2000-02, 2008-09, 2020) — a real data-scarcity limit on how
+   precisely "real kurtosis" can even be pinned down, not a code bug.
+
+Representative verdict (`results/gan_fidelity_summary.json`, seed 0, N=5000):
 ```
-WARNING: skewness off by +0.99 (synthetic +0.08 vs. real -0.90) -- generator
-isn't capturing real tail asymmetry; excess kurtosis off by -4.12 (synthetic
-+0.08 vs. real +4.20) -- generator isn't capturing real fat-tail risk.
+WARNING: skewness off by -0.71 (synthetic -1.65 vs. real -0.94) -- generator
+isn't capturing real tail asymmetry.
 ```
+(Kurtosis no longer triggers the warning threshold on this seed; skew now
+overshoots in the correct direction rather than missing it entirely.)
 
 ## Stress-test backtest
 
 Regime-switching volatility (15%/60%, 10% per-step switch probability), 30
-bps transaction friction, policies trained against the real-data WGAN-GP
-generator described above (reproduce with `python src/backtester/evaluate.py`):
+bps transaction friction, policies retrained against the moment-matched
+real-data WGAN-GP generator described above (reproduce with `python
+src/backtester/evaluate.py`, after retraining each policy so it's trained
+against the new generator checkpoint):
 
 | Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
 |---|---|---|---|---|---|---|
 | Black-Scholes | -0.695 | 1.82 | 2.34 | -1.97 | 5.34 | 12.90 |
-| MLP | -0.511 | 5.76 | 19.96 | -15.79 | 291.3 | 3.88 |
-| Basic RNN | -0.524 | 6.06 | 18.87 | -13.89 | 233.3 | 9.97 |
-| LSTM | -0.521 | 6.00 | 19.86 | -15.64 | 286.3 | 5.49 |
-| GRU | -0.535 | 5.71 | 18.41 | -15.41 | 271.8 | 4.87 |
+| MLP | -0.667 | 4.58 | 7.26 | -4.00 | 23.8 | 10.00 |
+| Basic RNN | -0.536 | 6.17 | 19.61 | -14.83 | 257.3 | 1.53 |
+| LSTM | -0.548 | 5.77 | 18.37 | -14.90 | 259.6 | 2.77 |
+| GRU | -0.712 | 3.14 | **4.52** | -2.19 | 6.7 | 15.49 |
 
-All four trained policies show catastrophic excess kurtosis (230–290, vs.
-Black-Scholes' 5.3) — a handful of extreme tail losses dominating an
-otherwise tightly-clustered PnL distribution. This is the direct, predictable
-consequence of the tail-shape gap above: the generator never showed these
-policies a real crash during training, so none of them learned to defend
-against one. This is not a separate bug — it's the same root cause reported
-twice, once by the fidelity checker (on the generator directly) and once by
-the backtest (on the policies it produced).
+Compare against the pre-fix table (MLP CVaR₉₉ 19.96 → **7.26**; GRU CVaR₉₉
+18.41 → **4.52**, kurtosis 271.8 → **6.7** — essentially Black-Scholes-level
+tail behavior now). **This is the same split found in Part I, closing the
+loop**: MLP and GRU actually condition their hedge on the market state, so
+giving them a generator with real crash risk taught them to defend against
+one. Basic RNN and LSTM barely moved (CVaR₉₉ 18.9 → 19.6 and 19.9 → 18.4 —
+noise-level, not improvement) because — per the Part I diagnosis — they
+never learned to read the market state in the first place; a better
+generator can't teach a policy something it structurally isn't sensing. The
+tail-shape gap and the RNN/LSTM non-convergence turn out to be two
+independent problems that only *looked* like one shared explanation when
+both were present simultaneously.
 
 ## Known limitations
 
 Roughly in priority order:
 
-1. **Generator tail-risk fidelity** (see above) — the most consequential
-   open item; it's the reason the stress-test numbers look bad.
+1. **Generator tail-risk fidelity — improved, not perfect.** The
+   moment-matching loss fixed the sign and rough magnitude of both skew and
+   kurtosis, and this measurably improved MLP/GRU's stress-test tail risk.
+   But synthetic skew now overshoots real's (-1.65 vs. -0.91) and kurtosis
+   still runs a bit low (~3.1 vs. ~4.0-5.5, itself a noisy target — see
+   above). A learned, per-batch-adaptive weighting (vs. the current fixed
+   `--lambda-moment`) could plausibly tighten this further.
 2. **Basic RNN / LSTM non-convergence** in the frictionless setting — root
    cause not fully identified (GRU-specific gating advantage, unconfirmed).
+   Confirmed independent of the generator fidelity issue: retraining RNN/LSTM
+   against the fixed generator left their stress-test tail risk unchanged
+   (they don't condition on market state at all, so a better generator has
+   nothing to teach them).
 3. **Single-feature WGAN-GP, not TimeGAN** — the paper's Part II generator
    is a genuine multi-variate (6-feature) model with an
    embedder/recovery/supervisor architecture; this repo's generator is a
@@ -178,11 +222,13 @@ Roughly in priority order:
 
 ## Ideas for future work
 
-- Extend `validate.py`'s tail-shape fix into the generator itself (e.g. a
-  reconstruction loss term that explicitly penalizes skew/kurtosis
-  mismatch, or a TimeGAN-style supervised stepwise loss).
+- Tighten the moment-matching loss further (adaptive `lambda_moment`
+  schedule, or matching higher moments / a full quantile loss instead of
+  just skew+kurtosis) to close the remaining tail-shape gap.
 - Implement TimeGAN properly (embedder + recovery + supervisor +
-  discriminator, multi-variate OHLCV) — the biggest remaining structural gap.
+  discriminator, multi-variate OHLCV) — the biggest remaining structural
+  gap, and a more principled fix for tail fidelity than a hand-added moment
+  penalty.
 - Actor-critic variance reduction or an entropy bonus for RNN/LSTM training,
   per the paper's own future-work section.
 - Add the P₀ premium term to the wealth objective.
