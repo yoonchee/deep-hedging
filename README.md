@@ -195,13 +195,16 @@ trail:
 
 - ~~No option premium (P₀)~~ — resolved everywhere (Part I: exact
   closed-form; stress test / GAN-driven training: Monte Carlo estimate).
-  Mean wealth is now ≈0 throughout and Part I's CVaR matches the paper's
-  own absolute figures to within 2-9% for three of four architectures; see
+  Mean wealth is now ≈0 throughout, tightening further at paper scale; see
   `RESULTS.md`.
-- Part I trains for 500 epochs, not the paper's stated 50 — checked
-  directly: 50 epochs is verified insufficient for most architectures
-  (CVaR 3.3x worse for MLP, ~1.3x worse for LSTM/GRU; Basic RNN barely
-  moves — see `RESULTS.md`).
+- ~~Part I's training budget doesn't match the paper~~ — resolved, with a
+  mixed result: the paper's "50 epochs" is 25,000 gradient steps over a
+  fixed 500,000-scenario dataset at batch=1000, now this repo's default
+  (train and test scale both match Table 1 exactly). Black-Scholes then
+  matches the paper's absolute CVaR to 2-3% at every α; LSTM/GRU are
+  mixed (0.4% at α=0.75, up to 34% at α=0.5); Basic RNN's mismatch got
+  *worse* at the corrected scale (58-59% at α=0.5/0.99), not better — see
+  `RESULTS.md` for the full table and why that's still informative.
 - Generator tail-shape fidelity is improved but not exact — synthetic skew
   now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
 - Basic RNN's stress-test convergence is seed-sensitive (bimodal: some

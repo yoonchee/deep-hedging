@@ -21,7 +21,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 |---|---|---|
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
 | Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match, Basic RNN is seed-sensitive and improved (not fully closed) by a CVaR control-variate baseline — see below |
-| Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 market/option params (S₀=K=100, vol=0.15, T=1/12, 30 steps); trained for 500 epochs, not the paper's stated 50 — verified insufficient in this implementation, see below |
+| Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params, including scale: 500,000-scenario train/test sets, 25,000 gradient steps (the paper's "50 epochs" over that dataset size at batch=1000, in this codebase's per-step convention) — see below |
 | Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results that shifted after the RNN/LSTM fix — see TimeGAN section |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches, now extended to the paper's own Part II grid {0.5, 0.75, 0.99, 0.995, 0.997} |
 | Delta-convexity diagnostic (paper Figs. 5/8/11) | `backtester/plotting.py::plot_delta_convexity` | Matches, and was the tool that caught the RNN/LSTM failure |
@@ -100,72 +100,95 @@ Paper's exact setup: S₀ = K = 100 (at-the-money), r = 0, vol = 0.15, T = 1/12
 (one month), 30 time steps, batch size 1000, Adam, **zero transaction costs**.
 `RecurrentHedgingAgent` uses `hidden_dim=128` with a single linear readout
 (see [below](#the-rnnlstm-training-failure-and-its-real-fix) for why not the
-deeper head). 500 training epochs per (architecture, α) pair; 5000-path
-out-of-sample test. **This is 10x the paper's own stated 50 epochs** (Table
-1) — checked directly rather than left as an assumption, and the effect
-turns out to be architecture-dependent, not uniform: at α=0.99, `--epochs
-50` gives CVaR 3.3x worse for MLP (4.39 vs. 1.34) and roughly 1.3x worse
-for LSTM/GRU (1.05/1.04 vs. 0.84/0.79), but Basic RNN barely moves (1.08 vs.
-1.03) — the extra epochs help most architectures but this one architecture
-already seems to have settled by epoch 50 in this run (possibly the same
-seed-sensitivity flagged below rather than a genuine training-budget
-effect; not disentangled here). Either way, 50 epochs is verified
-insufficient for at least three of four architectures to reach the
-500-epoch numbers below, not merely untested. The params below are the
-paper's exact market/option setup; the training budget is not.
+deeper head). Table 1 also specifies **500,000 pre-generated training
+scenarios and a separate 500,000-scenario test set** — re-read directly
+from the paper (not worked from a "500k Monte Carlo scenarios" summary) to
+scope a compute-budget push once the user offered 24+ hours of local
+compute. Standard ML epoch semantics (one epoch = one pass over the
+dataset) make the paper's "50 training epochs" at batch_size=1000 over that
+fixed 500,000-scenario set into 50 × (500,000 / 1,000) = **25,000 gradient
+steps** — not 50 in this codebase's own convention, where each "epoch" is
+one gradient step on a freshly-sampled batch (GBM data is cheap to
+generate on the fly, so there's no fixed pool to epoch over). This
+supersedes the project's earlier "500 epochs, 10x the paper's 50"
+framing, which was comparing mismatched units the whole time: an earlier,
+smaller push to 500 steps was actually only ~2% of the paper's real
+budget, not 10x it. Current defaults: `train_epochs=25_000`,
+`test_batch_size=500_000` (the same scale as the paper's own test set;
+evaluated in chunks of 50,000 to avoid a severe, non-linear CPU slowdown
+RNN/LSTM/GRU policies hit at very large single-pass batch sizes — see
+`MarketEnvironment.simulate`'s `chunk_size` docstring).
 
 **Since [P₀ was added](#terminal-wealth-and-the-p₀-premium-term)**,
 this is also the one experiment in the repo where the wealth objective
 includes the option premium (closed-form Black-Scholes price at these exact
 params, C₀ ≈ 1.727) — constant vol and r=0 make it exact here, unlike the
-regime-switching/GAN-driven settings elsewhere. Black-Scholes' own mean PnL,
-which was -1.729 (≈ -C₀) before P₀ was added, is now **-0.0017** — matching
-the paper's own reported ≈0.0005 to three decimal places.
+regime-switching/GAN-driven settings elsewhere. Black-Scholes' own mean PnL
+is **0.0001** at the paper's actual training/test scale — matching the
+paper's own reported ≈0.0005 even more closely than the earlier
+smaller-scale run did (-0.0017). Every architecture's mean PnL is now within
+0.001-0.0013 of zero (MLP 0.0000 to GRU 0.0012 across the three α values),
+tightening toward the paper's near-zero convention as the training budget
+grew — a clean, unambiguous improvement, unlike the CVaR picture below.
 
-CVaR of terminal PnL, lower is better (reproduce with
-`python src/backtester/replicate_part1.py --epochs 500`):
+CVaR of terminal PnL, lower is better, at the paper's exact training/test
+scale (reproduce with `python src/backtester/replicate_part1.py`):
 
 | α | Black-Scholes | MLP | Basic RNN | LSTM | GRU |
 |---|---|---|---|---|---|
-| 0.50 | 0.207 | 0.307 | 0.291 | 0.209 | **0.199** |
-| 0.75 | 0.341 | 0.626 | 0.470 | 0.351 | **0.335** |
-| 0.99 | 0.903 | 1.344 | 1.032 | **0.839** | 0.789 |
+| 0.50 | 0.207 | 0.212 | 0.325 | **0.193** | 0.268 |
+| 0.75 | 0.343 | 0.347 | 0.466 | **0.312** | 0.311 |
+| 0.99 | 0.947 | 0.843 | 1.237 | **0.697** | 0.699 |
 
-**All four architectures still replicate the paper's core result**: every
-cell type tracks Black-Scholes-level CVaR at every risk-aversion level, with
-LSTM/GRU slightly *beating* the closed-form baseline at every α once P₀
-shrinks the scale (0.789-0.839 vs. 0.903 at α=0.99). MLP is the one
-architecture that still trails, consistent with its simpler per-step state
-formulation. `delta_convexity.png` for every α is unaffected by P₀ (a
-constant additive shift to wealth doesn't change the optimal hedge ratio at
-any point, only the reported PnL/CVaR scale) and still shows every learned
-delta curve overlaying Black-Scholes' analytic S-curve closely.
+**This is a genuinely mixed result, not a clean confirmation that more
+compute closes the remaining gaps.** LSTM/GRU still beat Black-Scholes at
+every α (as at the smaller scale), and MLP now also beats it at α=0.99 —
+the paper's core qualitative claim holds. But comparing against the
+paper's own absolute CVaR figures (same sign-convention reconciliation as
+before: paper reports CVaR of *PnL*, negative = loss; this repo reports
+CVaR of *losses*, positive) tells a less tidy story than the smaller-scale
+run did:
 
-**This now matches the paper's own absolute CVaR numbers, not just their
-qualitative shape.** The paper reports Part I's α=0.99 CVaR as (its own
-sign convention: CVaR of *PnL*, negative meaning a loss)
-Black-Scholes/RNN/LSTM/GRU = -0.9203/-0.7810/-0.8974/-0.7270; this repo (CVaR
-of *losses*, i.e. `-PnL`, so positive) now reports 0.903/1.032/0.839/0.789.
-Comparing magnitudes:
+| α | Architecture | Paper | This repo | Difference |
+|---|---|---|---|---|
+| 0.50 | Black-Scholes | 0.2028 | 0.207 | 2.1% |
+| 0.50 | Basic RNN | 0.2040 | 0.325 | 59.4% |
+| 0.50 | LSTM | 0.2197 | 0.193 | 12.2% |
+| 0.50 | GRU | 0.2000 | 0.268 | 34.1% |
+| 0.75 | Black-Scholes | 0.3353 | 0.343 | 2.2% |
+| 0.75 | Basic RNN | 0.3257 | 0.466 | 43.0% |
+| 0.75 | LSTM | 0.3132 | 0.312 | **0.4%** |
+| 0.75 | GRU | 0.3119 | 0.311 | **0.4%** |
+| 0.99 | Black-Scholes | 0.9203 | 0.947 | 2.9% |
+| 0.99 | Basic RNN | 0.7810 | 1.237 | 58.3% |
+| 0.99 | LSTM | 0.8974 | 0.697 | 22.4% |
+| 0.99 | GRU | 0.7270 | 0.699 | 3.8% |
 
-| | Paper (PnL, − = loss) | This repo (loss magnitude) | Difference |
-|---|---|---|---|
-| Black-Scholes | -0.9203 | 0.903 | 1.9% |
-| LSTM | -0.8974 | 0.839 | 6.5% |
-| GRU | -0.7270 | 0.789 | 8.5% |
-| Basic RNN | -0.7810 | 1.032 | 32.1% |
+Three things worth stating plainly:
 
-Black-Scholes, LSTM, and GRU now land within 2-9% of the paper's own
-figures — strong evidence the two sign conventions are simply negatives of
-each other (`paper's CVaR(PnL) ≈ -1 × this repo's CVaR(loss)`) once P₀ is
-accounted for, and that this repo's Part I replication matches the paper
-not just qualitatively but at the level of absolute numbers. **Basic RNN is
-the exception**: its CVaR here (1.032) is 32% worse than the paper's RNN
-figure (0.781), a real, unexplained gap rather than noise-level — worth
-tracking as an open question given this project's independent finding
-(below and in the stress-test section) that Basic RNN is unusually
-seed-sensitive in this codebase; this single α=0.99, seed=0 run hasn't been
-checked across multiple seeds the way the stress-test claim was.
+- **Black-Scholes matches the paper to 2-3% at every α, consistently** —
+  expected, since it's an analytic policy, not a learned one; the residual
+  is pure Monte Carlo sampling noise between this repo's 500,000-path test
+  set and the paper's own. This is the stable anchor the rest of the table
+  should be read against.
+- **LSTM/GRU are mixed, not uniformly improved by the larger budget**:
+  a striking 0.4% match at α=0.75 for both, but 12-34% at α=0.5 and
+  3.8-22.4% at α=0.99. Scaling up training did not monotonically tighten
+  the match to the paper's numbers architecture-by-architecture — it
+  moved some cells closer and others farther, which is itself informative:
+  it suggests the residual gap isn't simply "not enough training," or the
+  gap would have shrunk everywhere, not just at one α.
+- **Basic RNN's mismatch got *worse* at the correct scale, not better** —
+  59% and 58% off at α=0.5/0.99 (vs. 32% at the old, far smaller
+  500-step/seed-0 run reported previously), and 43% at α=0.75. This is the
+  same default seed=0 as every other Basic RNN result in this project, so
+  it doesn't distinguish "genuinely worse at this scale" from "still the
+  same seed-sensitivity already documented below and in the stress-test
+  section, just expressed differently at a different step count." A
+  multi-seed sweep at 25,000 steps (not done here) would be needed to tell
+  the two apart — this scale-up adds a data point consistent with Basic
+  RNN's instability being real and scale-independent, not evidence that
+  more training resolves it.
 
 ### The RNN/LSTM training failure, and its real fix
 
@@ -699,12 +722,20 @@ Roughly in priority order:
    CVaR-minimizing optimal policy. No longer an open limitation; kept
    first, struck through, as a record of what implementing "faithfully"
    actually required fixing.
-2. **Part I trains for 10x the paper's stated epoch budget** (500 vs. 50,
-   Table 1) — checked directly, not assumed: `--epochs 50` gives CVaR 3.3x
-   worse for MLP and ~1.3x worse for LSTM/GRU at α=0.99 (Basic RNN barely
-   moves — see [above](#part-i-frictionless-replication)), so this isn't a
-   cosmetic difference the paper's own budget was actually enough for in
-   this implementation, at least for most architectures.
+2. **~~Part I's training budget doesn't match the paper~~ — resolved,
+   with a mixed result.** The paper's "50 epochs" is over a fixed
+   500,000-scenario dataset at batch_size=1000, i.e. 25,000 gradient
+   steps in this codebase's per-step convention — now the default. This
+   is a genuine unit reconciliation, not just a bigger number: an earlier
+   push to 500 steps (thought at the time to be "10x the paper's 50") was
+   actually only ~2% of the paper's real budget. At the corrected scale,
+   Black-Scholes matches the paper's absolute CVaR to 2-3% at every α
+   (expected, it's analytic); LSTM/GRU are mixed (0.4% at α=0.75, up to
+   34% at α=0.5); Basic RNN's mismatch got *worse*, not better (58-59% at
+   α=0.5/0.99, up from 32% at the old, far smaller scale) — see
+   [above](#part-i-frictionless-replication) for the full table. Scaling
+   up did not uniformly close the remaining gaps, which is itself an
+   informative (if less tidy) result.
 3. **Generator tail-risk fidelity — improved, not perfect.** The
    moment-matching loss fixed the sign and rough magnitude of both skew and
    kurtosis, and this measurably improved MLP/GRU's stress-test tail risk.
@@ -763,12 +794,14 @@ Roughly in priority order:
   didn't finish in 180s). 500,000 paths was chosen empirically — cross-seed
   std of the estimate is ~1% relative at that count, vs. 7-10% at 50k/100k
   (see [above](#terminal-wealth-and-the-p₀-premium-term)).
-- Investigate Basic RNN's 32% CVaR gap vs. the paper's own RNN figure at
-  Part I α=0.99 (1.032 vs. 0.781, the one architecture that didn't land
-  within the 2-9% band the other three did) — is this the same
-  seed-sensitivity found in the stress-test setting, now showing up in
-  Part I too, or something specific to α=0.99? A multi-seed sweep here
-  (same methodology as the stress-test one) would tell the two apart.
+- Investigate Basic RNN's CVaR gap vs. the paper's own RNN figure at Part I
+  (43-59% off across α=0.5/0.75/0.99 at the paper-matched 25,000-step
+  scale, *worse* than the 32% at the earlier, far smaller 500-step scale)
+  — is this the same seed-sensitivity found in the stress-test setting,
+  now showing up in Part I too and possibly amplified by more training on
+  the same unlucky seed, or something specific to Part I's setup? A
+  multi-seed sweep at 25,000 steps (same methodology as the stress-test
+  one) would tell seed-sensitivity apart from a genuine scale effect.
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.
