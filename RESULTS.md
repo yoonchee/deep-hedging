@@ -640,6 +640,56 @@ branch was never triggered. The root cause of these kills was never
 determined (no crash logs checked, no thermal/energy-state investigation)
 and is recorded here as an open, unexplained anomaly, not a resolved one.
 
+**Follow-up: not reproducible on a later attempt, cause still unknown.**
+Revisited directly, hours after the original 15-job queue finished (the
+original checkpoints' mtimes are 23:16-00:41; this check ran at ~07:00 the
+same night), on the same machine. Three probe runs, chosen to cover both
+originally-affected failure modes and both a light and a heavy
+architecture, every one run well past the historical ~1,400-1,430 death
+window:
+
+| Probe | Mode | Architecture | Epochs | Result |
+|---|---|---|---|---|
+| 1 | single process per alpha | MLP | 5,000 | completed normally |
+| 2 | single process per alpha | LSTM | 1,700 | completed normally |
+| 3 | combined multi-alpha in one process (the mode with the original 2-for-2 kill rate) | MLP, 4 alphas | 1,600/alpha (6,400 total steps) | completed normally, all 4 checkpoints saved |
+
+None of the ~13,700 total gradient steps across these three runs died.
+`macOS`'s unified log was also checked directly for the exact window the
+original 15-job queue ran in (still available, since it was only hours
+earlier) via `log show --predicate 'eventMessage contains "jetsam" OR
+... OR processImagePath contains "Python"'` — no OOM/jetsam/SIGKILL event
+tied to any training process turned up, only routine unrelated noise
+(Spotlight's `mdworker` cycling, `runningboardd` chatter for other apps).
+Memory pressure, thermal state, and disk space were all normal both before
+and after.
+
+**This is evidence the anomaly isn't currently reproducing, not evidence
+it's fixed.** The original per-job failure rate was roughly 50% (4/8 retried
+alpha jobs), so three consecutive clean runs has a non-trivial chance
+(~1-in-8) of happening even if the underlying cause is still present at the
+same rate — a small sample, not a resolution. No root cause was found
+either directly (log inspection) or indirectly (the conditions that
+originally seemed most likely to trigger it, re-tried and surviving). The
+practical implication: keep treating any long unattended training run here
+as needing a retry-once policy by default, rather than assuming this was a
+one-off environmental fluke that won't recur.
+
+**A near-miss worth recording**: reproducing the combined-alpha-sweep mode
+(probe 3 above) initially used `--alpha-sweep` with a scratch checkpoint
+directory, forgetting that `train_policy.py`'s `--alpha-sweep` path ignores
+`--checkpoint` entirely and always writes to the fixed
+`checkpoints/hedging_agent_<architecture>_alpha<alpha>.pt` path (relative
+to the process's cwd) — the same path the real, already-trained checkpoints
+live at. Caught and killed before the first alpha finished (verified via
+the real checkpoints' unchanged mtimes), then re-run with the process's cwd
+pointed at an isolated scratch directory instead. Not a repo bug — `evaluate.py`'s
+own `_load_all_policies`/`load_alpha_sweep_checkpoints` rely on this same
+fixed-path convention to find checkpoints automatically — but worth noting
+for the next person: `--alpha-sweep` has no output-path override, so any
+throwaway/exploratory run using it needs an isolated cwd, not just a
+different `--checkpoint` flag.
+
 ## TimeGAN: the paper's actual Part II generator
 
 The WGAN-GP above is a reasonable placeholder, but Kim (2021)'s actual Part
