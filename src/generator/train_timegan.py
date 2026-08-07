@@ -365,10 +365,14 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Train TimeGAN, the paper's Part II multi-variate market generator.")
-    parser.add_argument("--phase1-epochs", type=int, default=200, help="autoencoder pretraining epochs")
-    parser.add_argument("--phase2-epochs", type=int, default=200, help="supervisor pretraining epochs")
-    parser.add_argument("--phase3-epochs", type=int, default=500, help="joint adversarial training epochs")
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--phase1-epochs", type=int, default=2_000,
+        help="autoencoder pretraining epochs -- paper Table 2's 'Iteration: 10,000' isn't broken down by "
+        "phase, so the 2000/2000/6000 default split preserves this repo's earlier 1:1:3 ratio at the new total",
+    )
+    parser.add_argument("--phase2-epochs", type=int, default=2_000, help="supervisor pretraining epochs")
+    parser.add_argument("--phase3-epochs", type=int, default=6_000, help="joint adversarial training epochs")
+    parser.add_argument("--batch-size", type=int, default=178, help="paper Table 2")
     parser.add_argument("--seq-len", type=int, default=31, help="paper Table 2: 31 (training window only -- generation at inference time can use any seq_len, since all five networks are GRU/LSTM-based and length-agnostic)")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=31, help="latent dimension H (paper Table 2: 31 hidden nodes)")
@@ -410,8 +414,20 @@ def main() -> None:
     )
     parser.add_argument("--price-column", type=str, default="Close", help="which feature column is 'the price'")
     parser.add_argument("--ticker", type=str, default="^GSPC", help="Yahoo Finance ticker (yfinance source)")
-    parser.add_argument("--data-start", type=str, default="1950-01-03", help="history start date (yfinance source)")
-    parser.add_argument("--data-end", type=str, default="2021-01-25", help="history end date (yfinance source)")
+    parser.add_argument(
+        "--data-start", type=str, default="1950-01-03",
+        help="history start date (yfinance source); shared by both training and test ranges, per paper's Data section",
+    )
+    parser.add_argument(
+        "--data-end", type=str, default="2010-01-25",
+        help="training data end date (yfinance source) -- paper's Data section: training range 1/3/1950-1/25/2010",
+    )
+    parser.add_argument(
+        "--data-test-end", type=str, default="2021-01-25",
+        help="test/fidelity-check data end date (yfinance source) -- paper's Data section: test range "
+        "1/3/1950-1/25/2021, i.e. the post-training fidelity check compares against a longer real-data "
+        "range than the model trained on, including the 2010-2021 period it never saw",
+    )
     parser.add_argument("--data-cache-dir", type=str, default="data", help="local CSV cache directory (yfinance source)")
     parser.add_argument(
         "--skip-fidelity-check", action="store_true", help="skip the post-training price-channel fidelity check"
@@ -446,9 +462,24 @@ def main() -> None:
             price_column=args.price_column,
             cache_dir=Path(args.data_cache_dir),
         )
+        # Separate held-out loader for the post-training fidelity check,
+        # matching the paper's Data section: training range 1/3/1950-
+        # 1/25/2010, test range 1/3/1950-1/25/2021 (the longer range,
+        # including the 2010-2021 period the model never trained on).
+        test_loader = HistoricalPriceLoader(
+            ticker=args.ticker,
+            start=args.data_start,
+            end=args.data_test_end,
+            price_column=args.price_column,
+            cache_dir=Path(args.data_cache_dir),
+        )
         print(
-            f"Using real historical data: {args.ticker} [{args.data_start}, {args.data_end}], "
+            f"Using real historical data for training: {args.ticker} [{args.data_start}, {args.data_end}], "
             f"{loader.prices.shape[0]} observations (cache: {loader.cache_path})"
+        )
+        print(
+            f"Held-out fidelity-check range: {args.ticker} [{args.data_start}, {args.data_test_end}], "
+            f"{test_loader.prices.shape[0]} observations"
         )
         rescale_columns = [c for c in feature_columns if c != "Volume"]
 
@@ -462,11 +493,24 @@ def main() -> None:
                 initial_price=args.s0,
             )
 
+        def sample_real_test_raw(batch_size: int, seq_len: int) -> torch.Tensor:
+            return test_loader.sample_multivariate(
+                batch_size,
+                seq_len,
+                feature_columns=feature_columns,
+                price_column=args.price_column,
+                rescale_columns=rescale_columns,
+                initial_price=args.s0,
+            )
+
     else:
         print("Using synthetic single-regime-GBM-derived OHLCV 'real' data (offline placeholder).")
 
         def sample_real_raw(batch_size: int, seq_len: int) -> torch.Tensor:
             return _synthetic_multivariate_prices(batch_size, seq_len, s0=args.s0, vol=args.vol)
+
+        # No real date ranges to split for the synthetic placeholder source.
+        sample_real_test_raw = sample_real_raw
 
     scaler = MinMaxScaler(feature_dim)
     scaler.fit(sample_real_raw(max(args.moment_target_batch_size, args.batch_size), args.seq_len))
@@ -567,10 +611,10 @@ def main() -> None:
     print(f"Saved checkpoint to {checkpoint_path}")
 
     if not args.skip_fidelity_check:
-        print("Running real-vs-synthetic fidelity check on the price channel...")
+        print("Running real-vs-synthetic fidelity check on the price channel (held-out range)...")
         timegan.eval()
         with torch.no_grad():
-            real_check_raw = sample_real_raw(args.moment_target_batch_size, args.seq_len)
+            real_check_raw = sample_real_test_raw(args.moment_target_batch_size, args.seq_len)
             real_check_price = real_check_raw[..., price_index : price_index + 1]
 
             z = timegan.sample_noise(args.moment_target_batch_size, args.seq_len, device=device)

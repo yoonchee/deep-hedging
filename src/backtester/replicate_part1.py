@@ -203,9 +203,22 @@ def run_part1_replication(
     vol: Annotated[float, "GBM volatility"] = 0.15,
     time_to_maturity: Annotated[float, "T, in years (1/12 = one month)"] = 1.0 / 12.0,
     seq_len: Annotated[int, "number of price observations per path"] = 30,
-    train_epochs: Annotated[int, "training epochs per (architecture, alpha) pair"] = 500,
+    train_epochs: Annotated[
+        int,
+        "gradient steps per (architecture, alpha) pair. Paper Table 1 states '50 "
+        "epochs' over a fixed 500,000-scenario training set with batch_size=1000 -- "
+        "standard ML epoch semantics (one epoch = one pass over the dataset) make "
+        "that 50 * (500,000 / 1,000) = 25,000 gradient steps, not 50 in this "
+        "codebase's per-step convention (each 'epoch' here is one gradient step on "
+        "a freshly-sampled batch, since GBM data is cheap to generate on the fly "
+        "rather than drawn from a fixed pre-generated pool). 25,000 is the correct "
+        "unit-matched default; an earlier 500 was a first attempt at closing the "
+        "gap before this reconciliation, itself only ~2% of the paper's true budget.",
+    ] = 25_000,
     train_batch_size: Annotated[int, "training batch size, per paper Table 1"] = 1000,
-    test_batch_size: Annotated[int, "out-of-sample evaluation batch size"] = 5000,
+    test_batch_size: Annotated[
+        int, "out-of-sample evaluation batch size, matches paper Table 1's 500,000-scenario test set"
+    ] = 500_000,
     lr: Annotated[float, "Adam learning rate"] = 1e-2,
     hidden_dim: Annotated[int, "MLP hidden layer width"] = 32,
     num_hidden_layers: Annotated[int, "MLP hidden layer count"] = 2,
@@ -285,8 +298,12 @@ def run_part1_replication(
             if hasattr(policy_obj, "eval"):
                 policy_obj.eval()
             with torch.no_grad():
+                # Chunked: a single-pass forward through an RNN/LSTM/GRU
+                # policy at the paper's full 500,000-path test scale hits a
+                # severe (not just linear) CPU slowdown -- see
+                # MarketEnvironment.simulate's chunk_size docstring.
                 wealth = environment.simulate(
-                    policy_obj, test_prices, vol, sequence_policy=sequence_policy
+                    policy_obj, test_prices, vol, sequence_policy=sequence_policy, chunk_size=50_000
                 )
             wealth_by_strategy[name] = wealth
             summary_by_strategy[name] = summarize_pnl(wealth, alpha)
@@ -341,9 +358,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Replicate the paper's Part I frictionless GBM experiment."
     )
-    parser.add_argument("--epochs", type=int, default=500, help="training epochs per (arch, alpha)")
+    parser.add_argument(
+        "--epochs", type=int, default=25_000,
+        help="gradient steps per (arch, alpha) -- paper Table 1's 50 epochs * 500 batches/epoch over a fixed 500k-scenario set",
+    )
     parser.add_argument("--train-batch-size", type=int, default=1000)
-    parser.add_argument("--test-batch-size", type=int, default=5000)
+    parser.add_argument("--test-batch-size", type=int, default=500_000, help="matches paper Table 1's 500,000-scenario test set")
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="results/part1_replication")

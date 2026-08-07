@@ -183,8 +183,12 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Train the Deep Hedging policy via CVaR minimization.")
-    parser.add_argument("--epochs", type=int, default=200, help="number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--epochs", type=int, default=25_000,
+        help="gradient steps -- paper Table 3's 50 epochs * (500,000-scenario dataset / 1,000 batch) "
+        "= 25,000 gradient steps in this codebase's per-step training convention (see replicate_part1.py)",
+    )
+    parser.add_argument("--batch-size", type=int, default=1_000, help="paper Table 3")
     parser.add_argument("--seq-len", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--strike", type=float, default=1.0, help="option strike price K")

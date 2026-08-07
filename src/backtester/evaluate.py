@@ -157,7 +157,9 @@ def run_backtest(
         "'Black-Scholes Delta' is added automatically and should not be included",
     ],
     strike: Annotated[float, "option strike price K"],
-    batch_size: Annotated[int, "number of stress test paths"] = 2000,
+    batch_size: Annotated[
+        int, "number of stress test paths; 500,000 matches the scale of Part I's paper-specified test set"
+    ] = 500_000,
     seq_len: Annotated[int, "number of price observations per path"] = 30,
     proportional_fee: Annotated[float, "kappa; e.g. 0.003 = 30 bps"] = 0.003,
     implied_vol: Annotated[float, "implied vol fed into every policy's state"] = 0.30,
@@ -210,7 +212,7 @@ def run_backtest(
             policy_obj.eval()
         with torch.no_grad():
             wealth, cost = environment.simulate_with_costs(
-                policy_obj, prices, implied_vol, sequence_policy=sequence_policy
+                policy_obj, prices, implied_vol, sequence_policy=sequence_policy, chunk_size=50_000
             )
         wealth_by_strategy[name] = wealth
         cost_by_strategy[name] = cost
@@ -340,7 +342,9 @@ def run_alpha_sweep_backtest(
     architecture: Annotated[str, "'mlp', 'rnn', 'lstm', or 'gru'"],
     alphas: Annotated[List[float], "CVaR alphas to compare, e.g. [0.5, 0.75, 0.9, 0.95, 0.99, 0.995, 0.997]"],
     strike: Annotated[float, "option strike price K"],
-    batch_size: Annotated[int, "number of stress test paths"] = 2000,
+    batch_size: Annotated[
+        int, "number of stress test paths; 500,000 matches the scale of Part I's paper-specified test set"
+    ] = 500_000,
     seq_len: Annotated[int, "number of price observations per path"] = 30,
     proportional_fee: Annotated[float, "kappa; e.g. 0.003 = 30 bps"] = 0.003,
     implied_vol: Annotated[float, "implied vol fed into every policy's state"] = 0.30,
@@ -395,7 +399,7 @@ def run_alpha_sweep_backtest(
             policy_obj.eval()
         with torch.no_grad():
             wealth, cost = environment.simulate_with_costs(
-                policy_obj, prices, implied_vol, sequence_policy=sequence_policy
+                policy_obj, prices, implied_vol, sequence_policy=sequence_policy, chunk_size=50_000
             )
         wealth_by_alpha[alpha] = wealth
         summary_by_alpha[str(alpha)] = _summarize_strategy(wealth, cost)
@@ -565,7 +569,7 @@ if __name__ == "__main__":
     result = run_backtest(
         policies=policies,
         strike=strike,
-        batch_size=2000,
+        batch_size=500_000,
         seq_len=30,
         proportional_fee=0.003,  # 30 bps, within the 10-50 bps stress range
         implied_vol=implied_vol,
@@ -588,7 +592,7 @@ if __name__ == "__main__":
             architecture="mlp",
             alphas=sweep_alphas,
             strike=strike,
-            batch_size=2000,
+            batch_size=500_000,
             seq_len=30,
             proportional_fee=0.003,
             implied_vol=implied_vol,
@@ -614,7 +618,7 @@ if __name__ == "__main__":
         timegan_result = run_backtest(
             policies=timegan_policies,
             strike=timegan_strike,
-            batch_size=2000,
+            batch_size=500_000,
             seq_len=30,
             proportional_fee=0.003,
             implied_vol=timegan_implied_vol,

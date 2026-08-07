@@ -201,6 +201,16 @@ class HistoricalPriceLoader:
         cache_path = Path(cache_dir) / f"{safe_ticker}.csv"
         df = download_or_load_ohlcv(ticker, start, end, cache_path)
 
+        # download_or_load_ohlcv only honors [start, end] on a *fresh*
+        # download -- a cache hit returns the whole cached file regardless
+        # of the requested range (the cache key is ticker-only). Filtering
+        # here makes [start, end] mean the same thing on every call, cached
+        # or not -- required for a genuine temporal train/test split (two
+        # loaders, non-overlapping ranges, same cache file).
+        df = df.loc[start:end]
+        if df.empty:
+            raise ValueError(f"No data for ticker={ticker!r} in [{start}, {end}] after filtering")
+
         if price_column not in df.columns:
             raise KeyError(f"{price_column!r} not in downloaded columns: {list(df.columns)}")
 

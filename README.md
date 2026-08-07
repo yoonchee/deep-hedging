@@ -95,28 +95,36 @@ python src/generator/train_gan.py --epochs 1500 --lr 3e-4 --data-source yfinance
 # 2. Check it didn't collapse (also runs automatically after step 1)
 python src/generator/validate.py --generator-checkpoint checkpoints/market_gan.pt
 
-# 3. Train each policy architecture against the generator
-python src/policy/train_policy.py --architecture mlp  --epochs 200
+# 3. Train each policy architecture against the generator. Defaults now
+# match paper Table 3 (batch 1000, 25,000 gradient steps -- expect this to
+# take longer than it used to; see RESULTS.md for timing):
+python src/policy/train_policy.py --architecture mlp
 # Basic RNN's stress-test convergence is seed-sensitive; --use-bs-baseline
 # (a CVaR control-variate variance-reduction technique, see RESULTS.md)
 # substantially improves and stabilizes it:
-python src/policy/train_policy.py --architecture rnn  --epochs 200 --use-bs-baseline
-python src/policy/train_policy.py --architecture lstm --epochs 200
-python src/policy/train_policy.py --architecture gru  --epochs 200
+python src/policy/train_policy.py --architecture rnn --use-bs-baseline
+python src/policy/train_policy.py --architecture lstm
+python src/policy/train_policy.py --architecture gru
 
-# 4. Backtest all trained policies vs. Black-Scholes under stress conditions
+# 4. Backtest all trained policies vs. Black-Scholes under stress conditions.
+# Evaluation batch is now 500,000 paths (matching Part I's paper-specified
+# test scale), chunked internally to stay fast on CPU.
 python src/backtester/evaluate.py
 
-# 5. Replicate the paper's frictionless Part I experiment
-python src/backtester/replicate_part1.py --epochs 500
+# 5. Replicate the paper's frictionless Part I experiment. Defaults now
+# match paper Table 1 exactly (25,000 gradient steps, 500,000-path test set):
+python src/backtester/replicate_part1.py
 
 # 6. Optional: train TimeGAN instead (the paper's actual Part II generator,
-# now with the paper's own hyperparameters and BCE discriminator loss) and
-# compare its policies against the WGAN-GP ones from steps 1-4 -- see
-# RESULTS.md for why the two currently disagree on which is "better".
-python src/generator/train_timegan.py --phase1-epochs 500 --phase2-epochs 500 \
-    --phase3-epochs 1500 --data-source yfinance
-python src/policy/train_policy.py --architecture mlp --epochs 200 --generator-type timegan
+# now with the paper's own hyperparameters, BCE discriminator loss, batch
+# size, iteration count, and temporal train/test split) and compare its
+# policies against the WGAN-GP ones from steps 1-4 -- see RESULTS.md for
+# why the two currently disagree on which is "better". Defaults now match
+# paper Table 2 (batch 178, 10,000 total iterations across 3 phases,
+# training data through 2010, fidelity-checked against data through 2021);
+# expect this to take hours, not minutes -- see RESULTS.md for timing.
+python src/generator/train_timegan.py --data-source yfinance
+python src/policy/train_policy.py --architecture mlp --generator-type timegan
 python src/backtester/evaluate.py  # also runs the TimeGAN comparison if those checkpoints exist
 ```
 

@@ -4,10 +4,31 @@ These test the pure windowing/normalization logic only -- no network calls,
 so the suite stays fast, deterministic, and runnable offline.
 """
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 import torch
 
-from generator.data import sample_multivariate_price_windows, sample_price_windows
+from generator.data import HistoricalPriceLoader, sample_multivariate_price_windows, sample_price_windows
+
+
+@pytest.mark.skipif(
+    not (Path("data") / "GSPC.csv").exists(),
+    reason="requires the cached ^GSPC CSV (data/ is gitignored, not present on a fresh clone/CI)",
+)
+def test_historical_price_loader_honors_date_range_on_cache_hit() -> None:
+    # download_or_load_ohlcv only applies [start, end] on a *fresh* download;
+    # a cache hit used to return the whole cached file regardless of the
+    # requested range. This is what a genuine temporal train/test split
+    # (two loaders, non-overlapping ranges, same cache file) depends on.
+    early = HistoricalPriceLoader(start="1950-01-03", end="1960-01-01")
+    late = HistoricalPriceLoader(start="2015-01-01", end="2021-01-25")
+
+    assert early.df.index.max() < pd.Timestamp("1960-01-01")
+    assert late.df.index.min() >= pd.Timestamp("2015-01-01")
+    assert len(early.prices) < len(late.prices) or early.df.index.max() < late.df.index.min()
+    assert early.df.index.max() < late.df.index.min()
 
 
 def test_sample_price_windows_output_shape() -> None:

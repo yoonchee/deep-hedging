@@ -144,6 +144,37 @@ def test_market_environment_premium_shifts_wealth_by_exactly_premium() -> None:
     assert torch.allclose(wealth_with_premium, wealth_no_premium + premium, atol=1e-6)
 
 
+def test_market_environment_chunked_matches_unchunked() -> None:
+    batch_size, seq_len = 37, 10  # deliberately not a multiple of chunk_size
+    agent = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    env = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0, premium=0.5)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+
+    wealth_unchunked, cost_unchunked = env.simulate_with_costs(agent, prices, implied_vol=0.2)
+    wealth_chunked, cost_chunked = env.simulate_with_costs(
+        agent, prices, implied_vol=0.2, chunk_size=10
+    )
+
+    assert torch.allclose(wealth_unchunked, wealth_chunked, atol=1e-6)
+    assert torch.allclose(cost_unchunked, cost_chunked, atol=1e-6)
+
+
+def test_market_environment_chunked_matches_unchunked_for_sequence_policy() -> None:
+    batch_size, seq_len, cell_type = 23, 10, "lstm"
+    agent = RecurrentHedgingAgent(cell_type=cell_type, hidden_dim=16, num_layers=1, strike=1.0)
+    agent.eval()
+    env = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0, premium=0.5)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+
+    with torch.no_grad():
+        wealth_unchunked = env.simulate(agent, prices, implied_vol=0.2, sequence_policy=True)
+        wealth_chunked = env.simulate(
+            agent, prices, implied_vol=0.2, sequence_policy=True, chunk_size=7
+        )
+
+    assert torch.allclose(wealth_unchunked, wealth_chunked, atol=1e-6)
+
+
 def test_gradient_propagates_to_every_price_timestep() -> None:
     # Every S_t (0..N) should receive a nonzero gradient from Wealth_T: S_0
     # through the first hedge decision and P&L term, intermediate S_t through

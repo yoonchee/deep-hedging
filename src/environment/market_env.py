@@ -13,7 +13,7 @@ See math_spec.md section 1.1 for why omitting it made every mean wealth in
 this repo negative, and RESULTS.md for where P_0 is (and isn't) wired in.
 """
 
-from typing import Annotated, Protocol, Tuple, Union
+from typing import Annotated, Optional, Protocol, Tuple, Union
 
 import torch
 
@@ -131,8 +131,16 @@ class MarketEnvironment:
         sequence_policy: Annotated[
             bool, "True for a whole-path RecurrentHedgingAgent-style policy"
         ] = False,
+        chunk_size: Annotated[
+            Optional[int],
+            "process in batches of this size and concatenate, instead of one pass over "
+            "the full batch. RNN/LSTM/GRU policies hit a severe (not just linear) CPU "
+            "slowdown at very large batch sizes -- e.g. a 500,000-path single-pass "
+            "evaluation through an LSTM policy didn't finish in 120s where chunks of "
+            "50,000 complete in seconds each. None (default) preserves prior behavior.",
+        ] = None,
     ) -> Annotated[torch.Tensor, "[Batch] terminal portfolio wealth Wealth_T"]:
-        wealth, _ = self._rollout(policy, prices, implied_vol, sequence_policy)
+        wealth, _ = self._rollout(policy, prices, implied_vol, sequence_policy, chunk_size)
         return wealth
 
     def simulate_with_costs(
@@ -147,11 +155,14 @@ class MarketEnvironment:
         sequence_policy: Annotated[
             bool, "True for a whole-path RecurrentHedgingAgent-style policy"
         ] = False,
+        chunk_size: Annotated[
+            Optional[int], "see simulate()'s chunk_size docstring"
+        ] = None,
     ) -> Annotated[
         Tuple[torch.Tensor, torch.Tensor],
         "([Batch] terminal wealth Wealth_T, [Batch] total transaction cost paid)",
     ]:
-        return self._rollout(policy, prices, implied_vol, sequence_policy)
+        return self._rollout(policy, prices, implied_vol, sequence_policy, chunk_size)
 
     def _rollout(
         self,
@@ -163,7 +174,22 @@ class MarketEnvironment:
             Union[float, torch.Tensor], "scalar or [Batch, 1] implied volatility"
         ],
         sequence_policy: bool = False,
+        chunk_size: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = prices.shape[0]
+        if chunk_size is not None and chunk_size < batch_size:
+            wealth_chunks = []
+            cost_chunks = []
+            for start in range(0, batch_size, chunk_size):
+                end = min(start + chunk_size, batch_size)
+                iv_chunk = (
+                    implied_vol[start:end] if isinstance(implied_vol, torch.Tensor) else implied_vol
+                )
+                w, c = self._rollout(policy, prices[start:end], iv_chunk, sequence_policy)
+                wealth_chunks.append(w)
+                cost_chunks.append(c)
+            return torch.cat(wealth_chunks), torch.cat(cost_chunks)
+
         if sequence_policy:
             wealth, total_cost = self._rollout_sequence(policy, prices)
         else:
