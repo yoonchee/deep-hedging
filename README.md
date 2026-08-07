@@ -19,13 +19,17 @@ what matches the paper, what doesn't, and why is in
 - A **TimeGAN market generator** (Yoon et al. 2019, the paper's actual Part
   II architecture) -- embedder/recovery/generator/supervisor/discriminator
   over multi-variate OHLCV data, trained via the paper's 3-phase procedure,
-  now with the paper's own hyperparameters (31 hidden nodes, 3 layers) and
+  now with the paper's own hyperparameters (31 hidden nodes, 3 layers),
   its own binary cross-entropy discriminator loss as the default
   (`--discriminator-loss wgan-gp` keeps this repo's earlier deviation
-  available). Its synthetic-data diversity has been hard to calibrate
-  correctly (31% too low, then 214-224% too high, now 130.2% with an
-  explicit diversity-matching loss) -- see `RESULTS.md` for the full,
-  three-attempt story.
+  available), and the paper's own batch size/iteration count (178, ~10,000
+  iterations) plus its temporal train/test split. Its synthetic-data
+  diversity has been hard to calibrate correctly (31% too low, then
+  214-224% too high, then 130.2%, now **87.3%** at paper scale -- the
+  closest yet to 100%, but from the other side) -- and its best-fidelity
+  checkpoint yet produced the worst downstream hedging behavior of any
+  attempt (catastrophic tail risk in 3 of 4 architectures) -- see
+  `RESULTS.md` for the full four-attempt story.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
@@ -69,7 +73,7 @@ src/
     evaluate.py                Stress-test backtest vs. Black-Scholes (WGAN-GP- and TimeGAN-trained policies)
     replicate_part1.py         Frictionless Part I paper replication
     plotting.py                Shared chart library
-tests/                         84 tests
+tests/                         88 tests
 results/                       Generated plots + JSON summaries (gitignored inputs: data/, checkpoints/)
 ```
 
@@ -164,19 +168,37 @@ trail:
 - **TimeGAN vs. WGAN-GP**: TimeGAN's synthetic-data diversity was hard to
   calibrate — first only ~31% of real data's standard deviation (sigmoid
   latent space), then 214-224% after switching to tanh to fix it, then
-  130.2% after adding an explicit diversity-matching loss alongside the
-  paper's own hyperparameters and BCE discriminator loss. The 214-224%
+  130.2% after adding an explicit diversity-matching loss, then **87.3%**
+  once that same setup was retrained at the paper's own scale (batch=178,
+  ~10,000 iterations, paper's temporal train/test split) — the closest of
+  four attempts to 100%, approaching from the other side. The 214-224%
   overshoot produced a "beats Black-Scholes" result for exactly one
   architecture each time — but *which* architecture changed completely once
-  the RNN/LSTM input fix was applied (Basic RNN inherited the effect GRU
-  used to show, and GRU's own result got worse). With diversity brought
-  down to 130.2%, that same architecture (Basic RNN) is still separated
-  from the pack by the same signature (lower transaction cost, lower std),
-  just no longer landing exactly at Black-Scholes — a weaker version of
-  the effect, not its absence; suggestive (not conclusive) evidence the
-  attractor's strength scales with how extreme the overshoot is. Neither
-  generator is straightforwardly "better" for hedging; see `RESULTS.md`
-  for the full three-attempt story.
+  the RNN/LSTM input fix was applied, and at paper scale the entire framing
+  turned out to be investigating the wrong signal (see the next bullet):
+  three of four TimeGAN architectures instead show catastrophic tail risk
+  once evaluated at a large enough test scale to see it, and the
+  retrospective read is that "beats Black-Scholes" in the earlier, smaller
+  attempts was plausibly this same failure mode, just below the old test
+  set's detection threshold. Neither generator is straightforwardly
+  "better" for hedging; see `RESULTS.md` for the full four-attempt story.
+- **Catastrophic tail risk — a new finding surfaced only at paper scale**:
+  rerunning the stress test at the paper's own 500,000-path test scale
+  (previously 2,000) revealed several trained policies — GRU (WGAN-GP), the
+  most risk-averse alpha-sweep checkpoint (α=0.997), and Basic RNN/LSTM/GRU
+  under TimeGAN — incur catastrophic losses (excess kurtosis in the tens to
+  hundreds of thousands) on a small fraction of paths (0.05-0.16%) that the
+  old, smaller test batch was simply too small to ever sample. Verified
+  against a Black-Scholes control on the identical price paths (bounded
+  losses throughout) to rule out a test-set artifact — this is genuine
+  policy behavior, not noise. Two distinct, confirmed mechanisms: CVaR
+  training's gradient only touches the worst `(1-α)` fraction of each
+  batch, and at α=0.997/batch=1000 that's just 3 paths/step — sparse enough
+  that one checkpoint learned a fully degenerate never-hedge policy
+  (transaction cost exactly zero); separately, TimeGAN-trained recurrent
+  policies (not MLP) generalize badly to price extremes their training data
+  never produced. Not yet fixed — see `RESULTS.md` for the full
+  investigation and next steps.
 - **The option premium (P₀), and why mean wealth used to be negative
   everywhere**: this project's wealth formula omitted the option premium
   (P₀), verified directly against a closed-form Black-Scholes price in
@@ -210,14 +232,26 @@ trail:
 - Basic RNN's stress-test convergence is seed-sensitive (bimodal: some
   seeds converge well, others get stuck) — substantially improved by a
   CVaR control-variate baseline, but not fully closed to LSTM/GRU's level.
-- TimeGAN's diversity is improved but still overshoots (31% → 214-224% →
-  130.2% across three calibration attempts) — its fidelity checker now has
-  an upper-bound diversity warning (`DIVERSITY_OVERSHOOT_WARNING_THRESHOLD`)
-  that would have caught the 214-224% overshoot, but 130.2% is under it;
-  see `RESULTS.md`.
-- Toy-scale networks and training budgets throughout, not the paper's scale
-  (the paper's 500k Monte Carlo scenarios and larger networks are out of
-  reach on this project's compute budget, stated plainly rather than chased).
+- **Catastrophic tail risk in several trained policies** — GRU (WGAN-GP),
+  the α=0.997 alpha-sweep checkpoint, and Basic RNN/LSTM/GRU under TimeGAN
+  all incur extreme losses on a small fraction of paths (0.05-0.16%) that
+  only the paper's own 500,000-path test scale is large enough to surface.
+  Root-caused (sparse CVaR gradients at extreme α; poor generalization to
+  price extremes for TimeGAN-trained recurrent policies) but not yet fixed
+  — see `RESULTS.md`.
+- TimeGAN's diversity is improved but still off-target (31% → 214-224% →
+  130.2% → 87.3% across four calibration attempts, now undershooting
+  instead of overshooting) — its fidelity checker has an upper-bound
+  diversity warning (`DIVERSITY_OVERSHOOT_WARNING_THRESHOLD`) that would
+  have caught the 214-224% overshoot, but neither 130.2% nor 87.3% trips
+  it; see `RESULTS.md`.
+- ~~Toy-scale networks and training budgets throughout, not the paper's
+  scale~~ — resolved: training and evaluation now run at the paper's own
+  scale throughout (Part I's 500,000 scenarios/25,000 steps, TimeGAN's
+  Table 2 batch/iteration count, and every stress-test/alpha-sweep
+  evaluation batch). This is also what surfaced the tail-risk finding
+  above — the smaller scale wasn't just less precise, it was blind to a
+  real failure mode.
 
 ## References
 

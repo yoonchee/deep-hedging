@@ -22,10 +22,10 @@ found, and — deliberately — what didn't work and why, not just what did.
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
 | Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match, Basic RNN is seed-sensitive and improved (not fully closed) by a CVaR control-variate baseline — see below |
 | Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params, including scale: 500,000-scenario train/test sets, 25,000 gradient steps (the paper's "50 epochs" over that dataset size at batch=1000, in this codebase's per-step convention) — see below |
-| Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented. Mixed, architecture-dependent results that shifted after the RNN/LSTM fix — see TimeGAN section |
+| Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented, both now scaled to paper's Table 2 (TimeGAN) and paper-scale evaluation. TimeGAN's generator fidelity is now close (87.3% diversity), but its trained policies show catastrophic tail risk at the paper's own 500,000-path test scale — see TimeGAN section and Known limitations |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches, now extended to the paper's own Part II grid {0.5, 0.75, 0.99, 0.995, 0.997} |
 | Delta-convexity diagnostic (paper Figs. 5/8/11) | `backtester/plotting.py::plot_delta_convexity` | Matches, and was the tool that caught the RNN/LSTM failure |
-| Option premium P₀ in the wealth objective | `MarketEnvironment(premium=...)`, `common/black_scholes.py::black_scholes_call_price` | Implemented for Part I (closed-form, exact); still `0.0` in the stress test and every GAN-driven setting, which have no closed-form price — see [below](#terminal-wealth-and-the-p₀-premium-term) |
+| Option premium P₀ in the wealth objective | `MarketEnvironment(premium=...)`, `common/black_scholes.py::black_scholes_call_price`, `environment/market_env.py::estimate_premium_monte_carlo` | Implemented everywhere: closed-form and exact in Part I, Monte Carlo-estimated (500,000 paths, chunked) in the stress test and every GAN-driven setting, which have no closed-form price — see [below](#terminal-wealth-and-the-p₀-premium-term) |
 | GAN fidelity validation | `generator/validate.py` | **Beyond** the paper — not something Kim (2021) does |
 
 ## Terminal wealth and the P₀ (premium) term
@@ -333,18 +333,31 @@ real-data WGAN-GP generator described above (reproduce with `python
 src/backtester/evaluate.py`, after retraining each policy so it's trained
 against the new generator checkpoint).
 
-**This table was retrained three times**, and each retrain corrected a
-mistaken conclusion from the previous one — see the RNN/LSTM sequence below
-for the full trail. Current numbers, **now including P₀** (reproduce with
+**This table was retrained three times** at the project's earlier,
+2,000-path test scale, and each retrain corrected a mistaken conclusion
+from the previous one — see the RNN/LSTM sequence below for the full
+trail (its numbers predate the paper-scale rerun and are preserved as
+history, not current results). **Current numbers, at the paper's own
+500,000-path test scale** (Table 1/3), **including P₀** (reproduce with
 `python src/backtester/evaluate.py`):
 
 | Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | Total tx. cost |
 |---|---|---|---|---|---|---|
-| Black-Scholes | -0.032 | 1.15 | 1.68 | -1.97 | 5.34 | 12.90 |
-| MLP | -0.004 | 3.92 | 6.60 | -4.00 | 23.8 | 10.00 |
-| Basic RNN | -0.013 | 2.38 | **6.61** | -9.19 | 120.0 | 18.07 |
-| LSTM | **-0.023** | **2.60** | **4.36** | -2.83 | 11.7 | 15.21 |
-| GRU | -0.047 | 2.41 | 3.86 | -2.48 | 10.2 | 18.60 |
+| Black-Scholes | -0.033 | 1.20 | 1.85 | -2.24 | 7.6 | 3233.0 |
+| MLP | -0.037 | 2.38 | 3.69 | -2.08 | 6.9 | 4446.5 |
+| Basic RNN | -0.036 | 1.64 | 2.58 | -2.09 | 7.5 | 3863.7 |
+| LSTM | -0.042 | 2.17 | 3.49 | -2.19 | 8.5 | 6843.6 |
+| GRU | -0.041 | 2.42 | 5.35 | **-115.4** | **24,490** | 6023.3 |
+
+**GRU's skew/kurtosis columns are not a typo.** Every other cell in this
+table looks like a normal fat-tailed P&L distribution (skew around -2,
+kurtosis 7-8.5). GRU's are three orders of magnitude off, and its mean
+wealth (-0.041) and CVaR₉₅ (2.42) both look completely ordinary — this is
+invisible in every statistic except the tail moments. This is a real,
+newly-discovered finding, not noise: see [Catastrophic tail risk, invisible
+below ~500,000 test paths](#catastrophic-tail-risk-invisible-below-500000-test-paths)
+below for the full investigation, scope across other checkpoints, and the
+control that rules out a test-set artifact.
 
 **P₀ is now included here too** ([Terminal wealth and the P₀ (premium)
 term](#terminal-wealth-and-the-p₀-premium-term) covered Part I only when
@@ -438,6 +451,91 @@ than smoothing over: single-seed conclusions about *why* a specific
 architecture fails are unreliable in this codebase's training regime, and
 should be treated as provisional until checked across multiple seeds.
 
+### Catastrophic tail risk, invisible below ~500,000 test paths
+
+The stress test above uses the paper-matched 500,000-path test batch for
+the first time (previously 2,000, chunked to stay CPU-feasible — see
+`MarketEnvironment.simulate`'s `chunk_size` docstring). Rerunning at this
+scale surfaced something the smaller batch never could: GRU's skew (-115.4)
+and excess kurtosis (24,490) are three orders of magnitude out of line with
+every other architecture (skew ≈ -2.1, kurtosis 6.9-8.5), while its mean
+wealth and CVaR₉₅ look completely ordinary.
+
+**Not a fluke of this one checkpoint.** Scanning every trained checkpoint
+against the same seed-42, 500,000-path stress-test batch and counting
+paths with wealth below -50 (a loss > 25x the option premium) turns up the
+same pattern in several other places the summary tables above don't show
+on their own, since the main table and the alpha-sweep/TimeGAN tables are
+never printed side by side:
+
+| Checkpoint(s) | Paths with wealth < -50 | Worst loss | mean tx. cost |
+|---|---|---|---|
+| MLP, Basic RNN, LSTM (WGAN-GP) | 0 / 500,000 | ≤ -12.8 | normal |
+| **GRU (WGAN-GP)** | 34 / 500,000 (0.0068%) | **-417.5** | normal (0.0120) |
+| α ∈ {0.5, 0.75, 0.9, 0.95, 0.995} (MLP) | 0 / 500,000 | ≤ -12.8 | normal |
+| α = 0.99 (MLP) | 0 / 500,000 | -48.7 | normal, but ~half the rest (0.0044) |
+| **α = 0.997 (MLP)** | **814 / 500,000 (0.16%)** | **-6202.5** | **0.0000 — exactly zero** |
+| MLP (TimeGAN) | 0 / 500,000 | ≤ -8.8 | normal |
+| **Basic RNN (TimeGAN)** | 238 / 500,000 (0.048%) | -2564.7 | normal (0.0018) |
+| **LSTM (TimeGAN)** | 793 / 500,000 (0.16%) | **-6202.4** | normal (0.0093) |
+| **GRU (TimeGAN)** | 578 / 500,000 (0.12%) | -6033.3 | normal (0.0111) |
+
+**Two distinct mechanisms, confirmed rather than guessed:**
+
+1. **CVaR-α training starves at extreme α.** `PolicyTrainer`'s CVaR loss
+   only backpropagates through the worst `(1-α)` fraction of each training
+   batch (`batch_size=1000`, the paper's own Table 1/3 spec). At α=0.997
+   that's **3 paths per gradient step** — too sparse and noisy a signal to
+   learn anything beyond "don't bother." `mean_transaction_cost` isn't just
+   small, it's *exactly* zero (`9.7e-15`, floating-point noise), confirming
+   this checkpoint learned a fully degenerate never-hedge policy: its worst
+   loss (-6202.48) matches the closed-form **unhedged** loss on the single
+   most extreme path in the test set — `premium - (S_T - K)` =
+   `0.663 - (6204.15 - 1)` = **-6202.48**, to 5 significant figures.
+   α=0.99 (10 tail samples/step) shows an early, milder version of the
+   same thing: normal worst-case loss, but transaction cost already
+   roughly halved and 5,452 paths below -10 (vs. 3-5 for every other α).
+   This isn't an artifact of this codebase's own conventions — the paper's
+   own Table 3 trains at α up to 0.997 with this same batch size, so a
+   faithful reproduction of the paper's own setup hits the same
+   sparse-gradient wall.
+2. **TimeGAN-trained recurrent policies generalize badly to the stress
+   test's price extremes.** Basic RNN and LSTM are clean under WGAN-GP
+   training but catastrophic under TimeGAN (GRU is mildly affected under
+   both generators). Unlike α=0.997, these checkpoints have *normal*
+   transaction costs — they aren't refusing to hedge, they're hedging
+   *badly* on paths well outside anything TimeGAN's training distribution
+   produced. LSTM's worst loss lands within $0.07 of the fully-unhedged
+   number (-6202.41 vs. -6202.48) apparently by coincidence — on the single
+   most extreme test path, its accumulated hedge P&L happened to net to
+   ≈0, not because it wasn't hedging (mean tx. cost 0.0093, normal for this
+   architecture) but because whatever it did there didn't help.
+   TimeGAN-MLP, which only ever sees the instantaneous price ratio and
+   never sequence history, is unaffected — consistent with a
+   recurrence-specific extrapolation failure, not a shared data problem.
+
+**Verified against a control that rules out a test-set artifact.**
+Black-Scholes' closed-form delta hedge on the identical seed-42 batch
+(same 500,000 price paths, several reaching S_T > 6,000 under the stress
+test's 60%-vol regime) shows **zero** paths below -50 and a worst loss of
+just **-4.35**. If the extreme test paths themselves were the problem,
+Black-Scholes — an analytic hedge with no training or generalization
+dependency — would show it too. It doesn't, which rules out "the
+500,000-path test set just contains absurd prices" and confirms this is
+genuine policy behavior: the affected checkpoints fail to hedge well on
+paths the smaller, 2,000-path test batch was simply too small to ever
+sample (expected frequency here ranges from roughly 1-in-650 to
+1-in-15,000 depending on the checkpoint).
+
+This was not caught by any test in this repo, nor by any summary statistic
+reported elsewhere in this document until now — mean wealth and CVaR₉₅
+both look unremarkable for every affected checkpoint; only the tail count
+and skew/kurtosis columns show it. The diagnostic scripts used for the
+checkpoint scan above were run ad hoc via the shell, not committed as
+tests — a regression test asserting `(wealth < threshold).float().mean()`
+stays bounded for a known-good checkpoint would be a reasonable follow-up
+(see [Ideas for future work](#ideas-for-future-work)).
+
 ### Multi-alpha risk-return sweep, extended to the paper's own Part II grid
 
 The paper's Part II tests risk aversion at α ∈ {0.5, 0.75, 0.99, 0.995,
@@ -445,35 +543,62 @@ The paper's Part II tests risk aversion at α ∈ {0.5, 0.75, 0.99, 0.995,
 0.75, 0.9, 0.95, 0.99}, which never exercised the two most extreme levels
 at all. Extended by training two more MLP checkpoints
 (`train_policy.py --architecture mlp --alpha-sweep 0.995,0.997`) and
-rerunning the sweep backtest under the same stress-test conditions as the
-main table above (reproduce with `python src/backtester/evaluate.py`):
+rerunning the sweep backtest under the same, now paper-matched,
+500,000-path stress-test conditions as the main table above (reproduce with
+`python src/backtester/evaluate.py`):
 
 Includes P₀ (see [above](#terminal-wealth-and-the-p₀-premium-term)):
 
 | α | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
 |---|---|---|---|---|---|
-| 0.50 | -0.035 | 2.01 | 2.95 | -1.82 | 4.9 |
-| 0.75 | -0.037 | 1.94 | 2.92 | -1.94 | 5.5 |
-| 0.90 | -0.026 | 2.83 | 4.36 | -2.28 | 6.5 |
-| 0.95 | -0.033 | 2.08 | 3.11 | -1.90 | 4.6 |
-| 0.99 | 0.019 | 5.93 | 13.20 | -7.17 | 70.1 |
-| 0.995 | 0.059 | 5.72 | **17.83** | -15.5 | 335 |
-| 0.997 | 0.027 | 6.10 | 16.56 | -8.96 | 104 |
+| 0.50 | -0.037 | 2.32 | 3.61 | -2.07 | 6.9 |
+| 0.75 | -0.039 | 2.25 | 3.50 | -2.21 | 7.7 |
+| 0.90 | -0.038 | 2.25 | 3.50 | -2.17 | 7.4 |
+| 0.95 | -0.037 | 2.38 | 3.69 | -2.08 | 6.9 |
+| 0.99 | -0.031 | 7.99 | 14.33 | -5.00 | 35.7 |
+| 0.995 | -0.038 | 2.28 | 3.54 | -2.13 | 7.2 |
+| 0.997 | -0.031 | **11.76** | **43.15** | **-248.9** | **80,781** |
 
-CVaR₉₉ and tail extremity (skew/kurtosis) are both clearly higher at α ≥
-0.99 than at α ≤ 0.95, but the ordering *within* each of those groups is
-non-monotonic — α=0.9's CVaR₉₉ (5.03) exceeds α=0.95's (3.77), and
-α=0.995's kurtosis (335) exceeds α=0.997's (104). Each checkpoint here is a
-single training run at a single seed, and this project has already found
+CVaR₉₉ and tail extremity are both clearly elevated at α=0.99 relative to
+α≤0.95, and catastrophically so at α=0.997 — but α=0.995, sandwiched
+between them, looks completely ordinary (CVaR₉₉ 3.54, kurtosis 7.2,
+indistinguishable from α≤0.95). This dip-then-spike pattern is not a
+smoothly increasing risk-aversion effect; it lines up with the
+sparse-CVaR-gradient mechanism identified in [Catastrophic tail
+risk](#catastrophic-tail-risk-invisible-below-500000-test-paths) above —
+α=0.997's degenerate never-hedge policy (mean tx. cost exactly 0, worst
+loss matching the closed-form unhedged loss to 5 significant figures) is a
+confirmed training failure, not a risk-preference outcome — but it does
+*not* explain why α=0.995 (12 tail samples/step, barely more than 0.997's
+3) trained cleanly while α=0.99 (also fewer tail samples than 0.95's 50)
+already shows a milder version of the same problem. Each checkpoint here is
+a single training run at a single seed, and this project has already found
 (three times, in the RNN/LSTM investigation above) that single-seed
-training outcomes in this codebase are noisy enough to produce this kind of
-non-monotonicity on their own — no mechanism is claimed for the ordering
-here, and doing so would repeat that exact mistake. Nor was this tested
-against the paper's own numbers at these α levels (the paper's Part II uses
-TimeGAN and Basic RNN specifically, not this repo's WGAN-GP+MLP
-combination), so no match/mismatch verdict is claimed either — only that
-the sweep now actually covers the risk-aversion range the paper cares
-about, instead of stopping short of it.
+training outcomes in this codebase are noisy enough on their own to explain
+this kind of non-monotonicity — so the honest reading is "sparse gradients
+at high α make failure *more likely*, not deterministic," not a clean
+threshold effect. Nor was this tested against the paper's own numbers at
+these α levels (the paper's Part II uses TimeGAN and Basic RNN
+specifically, not this repo's WGAN-GP+MLP combination), so no
+match/mismatch verdict is claimed either — only that the sweep now covers
+the risk-aversion range the paper cares about, at the paper's own test
+scale, instead of stopping short of it.
+
+**A process note on training these 7 checkpoints (plus the 8 architecture
+checkpoints above) at `batch_size=1000, 25,000 steps`**: the first attempt
+combined all 7 alphas into one long-running `--alpha-sweep` process, which
+was killed twice with no error, traceback, or OOM evidence in either case
+(`ps aux`/`vm_stat`/`memory_pressure` all checked, nothing abnormal found).
+Switching to one standalone process per alpha worked far better — but
+individual jobs still intermittently died, consistently around step
+~1,400-1,430 regardless of which alpha was training. A retry-once policy
+(retry the same job once; only escalate if the *same* job fails twice in a
+row) was applied across the full 15-job queue (8 architectures × 2
+generators + 7 alphas): 4 alpha checkpoints succeeded on the first attempt,
+4 needed exactly one retry, and every retry succeeded — the escalation
+branch was never triggered. The root cause of these kills was never
+determined (no crash logs checked, no thermal/energy-state investigation)
+and is recorded here as an open, unexplained anomaly, not a resolved one.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -703,6 +828,85 @@ remaining 130.2% diversity overshoot still meaningfully mismatching the
 training and test distributions, is not established — the same
 honest-uncertainty posture as the rest of this section.
 
+### Attempt 4: paper scale (batch=178, 10,000 iterations) and the paper's own temporal train/test split
+
+Same architecture and losses as attempt 3, scaled to the paper's exact
+Table 2 training budget (`--batch-size 178`, phases 2000/2000/6000 epochs
+≈ 10,000 total iterations) and — for the first time — trained and
+fidelity-checked across the paper's own temporal split (train
+1/3/1950-1/25/2010, test 1/3/1950-1/25/2021; the fidelity check now runs
+against the *held-out* 2010-2021 window instead of resampling the training
+period, made possible by the `HistoricalPriceLoader` cache-hit bug fix
+described [above](#part-ii-implement-the-papers-temporal-traintest-split)).
+Fidelity check, held-out data:
+
+| Metric | Real (held-out) | Synthetic | Verdict |
+|---|---|---|---|
+| Diversity ratio | -- | **87.3%** | First *undershoot* across all four attempts (31% → 214-224% → 130.2% → 87.3%) — landed on the other side of 100% instead of asymptotically approaching it |
+| Mean bias | -- | -0.43σ | Comfortably under threshold |
+| Skewness | -0.977 | -0.984 | Diff **-0.007** — the tightest skew match of any attempt |
+| Excess kurtosis | 4.08 | 3.09 | Diff -0.99, comfortably under threshold |
+
+The full-text verdict from `validate.py`: *"OK: diversity is 87.3% of
+real, mean bias is -0.4 real std devs, skew diff -0.01, kurtosis diff
+-0.99."* This is the best fidelity match of the four attempts on every
+tracked metric — closest diversity ratio to 100%, tightest skew — though
+it approached from the other side (87.3% is 12.7 points low; 130.2% was
+30.2 points high) rather than converging monotonically, so "closest yet"
+shouldn't be read as "still closing the same gap in the same direction."
+
+Retraining all four policies against this generator and rerunning the
+paper-scale, 500,000-path regime-switching stress test:
+
+| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | mean tx. cost |
+|---|---|---|---|---|---|---|
+| Black-Scholes | -0.033 | 1.20 | 1.85 | -2.24 | 7.6 | 0.0065 |
+| MLP (TimeGAN) | -0.039 | 1.98 | 3.10 | -2.35 | 8.5 | 0.0113 |
+| Basic RNN (TimeGAN) | -0.031 | 4.47 | **17.46** | **-250.1** | **81,339** | 0.0018 |
+| LSTM (TimeGAN) | -0.040 | 10.86 | **42.13** | **-249.4** | **81,035** | 0.0093 |
+| GRU (TimeGAN) | -0.030 | 8.21 | **31.97** | **-307.8** | **145,523** | 0.0111 |
+
+**The best-fidelity generator to date produced the worst-behaved policies
+to date, and the "attractor" framing from attempts 1-3 is superseded by a
+larger finding.** MLP is clean (CVaR₉₉ 3.10 — not directly comparable to
+attempt 3's 25.00; see the scale/convention caveat below) and the other
+three architectures show the same catastrophic-tail signature
+documented in [Catastrophic tail risk](#catastrophic-tail-risk-invisible-below-500000-test-paths)
+above (skew/kurtosis three-to-four orders of magnitude out of line, driven
+by a small fraction of paths — 238 to 793 out of 500,000 — where the
+policy's hedge fails on price excursions the smaller, 2,000-path test
+batches used in attempts 1-3 never sampled). **This means every prior
+attempt's "attractor" investigation — which architecture beats
+Black-Scholes and why — was conducted at a test scale too small to see
+this.** Basic RNN's signature across attempts 2-4 has consistently been
+"lowest transaction cost, most separated from the pack" (attempt 2: near
+Black-Scholes; attempt 3: still separated, though not matching; attempt
+4: lowest CVaR₉₉ of the three catastrophic architectures, and the fewest
+catastrophic paths, 238 vs. 578-793). Read against the tail-risk finding,
+the retrospective interpretation is that "beats Black-Scholes" in attempts
+1-2 was plausibly never a genuinely better hedge — it was a policy that
+traded less and looked good on a test set too small to catch the rare
+paths where trading less costs the most. This is not proven (attempts 1-2
+weren't rerun at 500,000 paths, since their checkpoints were superseded
+before this scale-up), but it is the more parsimonious explanation given
+everything now known, and it means the multi-attempt "attractor" narrative
+in this section should be read as **history that turned out to be
+investigating the wrong signal**, not a resolved architectural finding.
+
+**Caveat on the CVaR₉₉ comparison across attempts**: attempt 3's table
+above used the 2,000-path test batch and `premium=0.0` convention (predates
+the P₀ extension to this stress test); attempt 4's table uses 500,000 paths
+and includes P₀. The two tables are not directly comparable cell-by-cell —
+MLP's swing from CVaR₉₉ 25.00 to 3.10 is not evidence of a 4-attempt
+improvement in generator quality, it's largely a scale-and-convention
+change. The one comparison that *is* apples-to-apples is attempt 4's TimeGAN
+table against the main WGAN-GP stress-test table above, both at 500,000
+paths with P₀: TimeGAN-trained policies remain uniformly worse than
+WGAN-GP-trained ones on this stress test (same conclusion as attempt 3,
+now on a like-for-like basis), and three of four TimeGAN architectures now
+additionally carry the catastrophic-tail failure mode that only one
+WGAN-GP architecture (GRU, mildly) shows.
+
 ## Known limitations
 
 Roughly in priority order:
@@ -756,29 +960,52 @@ Roughly in priority order:
    substantially reduces this variance (cross-seed CVaR₉₉ std 6.89 → 1.20)
    and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
    a real improvement, though still short of LSTM/GRU's ~5.0.
-5. **TimeGAN's diversity is improved but still overshoots.** Sigmoid
-   latents undershot real diversity (31%); tanh overshot it (214-224%); an
-   explicit diversity-matching loss (attempt 3) brought it to 130.2% —
-   real progress, still not landing on 100%, and not diagnosed further
-   (untried: higher `--lambda-diversity`, more phase-3 epochs). See the
-   TimeGAN section above for the full three-attempt history. `validate.py`'s
-   fidelity checker used to have a real gap surfaced by this —
-   `DIVERSITY_WARNING_THRESHOLD` only caught *low* diversity, nothing
-   flagged a ratio above 100% — now fixed: `DIVERSITY_OVERSHOOT_WARNING_THRESHOLD`
-   (1.7x) would have caught attempt 2's 214-224% (it printed "OK" at the
-   time) without flagging attempt 3's 130.2%. Attempt 2's overshoot produced one
-   architecture's best stress-test result and another's worst, and *which*
-   architecture benefited changed completely after the RNN/LSTM moneyness
-   fix (never a GRU-specific effect); attempt 3's smaller overshoot
-   produced a weaker version of the same effect (Basic RNN still separated
-   from the pack, just no longer matching Black-Scholes outright) rather
-   than its absence — every architecture's TimeGAN CVaR now trails
-   Black-Scholes, but not uniformly — see the TimeGAN section's
-   attempt 3 writeup for why this is suggestive, not conclusive, evidence
-   the earlier attractor was an overshoot artifact.
-6. **Scale** — networks and training budgets throughout are toy-sized
-   relative to the paper (500k Monte Carlo scenarios, larger networks).
-7. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
+5. **Catastrophic tail risk in several trained policies — newly discovered
+   at paper scale, root-caused, not yet fixed.** Rerunning the stress test
+   at the paper's own 500,000-path scale (see item 6 below) surfaced
+   extreme, previously-invisible tail losses in GRU (WGAN-GP), the
+   α=0.997 alpha-sweep checkpoint, and Basic RNN/LSTM/GRU under TimeGAN —
+   full detail, checkpoint-by-checkpoint scope, and the Black-Scholes
+   control that rules out a test-set artifact in [Catastrophic tail
+   risk](#catastrophic-tail-risk-invisible-below-500000-test-paths). Two
+   confirmed, distinct mechanisms: (a) CVaR-α training's gradient touches
+   only the worst `(1-α)` fraction of each batch — at α=0.997/batch=1000
+   that's 3 paths per step, and the resulting checkpoint learned a fully
+   degenerate never-hedge policy (`mean_transaction_cost` exactly 0); this
+   applies to a faithful reproduction of the paper's own Table 3 setup, not
+   just this codebase's conventions; (b) TimeGAN-trained recurrent
+   policies (not MLP) generalize badly to price extremes outside their
+   training distribution, hedging *badly* rather than *not at all*. Not
+   yet fixed — see [Ideas for future work](#ideas-for-future-work) for
+   next steps (variance-reduction for the CVaR loss at extreme α;
+   adversarial/extreme-scenario augmentation for TimeGAN-driven training).
+6. **~~Scale~~ — resolved.** Training and evaluation now run at the
+   paper's own scale throughout: Part I's 500,000 train/test scenarios and
+   25,000 gradient steps (item 2 above), TimeGAN's Table 2 batch size (178)
+   and ~10,000 iterations (attempt 4 above), and every stress-test/
+   alpha-sweep evaluation batch (2,000 → 500,000 paths). This is also what
+   surfaced item 5 above — the smaller scale wasn't just "less precise,"
+   it was blind to a real failure mode.
+7. **TimeGAN's diversity is much closer to 100% but now undershoots
+   instead of overshooting.** Sigmoid latents undershot real diversity
+   (31%); tanh overshot it (214-224%); the diversity-matching loss at a
+   smaller training budget landed at 130.2% (attempt 3); the same loss at
+   the paper's full training scale (attempt 4, batch=178, ~10,000
+   iterations, paper's own temporal split) landed at **87.3%** — the
+   closest of all four attempts to 100%, but from the other side, so this
+   is not simply "keep scaling and it converges." See the TimeGAN section
+   above for the full four-attempt history. `validate.py`'s fidelity
+   checker's `DIVERSITY_OVERSHOOT_WARNING_THRESHOLD` (1.7x) would have
+   caught attempt 2's 214-224% without flagging either 130.2% or 87.3%.
+   Attempt 4's downstream stress test showed the worst policy behavior of
+   any attempt (item 5 above) despite the best fidelity numbers — the
+   "which architecture beats Black-Scholes" attractor investigated across
+   attempts 1-3 is now believed to have been chasing the wrong signal
+   entirely (see attempt 4's writeup above for the full argument), so no
+   further diversity-tuning work is recommended until item 5 is
+   understood, since a "better-fidelity" generator most recently produced
+   the worst downstream result yet.
+8. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
    adjustments (`Adj Close == Close` always) — if the paper's authors used a
    security where those differ, this isn't an exact data match.
 
@@ -847,6 +1074,54 @@ Roughly in priority order:
   to be wrong (see the moneyness-fix self-correction and the TimeGAN
   GRU-attribution retraction), so other still-standing single-seed claims
   should be treated as provisional, not just this one.
-- Add the P₀ premium term to the wealth objective.
-- Scale up: more Monte Carlo scenarios, larger networks, longer training,
-  matching the paper's actual computational budget.
+- ~~Scale up: more Monte Carlo scenarios, larger networks, longer
+  training, matching the paper's actual computational budget~~ — **done**:
+  Part I (500k scenarios, 25k steps), TimeGAN (batch=178, ~10k iterations,
+  paper's temporal split), and every stress-test/alpha-sweep evaluation
+  (2,000 → 500,000 paths) all now run at paper scale. This is also what
+  surfaced the tail-risk finding below — worth internalizing as the reason
+  to keep chasing "scale" items in general: the smaller scale wasn't just
+  imprecise, it was blind to a real failure mode.
+- **New, highest priority**: root-cause and fix the catastrophic tail risk
+  documented in [Catastrophic tail
+  risk](#catastrophic-tail-risk-invisible-below-500000-test-paths) and
+  [Known limitations](#known-limitations) item 5. Two concrete angles,
+  matching the two confirmed mechanisms:
+  - For the α=0.997 degenerate never-hedge policy: a variance-reduction
+    technique for the CVaR loss at extreme α (e.g. importance sampling
+    toward the tail during training, so more than ~3 paths/step at
+    batch=1000 actually inform the gradient), or simply a larger batch
+    size at high α specifically (the paper's own Table 3 batch size of
+    1000 may itself be under-provisioned at α=0.997 — worth checking
+    whether the paper's authors saw this and whether their own reported
+    α=0.997 policy behaves sensibly, which this repo hasn't checked since
+    the paper doesn't publish per-path tail diagnostics).
+  - For TimeGAN-driven RNN/LSTM/GRU's generalization failure: training-time
+    exposure to more extreme price excursions — either by widening the
+    regime-switching stress scenario into the training distribution
+    itself, or an adversarial/extreme-scenario data augmentation step —
+    since the core issue is TimeGAN's training data (bounded by real
+    `^GSPC` history) never produces the kind of extreme excursion the
+    regime-switching stress test does.
+  - Add a committed regression test asserting the fraction of paths with
+    wealth below some threshold stays bounded for known-good checkpoints,
+    so a future change silently reintroducing this doesn't go unnoticed
+    the way this one did until a 500,000-path rerun happened to surface it.
+- Revisit whether the "beats Black-Scholes" attractor investigated across
+  TimeGAN attempts 1-3 (`## TimeGAN` section above) was ever a real,
+  distinct phenomenon, or whether it was the tail-risk finding the whole
+  time, just below the old test scale's detection threshold. Attempts 1-2's
+  checkpoints were superseded before the 500,000-path stress test existed
+  and weren't preserved, so this can't be checked directly — but retraining
+  fresh checkpoints at attempt 1/2's exact settings (sigmoid or tanh latent,
+  no diversity loss, old hyperparameters) and rerunning them through the
+  current 500,000-path stress test would settle it.
+- Investigate the alpha-sweep's puzzling α=0.995 dip: sandwiched between
+  α=0.99 (elevated CVaR₉₉) and α=0.997 (catastrophic, confirmed degenerate),
+  α=0.995 trained cleanly (CVaR₉₉ 3.54, indistinguishable from α≤0.95)
+  despite having only 12 tail samples/step at batch=1000 — barely more than
+  0.997's 3. Whether this is the sparse-gradient mechanism being
+  probabilistic rather than a hard threshold, or genuine seed luck (a
+  single training run per α, same caveat as everywhere else in this
+  document), is unresolved; a multi-seed sweep at α ∈ {0.99, 0.995, 0.997}
+  would tell them apart.
