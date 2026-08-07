@@ -468,17 +468,22 @@ same pattern in several other places the summary tables above don't show
 on their own, since the main table and the alpha-sweep/TimeGAN tables are
 never printed side by side:
 
-| Checkpoint(s) | Paths with wealth < -50 | Worst loss | mean tx. cost |
-|---|---|---|---|
-| MLP, Basic RNN, LSTM (WGAN-GP) | 0 / 500,000 | ≤ -12.8 | normal |
-| **GRU (WGAN-GP)** | 34 / 500,000 (0.0068%) | **-417.5** | normal (0.0120) |
-| α ∈ {0.5, 0.75, 0.9, 0.95, 0.995} (MLP) | 0 / 500,000 | ≤ -12.8 | normal |
-| α = 0.99 (MLP) | 0 / 500,000 | -48.7 | normal, but ~half the rest (0.0044) |
-| **α = 0.997 (MLP)** | **814 / 500,000 (0.16%)** | **-6202.5** | **0.0000 — exactly zero** |
-| MLP (TimeGAN) | 0 / 500,000 | ≤ -8.8 | normal |
-| **Basic RNN (TimeGAN)** | 238 / 500,000 (0.048%) | -2564.7 | normal (0.0018) |
-| **LSTM (TimeGAN)** | 793 / 500,000 (0.16%) | **-6202.4** | normal (0.0093) |
-| **GRU (TimeGAN)** | 578 / 500,000 (0.12%) | -6033.3 | normal (0.0111) |
+| Checkpoint(s) | Paths < -50 | Paths < -10 | Worst loss | mean tx. cost |
+|---|---|---|---|---|
+| MLP, Basic RNN, LSTM (WGAN-GP) | 0 / 500,000 | 0-4 | ≤ -12.8 | normal |
+| **GRU (WGAN-GP)** | 34 / 500,000 (0.0068%) | 327 | **-417.5** | normal (0.0120) |
+| α ∈ {0.5, 0.75, 0.9, 0.95, 0.995} (MLP) | 0 / 500,000 | 3-4 | ≤ -12.8 | normal |
+| **α = 0.99 (MLP)** | 0 / 500,000 | **5,452** | -48.7 | normal, but ~half the rest (0.0044) |
+| **α = 0.997 (MLP)** | **814 / 500,000 (0.16%)** | 5,257 | **-6202.5** | **0.0000 — exactly zero** |
+| MLP (TimeGAN) | 0 / 500,000 | 0 | ≤ -8.8 | normal |
+| **Basic RNN (TimeGAN)** | 238 / 500,000 (0.048%) | 1,849 | -2564.7 | normal (0.0018) |
+| **LSTM (TimeGAN)** | 793 / 500,000 (0.16%) | 4,754 | **-6202.4** | normal (0.0093) |
+| **GRU (TimeGAN)** | 578 / 500,000 (0.12%) | 3,608 | -6033.3 | normal (0.0111) |
+
+α=0.99's "0 / 500,000" at the -50 threshold looks clean at a glance —
+its 5,452-path count at the -10 threshold (vs. 3-5 for every clean
+checkpoint) is what actually flags it; it does not belong in the same row
+as the genuinely unaffected checkpoints above it.
 
 **Two distinct mechanisms, confirmed rather than guessed:**
 
@@ -492,26 +497,38 @@ never printed side by side:
    loss (-6202.48) matches the closed-form **unhedged** loss on the single
    most extreme path in the test set — `premium - (S_T - K)` =
    `0.663 - (6204.15 - 1)` = **-6202.48**, to 5 significant figures.
-   α=0.99 (10 tail samples/step) shows an early, milder version of the
-   same thing: normal worst-case loss, but transaction cost already
-   roughly halved and 5,452 paths below -10 (vs. 3-5 for every other α).
-   This isn't an artifact of this codebase's own conventions — the paper's
-   own Table 3 trains at α up to 0.997 with this same batch size, so a
-   faithful reproduction of the paper's own setup hits the same
-   sparse-gradient wall.
+   α=0.99 (10 tail samples/step) is a related but *not identical* failure:
+   its worst-case loss stays bounded (-48.7, nowhere near -6202) and it
+   isn't a confirmed never-hedge policy — but transaction cost is already
+   roughly halved and 5,452 paths sit below -10 (vs. 3-5 for every other
+   α), consistent with under-hedging across a wide swath of the tail
+   rather than α=0.997's complete collapse on the very worst few paths. Both
+   point at the same sparse-gradient mechanism, but α=0.99's signature is a
+   thickened shoulder, not a degenerate spike — the two shouldn't be
+   conflated as "the same thing at different severity" without more
+   evidence (e.g. checking whether α=0.99's `mean_transaction_cost` is
+   uniformly lower across the whole batch or concentrated in the same
+   handful of paths). This isn't an artifact of this codebase's own
+   conventions — the paper's own Table 3 trains at α up to 0.997 with this
+   same batch size, so a faithful reproduction of the paper's own setup
+   hits the same sparse-gradient wall.
 2. **TimeGAN-trained recurrent policies generalize badly to the stress
    test's price extremes.** Basic RNN and LSTM are clean under WGAN-GP
    training but catastrophic under TimeGAN (GRU is mildly affected under
-   both generators). Unlike α=0.997, these checkpoints have *normal*
-   transaction costs — they aren't refusing to hedge, they're hedging
-   *badly* on paths well outside anything TimeGAN's training distribution
-   produced. LSTM's worst loss lands within $0.07 of the fully-unhedged
-   number (-6202.41 vs. -6202.48) apparently by coincidence — on the single
-   most extreme test path, its accumulated hedge P&L happened to net to
-   ≈0, not because it wasn't hedging (mean tx. cost 0.0093, normal for this
-   architecture) but because whatever it did there didn't help.
-   TimeGAN-MLP, which only ever sees the instantaneous price ratio and
-   never sequence history, is unaffected — consistent with a
+   both generators). All four TimeGAN checkpoints were confirmed trained at
+   the same α=0.95 as their WGAN-GP counterparts (`policy_args["cvar_alpha"]`
+   read directly from each checkpoint) — so this is not mechanism 1 in
+   disguise; it's a distinct effect specific to the generator. Unlike
+   α=0.997, these checkpoints have *normal* transaction costs — they
+   aren't refusing to hedge, they're hedging *badly* on paths well outside
+   anything TimeGAN's training distribution produced. LSTM's worst loss
+   lands within $0.07 of the fully-unhedged number (-6202.41 vs. -6202.48)
+   apparently by coincidence — on the single most extreme test path, its
+   accumulated hedge P&L happened to net to ≈0, not because it wasn't
+   hedging (mean tx. cost 0.0093, normal for this architecture) but
+   because whatever it did there didn't help. TimeGAN-MLP, which only ever
+   sees the instantaneous price ratio and never sequence history, is
+   unaffected — consistent with a
    recurrence-specific extrapolation failure, not a shared data problem.
 
 **Verified against a control that rules out a test-set artifact.**
@@ -569,9 +586,12 @@ risk](#catastrophic-tail-risk-invisible-below-500000-test-paths) above —
 α=0.997's degenerate never-hedge policy (mean tx. cost exactly 0, worst
 loss matching the closed-form unhedged loss to 5 significant figures) is a
 confirmed training failure, not a risk-preference outcome — but it does
-*not* explain why α=0.995 (12 tail samples/step, barely more than 0.997's
-3) trained cleanly while α=0.99 (also fewer tail samples than 0.95's 50)
-already shows a milder version of the same problem. Each checkpoint here is
+*not* explain why α=0.995 (**5** tail samples/step at batch=1000) trained
+cleanly while α=0.99 (**10** tail samples/step — more than 0.995's 5, not
+fewer) already shows a thickened-tail warning sign. Tail-sample count alone
+doesn't predict which checkpoints failed; whatever pushed α=0.99 and
+α=0.997 into trouble while α=0.995 sat cleanly between them isn't
+explained by "fewer samples is strictly worse." Each checkpoint here is
 a single training run at a single seed, and this project has already found
 (three times, in the RNN/LSTM investigation above) that single-seed
 training outcomes in this codebase are noisy enough on their own to explain
@@ -1117,11 +1137,12 @@ Roughly in priority order:
   no diversity loss, old hyperparameters) and rerunning them through the
   current 500,000-path stress test would settle it.
 - Investigate the alpha-sweep's puzzling α=0.995 dip: sandwiched between
-  α=0.99 (elevated CVaR₉₉) and α=0.997 (catastrophic, confirmed degenerate),
-  α=0.995 trained cleanly (CVaR₉₉ 3.54, indistinguishable from α≤0.95)
-  despite having only 12 tail samples/step at batch=1000 — barely more than
-  0.997's 3. Whether this is the sparse-gradient mechanism being
-  probabilistic rather than a hard threshold, or genuine seed luck (a
-  single training run per α, same caveat as everywhere else in this
-  document), is unresolved; a multi-seed sweep at α ∈ {0.99, 0.995, 0.997}
-  would tell them apart.
+  α=0.99 (elevated CVaR₉₉, thickened tail) and α=0.997 (catastrophic,
+  confirmed degenerate), α=0.995 trained cleanly (CVaR₉₉ 3.54,
+  indistinguishable from α≤0.95) despite having only **5** tail
+  samples/step at batch=1000 — *fewer* than α=0.99's 10, not more.
+  Tail-sample count alone doesn't order these three outcomes. Whether this
+  is the sparse-gradient mechanism being probabilistic rather than a hard
+  threshold, or genuine seed luck (a single training run per α, same
+  caveat as everywhere else in this document), is unresolved; a
+  multi-seed sweep at α ∈ {0.99, 0.995, 0.997} would tell them apart.
