@@ -145,6 +145,29 @@ def _summarize_strategy(
     }
 
 
+def tail_risk_summary(
+    wealth: Annotated[torch.Tensor, "[Batch] terminal wealth"],
+    thresholds: Annotated[
+        Tuple[float, ...],
+        "wealth levels to count paths below; RESULTS.md's checkpoint scan "
+        "('Catastrophic tail risk, invisible below ~500,000 test paths') "
+        "used -50 (a loss > 25x the option premium) and -10",
+    ] = (-50.0, -10.0),
+) -> Annotated[
+    Dict[str, float],
+    "count/fraction of paths below each threshold, plus the single worst loss -- "
+    "the mean/CVaR/skew/kurtosis columns in _summarize_strategy all looked ordinary "
+    "for the affected checkpoints; only these per-path tail counts caught the failure",
+]:
+    result: Dict[str, float] = {"worst_loss": wealth.min().item()}
+    for threshold in thresholds:
+        below = wealth < threshold
+        key = f"below_{threshold:g}"
+        result[f"{key}_count"] = int(below.sum().item())
+        result[f"{key}_fraction"] = below.float().mean().item()
+    return result
+
+
 # -----------------------------------------------------------------------------
 # 4. Backtest orchestration
 # -----------------------------------------------------------------------------
@@ -432,6 +455,91 @@ def run_alpha_sweep_backtest(
 
 
 # -----------------------------------------------------------------------------
+# 6. Checkpoint tail-risk scan (RESULTS.md's "Catastrophic tail risk, invisible
+# below ~500,000 test paths"): a committed, reproducible version of what was
+# previously an ad hoc shell diagnostic. Mean/CVaR/skew/kurtosis in
+# _summarize_strategy all looked ordinary for the affected checkpoints; only
+# per-path counts against a fixed loss threshold caught it.
+# -----------------------------------------------------------------------------
+
+
+def scan_checkpoint_tail_risk(
+    checkpoint_dir: Annotated[Union[str, Path], "directory with hedging_agent*.pt checkpoints"] = "checkpoints",
+    batch_size: Annotated[int, "500,000 matches the scale that first surfaced this failure mode"] = 500_000,
+    seq_len: Annotated[int, "number of price observations per path"] = 30,
+    proportional_fee: Annotated[float, "kappa; e.g. 0.003 = 30 bps"] = 0.003,
+    low_vol: Annotated[float, "stress regime: calm-period volatility"] = 0.15,
+    high_vol: Annotated[float, "stress regime: turbulent-period volatility"] = 0.60,
+    switch_prob: Annotated[float, "stress regime: per-step switch probability"] = 0.10,
+    dt: Annotated[float, "time increment per step"] = 1.0,
+    seed: Annotated[int, "matches the seed used for RESULTS.md's own scan and main stress-test table"] = 42,
+    thresholds: Annotated[Tuple[float, ...], "wealth levels to count paths below"] = (-50.0, -10.0),
+    include_premium: bool = True,
+    alpha_sweep_alphas: Tuple[float, ...] = (0.5, 0.75, 0.9, 0.95, 0.99, 0.995, 0.997),
+) -> Annotated[
+    Dict[str, Dict[str, float]],
+    "{display_name: tail_risk_summary(...) | {'mean_transaction_cost': ...}} for every checkpoint found",
+]:
+    """Loads every available checkpoint (WGAN-GP, TimeGAN, and the alpha-sweep
+    MLP set) and reports per-path tail-loss counts on the same regime-switching
+    stress scenario used throughout this file, at the scale that first made
+    this failure mode visible.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    device = torch.device("cpu")
+
+    policy_groups: List[Tuple[str, Dict[str, Tuple[Any, bool]], float, float]] = []
+    for suffix, label in [("", ""), ("_timegan", " (TimeGAN)")]:
+        policies, strike, implied_vol = _load_all_policies(checkpoint_dir, device, suffix=suffix)
+        if policies and strike is not None:
+            policy_groups.append((label, policies, strike, implied_vol))
+
+    if policy_groups:
+        _, _, base_strike, base_implied_vol = policy_groups[0]
+        alpha_policies = load_alpha_sweep_checkpoints("mlp", list(alpha_sweep_alphas), checkpoint_dir)
+        if alpha_policies:
+            policy_groups.append((
+                "",
+                {f"MLP (alpha={alpha:g})": policy_and_flag for alpha, policy_and_flag in alpha_policies.items()},
+                base_strike,
+                base_implied_vol,
+            ))
+
+    results: Dict[str, Dict[str, float]] = {}
+    for label, policies, group_strike, implied_vol in policy_groups:
+        path_generator = torch.Generator().manual_seed(seed)
+        prices = simulate_regime_switching_paths(
+            batch_size, seq_len, s0=group_strike, dt=dt, low_vol=low_vol, high_vol=high_vol,
+            switch_prob=switch_prob, generator=path_generator,
+        )
+
+        premium = 0.0
+        if include_premium:
+            premium_generator = torch.Generator().manual_seed(seed + 1)
+            premium = estimate_premium_monte_carlo(
+                lambda n, s=group_strike: simulate_regime_switching_paths(
+                    n, seq_len, s0=s, dt=dt, low_vol=low_vol, high_vol=high_vol,
+                    switch_prob=switch_prob, generator=premium_generator,
+                ),
+                strike=group_strike,
+            )
+        environment = MarketEnvironment(strike=group_strike, proportional_fee=proportional_fee, dt=dt, premium=premium)
+
+        for name, (policy_obj, sequence_policy) in policies.items():
+            if hasattr(policy_obj, "eval"):
+                policy_obj.eval()
+            with torch.no_grad():
+                wealth, cost = environment.simulate_with_costs(
+                    policy_obj, prices, implied_vol, sequence_policy=sequence_policy, chunk_size=50_000
+                )
+            summary = tail_risk_summary(wealth, thresholds)
+            summary["mean_transaction_cost"] = cost.mean().item()
+            results[f"{name}{label}"] = summary
+
+    return results
+
+
+# -----------------------------------------------------------------------------
 # Demo entrypoint: load every available trained policy checkpoint (mlp, rnn,
 # lstm, gru), falling back to a short demo MLP training run if none exist,
 # then backtest all of them together under stress conditions
@@ -629,3 +737,12 @@ if __name__ == "__main__":
             seed=42,
         )
         print(json.dumps(timegan_result, indent=2))
+
+    # Checkpoint tail-risk scan (RESULTS.md's "Catastrophic tail risk,
+    # invisible below ~500,000 test paths") is deliberately *not* run here:
+    # it re-simulates paths and re-estimates the premium per checkpoint
+    # group, on top of what run_backtest/run_alpha_sweep_backtest already
+    # computed above, tripling the 500,000-path cost this script already
+    # pays. Call `scan_checkpoint_tail_risk` directly (see its docstring,
+    # and tests/test_tail_risk.py for a fast 50,000-path regression version)
+    # when the per-path tail-loss breakdown specifically is needed.

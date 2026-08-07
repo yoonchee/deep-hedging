@@ -548,10 +548,30 @@ This was not caught by any test in this repo, nor by any summary statistic
 reported elsewhere in this document until now — mean wealth and CVaR₉₅
 both look unremarkable for every affected checkpoint; only the tail count
 and skew/kurtosis columns show it. The diagnostic scripts used for the
-checkpoint scan above were run ad hoc via the shell, not committed as
-tests — a regression test asserting `(wealth < threshold).float().mean()`
-stays bounded for a known-good checkpoint would be a reasonable follow-up
-(see [Ideas for future work](#ideas-for-future-work)).
+checkpoint scan above were originally run ad hoc via the shell, not
+committed as tests — **now fixed**: `evaluate.py::tail_risk_summary` and
+`evaluate.py::scan_checkpoint_tail_risk` make the scan itself reproducible
+from committed code (callable directly — deliberately *not* wired into
+`evaluate.py`'s own `__main__`, since it would re-simulate paths and
+re-estimate the premium per checkpoint group on top of what
+`run_backtest`/`run_alpha_sweep_backtest` already compute there, roughly
+tripling that script's already-500,000-path cost), and
+`tests/test_tail_risk.py` turns it into a real regression suite: a
+threshold-counting unit test that needs no trained checkpoints, a guard
+over every known-good checkpoint (MLP/Basic RNN/LSTM WGAN-GP, MLP TimeGAN)
+asserting zero paths below -50, and a canary over every known-bad one (GRU
+WGAN-GP; Basic RNN/LSTM/GRU TimeGAN; the α=0.997 degenerate never-hedge
+checkpoint) asserting the documented failure is still present — so a
+future fix shows up as an intentional, informative test failure instead of
+silently going unnoticed. Trained checkpoints are gitignored, so these
+skip cleanly (not fail) on a fresh clone or in CI where none exist yet.
+The regression suite itself runs at a reduced 50,000-path scale for speed
+(vs. the 500,000 used above and in RESULTS.md's own scan) — checked
+directly to still reproduce every known-bad checkpoint's nonzero tail
+count at that scale, but note this is a sensitivity limit: a *newly*
+regressed checkpoint with a low enough catastrophic-path rate (e.g. the
+~1-in-15,000 end of the range measured above) could still read as clean
+at 50,000 paths and pass.
 
 ### Multi-alpha risk-return sweep, extended to the paper's own Part II grid
 
@@ -1123,10 +1143,14 @@ Roughly in priority order:
     since the core issue is TimeGAN's training data (bounded by real
     `^GSPC` history) never produces the kind of extreme excursion the
     regime-switching stress test does.
-  - Add a committed regression test asserting the fraction of paths with
-    wealth below some threshold stays bounded for known-good checkpoints,
-    so a future change silently reintroducing this doesn't go unnoticed
-    the way this one did until a 500,000-path rerun happened to surface it.
+  - ~~Add a committed regression test asserting the fraction of paths with
+    wealth below some threshold stays bounded for known-good checkpoints~~
+    — **done**: `tests/test_tail_risk.py`, backed by
+    `evaluate.py::tail_risk_summary` / `scan_checkpoint_tail_risk` (see
+    [above](#catastrophic-tail-risk-invisible-below-500000-test-paths)).
+    This catches *reintroduction* of the bug in currently-clean
+    checkpoints; it doesn't fix the two mechanisms above, which remain
+    open.
 - Revisit whether the "beats Black-Scholes" attractor investigated across
   TimeGAN attempts 1-3 (`## TimeGAN` section above) was ever a real,
   distinct phenomenon, or whether it was the tail-risk finding the whole
