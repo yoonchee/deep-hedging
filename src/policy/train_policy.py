@@ -249,6 +249,16 @@ def main() -> None:
         "policy_wealth -- a control-variate variance-reduction technique for CVaR's "
         "sparse gradient (see PolicyTrainer's use_bs_baseline and RESULTS.md)",
     )
+    parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=None,
+        help="clip the policy's gradient norm to this value before each optimizer step "
+        "(see PolicyTrainer's grad_clip_norm). Was implemented but never wired to this "
+        "CLI, so every checkpoint in this repo has always trained with clipping "
+        "disabled -- see RESULTS.md's mechanism (a) writeup for why this matters even "
+        "for the feed-forward MLP, not just recurrent architectures.",
+    )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -355,6 +365,7 @@ def _train_and_save(
         device=device,
         sequence_policy=sequence_policy,
         use_bs_baseline=args.use_bs_baseline,
+        grad_clip_norm=args.grad_clip_norm,
     )
 
     print(

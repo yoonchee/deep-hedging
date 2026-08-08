@@ -40,21 +40,22 @@ _SCAN_BATCH_SIZE = 50_000
 _SCAN_SEED = 42
 
 # RESULTS.md's "Catastrophic tail risk" table: checkpoints with 0/500,000
-# paths below -50 (a loss > 25x the option premium).
-_KNOWN_GOOD_CHECKPOINTS = ["MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)"]
+# paths below -50 (a loss > 25x the option premium). "MLP (alpha=0.997)"
+# joined this list after mechanism (a) was root-caused and fixed (sigmoid
+# output saturation under CVaR's (1/(1-alpha)) gradient amplification --
+# see RESULTS.md's mechanism (a) writeup) via PolicyTrainer's grad_clip_norm,
+# newly wired up to train_policy.py's --grad-clip-norm CLI flag; it was
+# never wired up before, so every prior checkpoint in this repo trained with
+# clipping disabled.
+_KNOWN_GOOD_CHECKPOINTS = ["MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)"]
 
 # Same table's checkpoints with a confirmed, not-yet-fixed catastrophic tail:
-# GRU (WGAN-GP) and every RecurrentHedgingAgent trained against TimeGAN. If
-# any of these starts reporting zero catastrophic paths, the underlying
-# mechanism ((a) sparse CVaR gradients at extreme alpha, or (b) TimeGAN
-# recurrent-policy generalization failure -- see RESULTS.md) has likely been
-# fixed; update this list and RESULTS.md's Known Limitations item 5 together.
+# GRU (WGAN-GP) and every RecurrentHedgingAgent trained against TimeGAN --
+# this is mechanism (b) (TimeGAN-trained recurrent policies generalizing
+# badly to price extremes), a distinct, still-open failure mode from
+# mechanism (a) above. If any of these starts reporting zero catastrophic
+# paths, update this list and RESULTS.md's Known Limitations item 5 together.
 _KNOWN_BAD_CHECKPOINTS = ["GRU", "Basic RNN (TimeGAN)", "LSTM (TimeGAN)", "GRU (TimeGAN)"]
-
-# alpha=0.997's degenerate never-hedge policy (RESULTS.md: "mean_transaction_cost
-# ... exactly zero") is the other confirmed catastrophic case, from the
-# alpha-sweep rather than the main architecture comparison.
-_KNOWN_BAD_ALPHA_CHECKPOINT = "MLP (alpha=0.997)"
 
 _checkpoints_available = pytest.mark.skipif(
     not CHECKPOINT_DIR.exists() or not any(CHECKPOINT_DIR.glob("hedging_agent*.pt")),
@@ -132,15 +133,21 @@ def test_known_bad_checkpoints_still_show_documented_tail_risk(tail_risk_scan: d
 
 
 @_checkpoints_available
-def test_alpha_0997_checkpoint_still_shows_degenerate_never_hedge_policy(tail_risk_scan: dict) -> None:
-    if _KNOWN_BAD_ALPHA_CHECKPOINT not in tail_risk_scan:
-        pytest.skip(f"no checkpoint loaded for {_KNOWN_BAD_ALPHA_CHECKPOINT!r}")
+def test_alpha_0997_checkpoint_no_longer_shows_degenerate_never_hedge_policy(tail_risk_scan: dict) -> None:
+    name = "MLP (alpha=0.997)"
+    if name not in tail_risk_scan:
+        pytest.skip(f"no checkpoint loaded for {name!r}")
 
-    summary = tail_risk_scan[_KNOWN_BAD_ALPHA_CHECKPOINT]
+    summary = tail_risk_scan[name]
 
-    # RESULTS.md: mean_transaction_cost "exactly zero (9.7e-15, floating-point
-    # noise)" -- a fully degenerate policy that never hedges, the confirmed
-    # signature of CVaR training starving at extreme alpha (sparse gradient:
-    # only 3 tail paths/step at batch=1000, alpha=0.997).
-    assert summary["below_-50_count"] > 0
-    assert summary["mean_transaction_cost"] < 1e-6
+    # This checkpoint used to be a fully degenerate never-hedge policy
+    # (mean_transaction_cost exactly 0, the confirmed signature of a single
+    # CVaR-amplified gradient step saturating the MLP's sigmoid output layer
+    # so hard that its local derivative underflows to exactly 0.0 in
+    # float32 -- see RESULTS.md's mechanism (a) writeup). Retrained with
+    # PolicyTrainer's grad_clip_norm (now exposed via --grad-clip-norm),
+    # which keeps every step small enough to never reach that saturated
+    # regime. If this starts failing, the fix regressed -- don't just widen
+    # the threshold, re-check delta span / mean_transaction_cost directly.
+    assert summary["below_-50_count"] == 0
+    assert summary["mean_transaction_cost"] > 1e-4

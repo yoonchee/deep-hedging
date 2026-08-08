@@ -474,7 +474,7 @@ never printed side by side:
 | **GRU (WGAN-GP)** | 34 / 500,000 (0.0068%) | 327 | **-417.5** | normal (0.0120) |
 | α ∈ {0.5, 0.75, 0.9, 0.95, 0.995} (MLP) | 0 / 500,000 | 3-4 | ≤ -12.8 | normal |
 | **α = 0.99 (MLP)** | 0 / 500,000 | **5,452** | -48.7 | normal, but ~half the rest (0.0044) |
-| **α = 0.997 (MLP)** | **814 / 500,000 (0.16%)** | 5,257 | **-6202.5** | **0.0000 — exactly zero** |
+| ~~**α = 0.997 (MLP)**~~ **α = 0.997 (MLP) — fixed, see below** | ~~814 / 500,000 (0.16%)~~ 0 / 500,000 | ~~5,257~~ 0 | ~~-6202.5~~ -9.7 | ~~0.0000~~ normal (0.0115) |
 | MLP (TimeGAN) | 0 / 500,000 | 0 | ≤ -8.8 | normal |
 | **Basic RNN (TimeGAN)** | 238 / 500,000 (0.048%) | 1,849 | -2564.7 | normal (0.0018) |
 | **LSTM (TimeGAN)** | 793 / 500,000 (0.16%) | 4,754 | **-6202.4** | normal (0.0093) |
@@ -573,6 +573,130 @@ regressed checkpoint with a low enough catastrophic-path rate (e.g. the
 ~1-in-15,000 end of the range measured above) could still read as clean
 at 50,000 paths and pass.
 
+### Mechanism (a), root-caused and fixed: sigmoid output saturation, not sparse gradients
+
+The α=0.997 degenerate never-hedge policy above was originally attributed
+to CVaR training's sparse gradient at extreme α (3 tail paths/step at
+batch=1000). This section's own "Ideas for future work" offered two fixes:
+importance sampling toward the tail, or simply a larger batch size at high
+α. The larger-batch fix was tried first, as the cheaper one — and it made
+things *worse*, which is itself the finding that led to the real root
+cause.
+
+**The batch-size hypothesis, falsified.** `HedgingAgent`'s own delta-span
+metric (max − min hedge ratio across a spot grid, the same diagnostic used
+throughout this document) was instrumented directly into the training loop
+and logged every 100 steps, rather than relying on a single post-hoc
+number. At α=0.997, batch=1,000 (seed 0, 3,000 steps): delta span
+*oscillates* continuously between fully collapsed (0.0000) and healthy
+(up to 0.99) — 7 collapse windows out of 30 logged. This reframed the
+question: the checkpoint isn't converging to a stable degenerate optimum,
+it's unstable and happens to land badly wherever training stops. Batch
+10,000, same seed, same step budget: **the collapse became permanent**,
+not rarer — 0 collapse windows in the first 11, then a solid run of 8
+consecutive collapsed windows (800 steps) with the gradient norm reading
+*exactly* `0.000000` (both mean and max over each 100-step window) through
+every one of them. A second seed reproduced the same qualitative pattern
+in both arms. Fewer, less-noisy gradient updates made the failure *more*
+stable, the opposite of the variance-reduction intuition that motivated
+trying a larger batch in the first place.
+
+**The actual mechanism, confirmed by inspecting the real checkpoint
+directly**: `HedgingAgent`'s output is `sigmoid(raw_output)`
+(`hedging_agent.py`). Loading the committed, degenerate
+`hedging_agent_mlp_alpha0_997.pt` and evaluating its pre-activation
+logits across the same spot grid gave **raw logits around −250 to −260**
+— so deeply saturated that `sigmoid'(x)` underflows to *exactly* `0.0` in
+float32 (confirmed directly: `torch.sigmoid(x)*(1-torch.sigmoid(x))`
+evaluates to `0.0` at these logits, not merely small). This is a genuine
+numerical dead end, not a noisy-but-nonzero signal: once weights push the
+logit this negative, **no gradient can reach them again**, regardless of
+batch size, `h`'s value, or how many paths violate the CVaR threshold —
+because the chain rule multiplies by a factor that has literally rounded
+to zero. CVaR's `1/(1-α)` loss amplification (×333 at α=0.997) combined
+with Adam's `lr=1e-2` is enough to jump a weight update this far in a
+single oversized step (`grad_norm` spikes into the hundreds were observed
+immediately before every collapse in the logs). A larger batch makes this
+*worse*, not better, because it doesn't change how far a single outsized
+step can push the logit — it just means there are more, not fewer,
+identically-saturated samples all producing the same zero gradient once
+the collapse happens, which is consistent with the observed longer,
+harder-to-escape collapse.
+
+**The fix already existed in this codebase and was never wired up.**
+`PolicyTrainer.__init__`'s `grad_clip_norm` parameter has a docstring that
+names this exact failure mode almost verbatim — "the policy gets stuck
+outputting a near-constant value from the first few steps onward, with
+zero further movement no matter how many epochs follow" — written for the
+RNN/LSTM DC-dominance investigation earlier in this document. But
+`train_policy.py`'s CLI never exposed it: `_train_and_save` always called
+`PolicyTrainer(...)` without passing it, so **every checkpoint in this
+repo has always trained with gradient clipping disabled**, including the
+plain feed-forward `HedgingAgent`, which the docstring's own framing
+(recurrent gates specifically) didn't anticipate would need it too. Added
+a `--grad-clip-norm` CLI flag (`train_policy.py`) that wires straight
+through to the existing parameter — no new mechanism, just connecting one
+that was already there.
+
+**Verified before committing to a full retrain.** Same instrumented setup,
+α=0.997, batch=1,000 (the paper's own Table 3 batch size — no deviation
+needed once this was the actual fix), 3,000 steps, two seeds:
+`grad_clip_norm ∈ {1.0, 5.0}` produced **zero** collapse windows across 90
+logged checkpoints (2 seeds × 2 clip values × ~22-30 windows each), versus
+7-10 collapses per 30 windows unclipped at each seed. Both clipped runs
+ended with delta span 0.92-0.97 and steadily positive, growing mean
+wealth, instead of oscillating.
+
+**Production retrain, paper scale**: `hedging_agent_mlp_alpha0_997.pt`
+retrained with `--grad-clip-norm 1.0`, otherwise identical settings
+(batch=1,000, 25,000 steps, seed=0) to every other checkpoint in this
+document. Verified against the same seed-42, 500,000-path stress test used
+for the checkpoint scan above:
+
+| | Before (unclipped) | After (`grad_clip_norm=1.0`) |
+|---|---|---|
+| Paths < -50 | 814 / 500,000 (0.16%) | **0 / 500,000** |
+| Worst loss | -6202.5 | **-9.7** |
+| mean transaction cost | 0.0000 (exactly) | **0.0115** (normal) |
+| CVaR₉₅ / CVaR₉₉ | (degenerate; not comparable) | 2.22 / 3.46 |
+| delta span | 0.0000 | **0.9988** |
+
+Every number now lands in the same range as the other clean α=0.5-0.995
+checkpoints (see the updated alpha-sweep table below) — this isn't a
+partial improvement, the checkpoint is fully repaired.
+`tests/test_tail_risk.py` was updated accordingly: `MLP (alpha=0.997)`
+moved from the known-bad canary list to the known-good guard list, and the
+old degenerate-policy assertion now asserts the opposite (see that file's
+own comments for what a future regression here should look like).
+
+**A mistake made and caught during this fix, worth recording plainly
+rather than smoothing over**: the first production retrain command omitted
+`--alpha-sweep`, so `train_policy.py`'s default single-run checkpoint path
+(`checkpoints/hedging_agent.pt` for `architecture=mlp`) was used instead of
+the intended `hedging_agent_mlp_alpha0_997.pt` — silently overwriting the
+main comparison table's MLP checkpoint (α=0.95) with the α=0.997 run,
+without a backup taken first. Recovered by (1) moving the wrongly-placed
+but correctly-trained file to its intended destination — which is exactly
+the fix this section describes, so no work was lost there — and (2)
+regenerating `hedging_agent.pt` from its known, recorded settings (α=0.95,
+same seed=0, same untouched `market_gan.pt` generator checkpoint, read
+directly off sibling checkpoints' saved `args`). The regenerated file was
+verified against this document's own main stress-test table
+(`mean_wealth`, CVaR₉₅/₉₉, skew, kurtosis, and total transaction cost all
+matched to the last reported digit) before treating the recovery as
+complete.
+
+**Scope: this fixes mechanism (a) only, for the one checkpoint it was
+confirmed on.** GRU (WGAN-GP)'s milder tail issue and α=0.99's
+thickened-tail warning sign (see the checkpoint scan table above) were
+*not* retrained with clipping — both are plausible candidates for the same
+underlying saturation mechanism, since neither has been ruled out, but
+neither has been checked either, so no claim is made about them here.
+Mechanism (b) (TimeGAN-trained recurrent policies generalizing badly to
+price extremes) is a wholly separate failure mode, untouched by this fix —
+see [Known limitations](#known-limitations) item 5 and [Ideas for future
+work](#ideas-for-future-work).
+
 ### Multi-alpha risk-return sweep, extended to the paper's own Part II grid
 
 The paper's Part II tests risk aversion at α ∈ {0.5, 0.75, 0.99, 0.995,
@@ -586,6 +710,9 @@ rerunning the sweep backtest under the same, now paper-matched,
 
 Includes P₀ (see [above](#terminal-wealth-and-the-p₀-premium-term)):
 
+**Regenerated after the α=0.997 fix** ([above](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients));
+α=0.5-0.995 are unchanged checkpoints, re-evaluated on the same seed-42 batch and matching the previous table to the last reported digit — included here as confirmation that fixing α=0.997 had no side effects on the others, not as new results:
+
 | α | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
 |---|---|---|---|---|---|
 | 0.50 | -0.037 | 2.32 | 3.61 | -2.07 | 6.9 |
@@ -594,33 +721,28 @@ Includes P₀ (see [above](#terminal-wealth-and-the-p₀-premium-term)):
 | 0.95 | -0.037 | 2.38 | 3.69 | -2.08 | 6.9 |
 | 0.99 | -0.031 | 7.99 | 14.33 | -5.00 | 35.7 |
 | 0.995 | -0.038 | 2.28 | 3.54 | -2.13 | 7.2 |
-| 0.997 | -0.031 | **11.76** | **43.15** | **-248.9** | **80,781** |
+| ~~0.997~~ **0.997 (fixed)** | ~~-0.031~~ -0.039 | ~~**11.76**~~ 2.22 | ~~**43.15**~~ 3.46 | ~~**-248.9**~~ -2.21 | ~~**80,781**~~ 7.7 |
 
-CVaR₉₉ and tail extremity are both clearly elevated at α=0.99 relative to
-α≤0.95, and catastrophically so at α=0.997 — but α=0.995, sandwiched
-between them, looks completely ordinary (CVaR₉₉ 3.54, kurtosis 7.2,
-indistinguishable from α≤0.95). This dip-then-spike pattern is not a
-smoothly increasing risk-aversion effect; it lines up with the
-sparse-CVaR-gradient mechanism identified in [Catastrophic tail
-risk](#catastrophic-tail-risk-invisible-below-500000-test-paths) above —
-α=0.997's degenerate never-hedge policy (mean tx. cost exactly 0, worst
-loss matching the closed-form unhedged loss to 5 significant figures) is a
-confirmed training failure, not a risk-preference outcome — but it does
-*not* explain why α=0.995 (**5** tail samples/step at batch=1000) trained
-cleanly while α=0.99 (**10** tail samples/step — more than 0.995's 5, not
-fewer) already shows a thickened-tail warning sign. Tail-sample count alone
-doesn't predict which checkpoints failed; whatever pushed α=0.99 and
-α=0.997 into trouble while α=0.995 sat cleanly between them isn't
-explained by "fewer samples is strictly worse." Each checkpoint here is
-a single training run at a single seed, and this project has already found
-(three times, in the RNN/LSTM investigation above) that single-seed
-training outcomes in this codebase are noisy enough on their own to explain
-this kind of non-monotonicity — so the honest reading is "sparse gradients
-at high α make failure *more likely*, not deterministic," not a clean
-threshold effect. Nor was this tested against the paper's own numbers at
-these α levels (the paper's Part II uses TimeGAN and Basic RNN
-specifically, not this repo's WGAN-GP+MLP combination), so no
-match/mismatch verdict is claimed either — only that the sweep now covers
+α=0.997 now sits comfortably inside the same range as every α ≤ 0.995 —
+the fix above didn't just reduce the damage, it made this row
+indistinguishable from a normal, well-behaved checkpoint. **α=0.99 is the
+one remaining warning sign in this table**, and it was deliberately *not*
+retrained with clipping as part of that fix (see that section's scope
+note) — CVaR₉₉ (14.33) and kurtosis (35.7) are still clearly elevated
+relative to every other row, including both its neighbors (α=0.995 at 3.54
+un-flagged, and α=0.997 now also clean). Whether α=0.99's thickened tail
+is the same sigmoid-saturation mechanism at a milder, non-fully-collapsed
+stage, or something else, hasn't been checked — it's a natural next
+candidate given the fix now available, but no claim is made about it here.
+Each checkpoint in this table is still a single training run at a single
+seed, and this project has already found (three times, in the RNN/LSTM
+investigation above) that single-seed training outcomes in this codebase
+are noisy enough on their own to matter — so α=0.99's isolation from its
+neighbors shouldn't yet be read as a clean, deterministic threshold effect
+either. Nor was this tested against the paper's own numbers at these α
+levels (the paper's Part II uses TimeGAN and Basic RNN specifically, not
+this repo's WGAN-GP+MLP combination), so no match/mismatch verdict is
+claimed either — only that the sweep now covers
 the risk-aversion range the paper cares about, at the paper's own test
 scale, instead of stopping short of it.
 
@@ -1051,24 +1173,39 @@ Roughly in priority order:
    and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
    a real improvement, though still short of LSTM/GRU's ~5.0.
 5. **Catastrophic tail risk in several trained policies — newly discovered
-   at paper scale, root-caused, not yet fixed.** Rerunning the stress test
-   at the paper's own 500,000-path scale (see item 6 below) surfaced
-   extreme, previously-invisible tail losses in GRU (WGAN-GP), the
-   α=0.997 alpha-sweep checkpoint, and Basic RNN/LSTM/GRU under TimeGAN —
-   full detail, checkpoint-by-checkpoint scope, and the Black-Scholes
-   control that rules out a test-set artifact in [Catastrophic tail
-   risk](#catastrophic-tail-risk-invisible-below-500000-test-paths). Two
-   confirmed, distinct mechanisms: (a) CVaR-α training's gradient touches
-   only the worst `(1-α)` fraction of each batch — at α=0.997/batch=1000
-   that's 3 paths per step, and the resulting checkpoint learned a fully
-   degenerate never-hedge policy (`mean_transaction_cost` exactly 0); this
-   applies to a faithful reproduction of the paper's own Table 3 setup, not
-   just this codebase's conventions; (b) TimeGAN-trained recurrent
-   policies (not MLP) generalize badly to price extremes outside their
-   training distribution, hedging *badly* rather than *not at all*. Not
-   yet fixed — see [Ideas for future work](#ideas-for-future-work) for
-   next steps (variance-reduction for the CVaR loss at extreme α;
-   adversarial/extreme-scenario augmentation for TimeGAN-driven training).
+   at paper scale; mechanism (a) root-caused and fixed, mechanism (b) still
+   open.** Rerunning the stress test at the paper's own 500,000-path scale
+   (see item 6 below) surfaced extreme, previously-invisible tail losses in
+   GRU (WGAN-GP), the α=0.997 alpha-sweep checkpoint, and Basic RNN/LSTM/GRU
+   under TimeGAN — full detail, checkpoint-by-checkpoint scope, and the
+   Black-Scholes control that rules out a test-set artifact in
+   [Catastrophic tail risk](#catastrophic-tail-risk-invisible-below-500000-test-paths).
+   Two confirmed, distinct mechanisms:
+   - **(a) ~~CVaR-α training's gradient touches only the worst `(1-α)`
+     fraction of each batch~~ — resolved, but not the way it was first
+     diagnosed.** The α=0.997 checkpoint's degenerate never-hedge policy
+     turned out not to be a sparse-gradient starvation problem: it was
+     `HedgingAgent`'s sigmoid output layer getting pushed into permanent
+     numerical saturation (pre-activation logits ≈ −250, where
+     `sigmoid'(x)` underflows to exactly `0.0` in float32) by an
+     oversized, CVaR-amplified gradient step — a genuine dead end no
+     amount of further training could escape. A larger batch size (the
+     obvious first fix to try) made this measurably *worse*, not better —
+     see [the full writeup](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients)
+     for why. The actual fix was `PolicyTrainer`'s existing but
+     never-wired-up `grad_clip_norm`, now exposed via `train_policy.py
+     --grad-clip-norm`, at the paper's unmodified batch=1,000. Verified at
+     the full 500,000-path scale: 0 catastrophic paths (was 814), worst
+     loss -9.7 (was -6202.5), CVaR₉₅/₉₉ 2.22/3.46 — fully in line with
+     every other clean checkpoint. GRU (WGAN-GP)'s milder tail issue and
+     α=0.99's thickened-tail warning sign were *not* retrained with
+     clipping and remain open, plausible candidates for the same
+     mechanism.
+   - **(b) TimeGAN-trained recurrent policies (not MLP) generalize badly
+     to price extremes** outside their training distribution, hedging
+     *badly* rather than *not at all* — still open, see [Ideas for future
+     work](#ideas-for-future-work) (adversarial/extreme-scenario
+     augmentation for TimeGAN-driven training).
 6. **~~Scale~~ — resolved.** Training and evaluation now run at the
    paper's own scale throughout: Part I's 500,000 train/test scenarios and
    25,000 gradient steps (item 2 above), TimeGAN's Table 2 batch size (178)
@@ -1172,27 +1309,31 @@ Roughly in priority order:
   surfaced the tail-risk finding below — worth internalizing as the reason
   to keep chasing "scale" items in general: the smaller scale wasn't just
   imprecise, it was blind to a real failure mode.
-- **New, highest priority**: root-cause and fix the catastrophic tail risk
-  documented in [Catastrophic tail
-  risk](#catastrophic-tail-risk-invisible-below-500000-test-paths) and
-  [Known limitations](#known-limitations) item 5. Two concrete angles,
-  matching the two confirmed mechanisms:
-  - For the α=0.997 degenerate never-hedge policy: a variance-reduction
-    technique for the CVaR loss at extreme α (e.g. importance sampling
-    toward the tail during training, so more than ~3 paths/step at
-    batch=1000 actually inform the gradient), or simply a larger batch
-    size at high α specifically (the paper's own Table 3 batch size of
-    1000 may itself be under-provisioned at α=0.997 — worth checking
-    whether the paper's authors saw this and whether their own reported
-    α=0.997 policy behaves sensibly, which this repo hasn't checked since
-    the paper doesn't publish per-path tail diagnostics).
+- **Root-cause and fix the catastrophic tail risk** documented in
+  [Catastrophic tail risk](#catastrophic-tail-risk-invisible-below-500000-test-paths)
+  and [Known limitations](#known-limitations) item 5. Two confirmed
+  mechanisms, one now fixed:
+  - ~~For the α=0.997 degenerate never-hedge policy: a variance-reduction
+    technique for the CVaR loss at extreme α...~~ — **done, but the
+    diagnosis changed along the way**: it wasn't a sparse-gradient problem
+    (importance sampling was never tried; a larger batch was tried first
+    and made things *worse*), it was `HedgingAgent`'s sigmoid output
+    saturating into a numerically dead zone. Fixed via `PolicyTrainer`'s
+    existing `grad_clip_norm`, newly exposed as `train_policy.py
+    --grad-clip-norm`, at the paper's unmodified batch=1,000 — see the
+    [full writeup](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients).
+    **New, highest priority now**: apply the same fix to GRU (WGAN-GP)'s
+    milder tail issue and α=0.99's thickened-tail warning sign (see that
+    section's scope note) — both are untested candidates for the same
+    saturation mechanism, not confirmed cases.
   - For TimeGAN-driven RNN/LSTM/GRU's generalization failure: training-time
     exposure to more extreme price excursions — either by widening the
     regime-switching stress scenario into the training distribution
     itself, or an adversarial/extreme-scenario data augmentation step —
     since the core issue is TimeGAN's training data (bounded by real
     `^GSPC` history) never produces the kind of extreme excursion the
-    regime-switching stress test does.
+    regime-switching stress test does. Still open, unaffected by the
+    grad-clipping fix (a different mechanism entirely).
   - ~~Add a committed regression test asserting the fraction of paths with
     wealth below some threshold stays bounded for known-good checkpoints~~
     — **done**: `tests/test_tail_risk.py`, backed by
