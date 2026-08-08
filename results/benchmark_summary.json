@@ -54,14 +54,14 @@
       "total_transaction_cost": 6843.6455078125
     },
     "GRU": {
-      "mean_wealth": -0.04078331217169762,
-      "std_wealth": 1.4269360303878784,
-      "cvar_95": 2.4183239936828613,
-      "cvar_99": 5.352980136871338,
-      "skewness": -115.43402862548828,
-      "excess_kurtosis": 24489.826171875,
-      "mean_transaction_cost": 0.01204653736203909,
-      "total_transaction_cost": 6023.2685546875
+      "mean_wealth": -0.040726080536842346,
+      "std_wealth": 0.7728680372238159,
+      "cvar_95": 2.1387836933135986,
+      "cvar_99": 3.8139636516571045,
+      "skewness": -24.27744483947754,
+      "excess_kurtosis": 3078.271484375,
+      "mean_transaction_cost": 0.01315315067768097,
+      "total_transaction_cost": 6576.5751953125
     }
   }
 }

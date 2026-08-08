@@ -47,25 +47,37 @@ _SCAN_SEED = 42
 # PolicyTrainer's grad_clip_norm, newly wired up to train_policy.py's
 # --grad-clip-norm CLI flag; it was never wired up before, so every prior
 # checkpoint in this repo trained with clipping disabled.
+#
+# GRU (WGAN-GP) does NOT belong here despite also being grad_clip_norm-fixed:
+# its fix is a substantial improvement (34/500,000 -> 4/500,000 catastrophic
+# paths), not a full 0/500,000 close, so it would fail this list's
+# below_-50_count == 0 assertion. See test_gru_checkpoint_substantially_
+# improved_but_not_fully_clean below and RESULTS.md's "Fix attempt" writeup.
+# Note for anyone regenerating checkpoints from scratch: train_policy.py's
+# --grad-clip-norm default is still None, so `--architecture gru` with no
+# extra flags reproduces the *pre-fix*, more-catastrophic checkpoint, not
+# the one currently at checkpoints/hedging_agent_gru.pt. Pass
+# --grad-clip-norm 1.0 explicitly to reproduce the promoted one.
 _KNOWN_GOOD_CHECKPOINTS = [
     "MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)", "MLP (alpha=0.99)",
 ]
 
 # Same table's checkpoints with a confirmed, not-yet-fixed catastrophic tail.
-# GRU (WGAN-GP): checked directly against the same saturation diagnostic that
-# found and fixed mechanism (a) -- its delta span is a healthy 1.0000 at
-# every timestep checked, so this is confirmed NOT sigmoid saturation; a
-# distinct, still-uncharacterized mechanism. Basic RNN/LSTM/GRU (TimeGAN):
-# mechanism (b) (TimeGAN-trained recurrent policies generalizing badly to
-# price extremes) for LSTM/GRU (also checked: healthy delta span, not
-# saturated). Basic RNN (TimeGAN) specifically was further diagnosed and
-# turned out to be a third, distinct mechanism: its vanilla-RNN hidden state
-# is saturated to tanh's +-1.0 bound regardless of input (constant delta
-# output) -- confirmed not fixed by grad_clip_norm, orthogonal_init, or both
-# together (all tested; see RESULTS.md). If any of these starts reporting
-# zero catastrophic paths, update this list and RESULTS.md's Known
-# Limitations item 5 together.
-_KNOWN_BAD_CHECKPOINTS = ["GRU", "Basic RNN (TimeGAN)", "LSTM (TimeGAN)", "GRU (TimeGAN)"]
+# GRU (WGAN-GP) is NOT here either, despite still being catastrophic (see
+# above) -- its post-fix catastrophic rate (4/500,000, worst loss -137.5) is
+# below this file's 50,000-path scan's sensitivity: verified directly, a
+# seed=42 scan at that scale reads 0/50,000 below -50 for the current
+# checkpoint, which would make this list's below_-50_count > 0 assertion
+# fail. Basic RNN/LSTM/GRU (TimeGAN): mechanism (b) (TimeGAN-trained
+# recurrent policies generalizing badly to price extremes) for LSTM/GRU
+# (checked: healthy delta span, not saturated). Basic RNN (TimeGAN)
+# specifically was further diagnosed and turned out to be a third, distinct
+# mechanism: its vanilla-RNN hidden state is saturated to tanh's +-1.0 bound
+# regardless of input (constant delta output) -- confirmed not fixed by
+# grad_clip_norm, orthogonal_init, or both together (all tested; see
+# RESULTS.md). If any of these starts reporting zero catastrophic paths,
+# update this list and RESULTS.md's Known Limitations item 5 together.
+_KNOWN_BAD_CHECKPOINTS = ["Basic RNN (TimeGAN)", "LSTM (TimeGAN)", "GRU (TimeGAN)"]
 
 _checkpoints_available = pytest.mark.skipif(
     not CHECKPOINT_DIR.exists() or not any(CHECKPOINT_DIR.glob("hedging_agent*.pt")),
@@ -161,3 +173,34 @@ def test_alpha_0997_checkpoint_no_longer_shows_degenerate_never_hedge_policy(tai
     # the threshold, re-check delta span / mean_transaction_cost directly.
     assert summary["below_-50_count"] == 0
     assert summary["mean_transaction_cost"] > 1e-4
+
+
+@_checkpoints_available
+def test_gru_checkpoint_substantially_improved_but_not_fully_clean(tail_risk_scan: dict) -> None:
+    name = "GRU"
+    if name not in tail_risk_scan:
+        pytest.skip(f"no checkpoint loaded for {name!r}")
+
+    summary = tail_risk_scan[name]
+
+    # GRU (WGAN-GP)'s hidden-state recovery-lag mechanism (RESULTS.md's
+    # "Follow-up diagnosis" and "Fix attempt" subsections): grad_clip_norm=1.0,
+    # trained at full scale, cut the catastrophic-path rate from 34/500,000
+    # to 4/500,000 (worst loss -417.5 -> -137.5) and was promoted to
+    # checkpoints/hedging_agent_gru.pt. This checkpoint fits neither the
+    # known-good list above (below_-50_count == 0 -- it isn't, at full
+    # scale) nor the known-bad list (below_-50_count > 0 -- verified
+    # directly, a single seed=42 draw at this file's 50,000-path scale
+    # reads exactly 0/50,000 below -50, since the true rate of ~1-in-125,000
+    # is below this scan's sensitivity). worst_loss is the one statistic
+    # that stays informative at this reduced scale: -26.6 here, cleanly
+    # separated from the pre-fix checkpoint's -417.5 (at 500,000 paths --
+    # not directly comparable in scale, but a regression toward that regime
+    # would still show up as a much larger loss than -26.6). One-sided on
+    # purpose: -12.8 is the clean checkpoints' bound at 500,000 paths, not a
+    # valid separator at this file's 50,000-path scale, so this test makes
+    # no claim about "genuinely clean." If this starts reading well below
+    # -60, the fix likely regressed -- re-check against the pre-fix
+    # checkpoint's -417.5, preserved at
+    # hedging_agent_gru.pt.bak-pre-recovery-lag-fix.
+    assert summary["worst_loss"] > -60.0

@@ -347,15 +347,19 @@ history, not current results). **Current numbers, at the paper's own
 | MLP | -0.037 | 2.38 | 3.69 | -2.08 | 6.9 | 4446.5 |
 | Basic RNN | -0.036 | 1.64 | 2.58 | -2.09 | 7.5 | 3863.7 |
 | LSTM | -0.042 | 2.17 | 3.49 | -2.19 | 8.5 | 6843.6 |
-| GRU | -0.041 | 2.42 | 5.35 | **-115.4** | **24,490** | 6023.3 |
+| GRU | -0.041 | 2.14 | 3.81 | **-24.3** | **3,078.3** | 6576.6 |
 
-**GRU's skew/kurtosis columns are not a typo.** Every other cell in this
-table looks like a normal fat-tailed P&L distribution (skew around -2,
-kurtosis 7-8.5). GRU's are three orders of magnitude off, and its mean
-wealth (-0.041) and CVaR₉₅ (2.42) both look completely ordinary — this is
-invisible in every statistic except the tail moments. This is a real,
-newly-discovered finding, not noise: see [Catastrophic tail risk, invisible
-below ~500,000 test paths](#catastrophic-tail-risk-invisible-below-500000-test-paths)
+**GRU's skew/kurtosis columns were three orders of magnitude off; they're
+now about one order of magnitude off.** This row was regenerated after
+`grad_clip_norm=1.0`'s full-scale fix attempt was promoted to the
+production checkpoint (skew was **-115.4**, kurtosis **24,490** before; see
+[the fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it)).
+Every other cell in this table looks like a normal fat-tailed P&L
+distribution (skew around -2, kurtosis 7-8.5); GRU's mean wealth (-0.041)
+and CVaR₉₅ (2.14) still look completely ordinary, and its skew/kurtosis,
+while much improved, are still measurably elevated — the fix is
+substantial, not complete. See [Catastrophic tail risk, invisible below
+~500,000 test paths](#catastrophic-tail-risk-invisible-below-500000-test-paths)
 below for the full investigation, scope across other checkpoints, and the
 control that rules out a test-set artifact.
 
@@ -456,10 +460,13 @@ should be treated as provisional until checked across multiple seeds.
 The stress test above uses the paper-matched 500,000-path test batch for
 the first time (previously 2,000, chunked to stay CPU-feasible — see
 `MarketEnvironment.simulate`'s `chunk_size` docstring). Rerunning at this
-scale surfaced something the smaller batch never could: GRU's skew (-115.4)
-and excess kurtosis (24,490) are three orders of magnitude out of line with
-every other architecture (skew ≈ -2.1, kurtosis 6.9-8.5), while its mean
-wealth and CVaR₉₅ look completely ordinary.
+scale surfaced something the smaller batch never could: GRU's skew (-115.4
+at the time) and excess kurtosis (24,490 at the time) were three orders of
+magnitude out of line with every other architecture (skew ≈ -2.1, kurtosis
+6.9-8.5), while its mean wealth and CVaR₉₅ looked completely ordinary. (GRU
+(WGAN-GP) was since diagnosed and partially fixed — see the table below and
+[the fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it)
+— but this paragraph is left describing the discovery as it happened.)
 
 **Not a fluke of this one checkpoint.** Scanning every trained checkpoint
 against the same seed-42, 500,000-path stress-test batch and counting
@@ -471,7 +478,7 @@ never printed side by side:
 | Checkpoint(s) | Paths < -50 | Paths < -10 | Worst loss | mean tx. cost |
 |---|---|---|---|---|
 | MLP, Basic RNN, LSTM (WGAN-GP) | 0 / 500,000 | 0-4 | ≤ -12.8 | normal |
-| **GRU (WGAN-GP)** | 34 / 500,000 (0.0068%) | 327 | **-417.5** | normal (0.0120) |
+| ~~**GRU (WGAN-GP)**~~ **GRU (WGAN-GP) — substantially improved, not fully fixed** | ~~34~~ **4** / 500,000 (~~0.0068%~~ 0.0008%) | ~~327~~ **97** | ~~-417.5~~ **-137.5** | normal (0.0132) |
 | α ∈ {0.5, 0.75, 0.9, 0.95, 0.995} (MLP) | 0 / 500,000 | 3-4 | ≤ -12.8 | normal |
 | ~~**α = 0.99 (MLP)**~~ **α = 0.99 (MLP) — fixed, see below** | 0 / 500,000 | ~~**5,452**~~ 0 | ~~-48.7~~ -9.7 | ~~normal, but ~half the rest (0.0044)~~ normal (0.0100) |
 | ~~**α = 0.997 (MLP)**~~ **α = 0.997 (MLP) — fixed, see below** | ~~814 / 500,000 (0.16%)~~ 0 / 500,000 | ~~5,257~~ 0 | ~~-6202.5~~ -9.7 | ~~0.0000~~ normal (0.0115) |
@@ -794,6 +801,14 @@ checkpoint and reordered the whole remaining list before any retraining:
 
 #### Follow-up diagnosis: GRU (WGAN-GP) is a GRU-specific hidden-state recovery lag, not saturation
 
+**This entire subsection describes the *pre-fix* checkpoint** (preserved as
+`checkpoints/hedging_agent_gru.pt.bak-pre-recovery-lag-fix` after the fix
+below was promoted) — `checkpoints/hedging_agent_gru.pt` itself now refers
+to the improved, `grad_clip_norm=1.0`-trained checkpoint. The diagnosis
+here is what motivated and explains the fix, so it's left in present tense
+throughout rather than rewritten past-tense; just don't expect to reproduce
+these exact numbers by loading the current `hedging_agent_gru.pt`.
+
 Rather than leave GRU (WGAN-GP)'s 34/500,000 catastrophic paths (worst loss
 -417.5) as an unexplained residual, its own worst-loss paths from the
 500,000-path scan (seed=42) were pulled out directly and inspected, then the
@@ -853,28 +868,28 @@ pattern found was tested with controlled synthetic probes:
   1.0, confirming the hidden state isn't permanently stuck: the paper's
   fixed 30-step horizon is simply too short for GRU's own recovery rate
   after this kind of shock.
-- ~~**No fix was attempted**~~ — **since attempted**: `grad_clip_norm=1.0`
-  substantially, though not completely, fixes this at full training scale.
+- ~~**No fix was attempted**~~ — **since attempted and promoted**:
+  `grad_clip_norm=1.0` substantially, though not completely, fixes this at
+  full training scale, and is now the production `hedging_agent_gru.pt`.
   See [Fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it)
-  below. The GRU (WGAN-GP) row in the checkpoint scan table above is
-  unchanged, since the fix has not been promoted to the production
-  checkpoint (see that subsection for why).
+  below. The GRU (WGAN-GP) row in the checkpoint scan table above and the
+  Stress-test table's GRU row reflect the promoted, improved checkpoint.
 
 #### Fix attempt: `grad_clip_norm` substantially improves GRU (WGAN-GP), does not fully close it
 
-The diagnosis above found the production checkpoint's recurrent weight norms
-were 2.3-3.5x larger than a 3,000-step checkpoint of the same run (e.g.
-`weight_ih_l1` 73.3 → 169.9), and that its layer-0 update gate settles into a
-persistently high value (~0.93-0.94) right after a downward shock — barely
-updating the hidden state each step. That read as circumstantial evidence
-for an unclipped-gradient weight-growth story similar to mechanism (a)'s,
-so `grad_clip_norm=1.0` was tried as a targeted fix, trained at the
-production checkpoint's exact full scale (25,000 steps, same seed, same
-generator, into a scratch checkpoint path — not overwriting
-`checkpoints/hedging_agent_gru.pt`).
+The diagnosis above found the (then-production, now pre-fix, superseded
+below) checkpoint's recurrent weight norms were 2.3-3.5x larger than a
+3,000-step checkpoint of the same run (e.g. `weight_ih_l1` 73.3 → 169.9),
+and that its layer-0 update gate settles into a persistently high value
+(~0.93-0.94) right after a downward shock — barely updating the hidden
+state each step. That read as circumstantial evidence for an
+unclipped-gradient weight-growth story similar to mechanism (a)'s, so
+`grad_clip_norm=1.0` was tried as a targeted fix, trained at the same full
+scale (25,000 steps, same seed, same generator) as the checkpoint it would
+go on to replace, initially into a scratch checkpoint path.
 
 **Reduced-scale (3,000-step) probes were tried first and found
-uninformative**: the down-then-rally defect that afflicts the production
+uninformative**: the down-then-rally defect that afflicted the pre-fix
 checkpoint does not reproduce at all at 3,000 steps regardless of
 `grad_clip_norm`/`orthogonal_init` (the baseline probe recovers immediately
 even at a -0.71 dip), unlike Basic RNN (TimeGAN)'s saturation, which *did*
@@ -885,7 +900,7 @@ here needs the full 25,000-step schedule to say anything meaningful.
 
 **The fix works, but not for the reason that motivated trying it.** Final
 recurrent weight norms after clipping are barely different from the
-unclipped production checkpoint's (`weight_ih_l0` 50.6 → 46.9,
+unclipped pre-fix checkpoint's (`weight_ih_l0` 50.6 → 46.9,
 `weight_hh_l0` 117.5 → 114.9, `weight_ih_l1` 169.9 → 164.7, `weight_hh_l1`
 111.9 → 113.1 — one *larger*, not smaller). The weight-growth hypothesis
 that motivated this experiment is not what changed; clipping altered the
@@ -900,8 +915,8 @@ document:**
 
 | | Worst loss | Paths < -50 | Paths < -10 | std(wealth) | CVaR₉₅ | CVaR₉₉ |
 |---|---|---|---|---|---|---|
-| Production (unclipped) | -417.5 | 34 (0.0068%) | 327 (0.065%) | 1.427 | 2.418 | 5.353 |
-| `grad_clip_norm=1.0` (full scale) | **-137.5** | **4** (0.0008%) | **97** (0.019%) | **0.773** | **2.139** | **3.814** |
+| Pre-fix (unclipped) | -417.5 | 34 (0.0068%) | 327 (0.065%) | 1.427 | 2.418 | 5.353 |
+| `grad_clip_norm=1.0` — **now production** | **-137.5** | **4** (0.0008%) | **97** (0.019%) | **0.773** | **2.139** | **3.814** |
 
 Every metric improves substantially (worst loss down 67%, catastrophic path
 count down 88%, CVaR₉₉ down 29%), and the down-depth sweep diagnostic
@@ -926,19 +941,32 @@ dip, yet still ends with a low final delta (0.02) and a real loss (-33.9) —
 a reminder that clipping's partial fix doesn't fully explain every
 remaining tail loss, and this residual case wasn't investigated further.
 
-**Not promoted to the production checkpoint.** The improved checkpoint is
-strictly better on every metric measured here, but `checkpoints/` is
-gitignored and every number in this document's Stress-test and
-checkpoint-scan tables was produced against the *current*
-`hedging_agent_gru.pt` — swapping it would silently invalidate those rows
-without regenerating them, the exact failure mode the accidental-overwrite
-incident earlier in this project already caused once (see
-[Mechanism (a)](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients)'s
-writeup). `tests/test_tail_risk.py`'s `_KNOWN_BAD_CHECKPOINTS`
-entry for GRU is unaffected by this and needs no change, since it asserts
-against the current, unpromoted, still-catastrophic checkpoint. Promotion
-is a separate decision, not bundled into this diagnosis-and-fix-attempt
-commit.
+**Promoted to the production checkpoint, tables regenerated, not
+hand-edited.** The improved checkpoint is strictly better on every metric
+measured here, so it was promoted: the pre-fix checkpoint was preserved as
+`checkpoints/hedging_agent_gru.pt.bak-pre-recovery-lag-fix` (same convention
+as the mechanism (a) fix's `.bak-pre-gradclip-fix` files) before the
+clipped checkpoint replaced `checkpoints/hedging_agent_gru.pt`. Every
+affected number in this document (the Stress-test table above, the
+checkpoint-scan table above) was then regenerated by actually running
+`python src/backtester/evaluate.py` and the tail-risk scan again, not
+hand-edited to the numbers already measured during the fix attempt itself —
+those two sources agree (CVaR₉₅/₉₉ match to 3 decimal places), which is
+itself a useful cross-check that nothing was copied wrong.
+
+**This promoted checkpoint is not "clean."** It's a genuine, substantial
+improvement, not a full fix — 4/500,000 catastrophic paths remain (down
+from 34), and the residual-failures analysis above found most of them share
+the same, now-shorter-but-not-eliminated recovery lag. `checkpoints/` is
+gitignored, so nothing about this promotion is visible in `git diff` beyond
+this document and the test file below — anyone re-running
+`train_policy.py --architecture gru` from scratch without `--grad-clip-norm
+1.0` would reproduce the *old*, more catastrophic checkpoint, not this one.
+`tests/test_tail_risk.py`'s `_KNOWN_BAD_CHECKPOINTS` entry for GRU no
+longer fits (below_-50_count is now 0 at the test suite's 50,000-path scale
+— see why in the test file itself) and has been replaced with a dedicated
+test at a scale large enough to still catch a regression, rather than being
+moved to the known-good list, since 4/500,000 is not actually clean.
 - **LSTM/GRU (TimeGAN): confirmed *not* saturated** (span 0.99-1.0, moderate
   logits) — this is the expected signature for mechanism (b) (generalizing
   badly to price extremes the training distribution never produced, not an
@@ -1474,17 +1502,21 @@ Roughly in priority order:
      augmentation for TimeGAN-driven training).
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
-     saturation): every one of its worst-loss paths is a rare early
-     downturn (below roughly the 1st percentile of its own training
-     generator's output) followed by a large rally, and the checkpoint's
-     hedge ratio takes far longer than the paper's 30-step horizon to
-     climb back up, missing most of the rally's P&L before it catches up.
-     Confirmed architecture-specific, not a property of the shock itself:
-     `LSTM` (WGAN-GP) — same generator, same shock, confirmed clean at
-     0/500,000 catastrophic paths — recovers within a single step where
-     GRU does not. See [the full
-     diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation).
-     No fix attempted; still open.
+     saturation) and since ~~no fix attempted~~ **substantially, though not
+     completely, fixed and promoted**: every one of the pre-fix checkpoint's
+     worst-loss paths was a rare early downturn (below roughly the 1st
+     percentile of its own training generator's output) followed by a large
+     rally, with the hedge ratio taking far longer than the paper's 30-step
+     horizon to climb back up, missing most of the rally's P&L before
+     catching up. Confirmed architecture-specific, not a property of the
+     shock itself: `LSTM` (WGAN-GP) — same generator, same shock, confirmed
+     clean at 0/500,000 catastrophic paths — recovers within a single step
+     where GRU did not. `grad_clip_norm=1.0`, trained at full scale, cut the
+     catastrophic-path rate from 34/500,000 to 4/500,000 (worst loss -417.5
+     → -137.5) and is now the production checkpoint — genuinely improved,
+     not genuinely clean. See [the full
+     diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation)
+     and [the fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it).
 6. **~~Scale~~ — resolved.** Training and evaluation now run at the
    paper's own scale throughout: Part I's 500,000 train/test scenarios and
    25,000 gradient steps (item 2 above), TimeGAN's Table 2 batch size (178)
@@ -1627,9 +1659,14 @@ Roughly in priority order:
     only reaches this depth at its ~1st percentile — see the diagnosis for
     the measured figure), or investigating why clipping changes the training
     trajectory enough to fix most of the failure despite not changing final
-    weight magnitudes. The fix has not been promoted to the production
-    checkpoint (see the fix-attempt writeup for why); that's a separate,
-    still-open decision.
+    weight magnitudes. ~~The fix has not been promoted~~ — **promoted**:
+    `checkpoints/hedging_agent_gru.pt` is now the `grad_clip_norm=1.0`
+    checkpoint (pre-fix version preserved as
+    `hedging_agent_gru.pt.bak-pre-recovery-lag-fix`); every affected table
+    in this document was regenerated, not hand-edited, and
+    `tests/test_tail_risk.py` was updated to match (see the fix-attempt
+    writeup's promotion paragraph). Still not fully clean — 4/500,000
+    catastrophic paths remain — so closing the residual gap stays open.
   - For TimeGAN-driven RNN/LSTM/GRU's generalization failure: training-time
     exposure to more extreme price excursions — either by widening the
     regime-switching stress scenario into the training distribution
