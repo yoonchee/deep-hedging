@@ -252,7 +252,6 @@ def test_grad_clip_norm_actually_clips_the_applied_gradient() -> None:
             grad_clip_norm=grad_clip_norm,
         )
 
-    torch.manual_seed(0)
     unclipped = make_trainer(grad_clip_norm=None)
     stats_unclipped = unclipped.train_step(batch_size=16, seq_len=12)
     assert stats_unclipped["grad_norm"] > clip_target, (
@@ -260,7 +259,6 @@ def test_grad_clip_norm_actually_clips_the_applied_gradient() -> None:
         "actually exercise clipping -- if this fails, raise clip_target"
     )
 
-    torch.manual_seed(0)
     clipped = make_trainer(grad_clip_norm=clip_target)
     clipped.train_step(batch_size=16, seq_len=12)
     applied_grad_norm = torch.sqrt(

@@ -50,6 +50,9 @@ from policy.hedging_agent import HedgingAgent, RecurrentHedgingAgent  # noqa: E4
 from policy.train_policy import PolicyTrainer  # noqa: E402
 
 # Maps train_policy.py's --architecture choice to a display name.
+# Doubles as the architecture enumeration `_load_all_policies` iterates to
+# build its checkpoint_paths dict -- adding a key here also changes which
+# checkpoints get loaded, not just how they're displayed.
 ARCHITECTURE_DISPLAY_NAMES: Dict[str, str] = {
     "mlp": "MLP",
     "rnn": "Basic RNN",
@@ -384,8 +387,11 @@ def run_alpha_sweep_backtest(
     include_premium: Annotated[
         bool, "include P0 (Monte Carlo E[Payoff(S_T)] under this process) in wealth -- see math_spec.md section 1.1"
     ] = True,
+    suffix: Annotated[
+        str, "'_timegan' for TimeGAN-trained alpha-sweep checkpoints, '' (default) for WGAN-GP"
+    ] = "",
 ) -> Annotated[Dict, "per-alpha summary, also written to <output_dir>/alpha_sweep_<architecture>_summary.json"]:
-    policies = load_alpha_sweep_checkpoints(architecture, alphas, Path(checkpoint_dir))
+    policies = load_alpha_sweep_checkpoints(architecture, alphas, Path(checkpoint_dir), suffix=suffix)
     if not policies:
         raise FileNotFoundError(
             f"No alpha-sweep checkpoints found for architecture={architecture!r} in {checkpoint_dir}. "
