@@ -645,13 +645,29 @@ needed once this was the actual fix), 3,000 steps, two seeds:
 logged checkpoints (2 seeds × 2 clip values × ~22-30 windows each), versus
 7-10 collapses per 30 windows unclipped at each seed. Both clipped runs
 ended with delta span 0.92-0.97 and steadily positive, growing mean
-wealth, instead of oscillating.
+wealth, instead of oscillating. This generalization check (clipping
+prevents collapse, not just "this one seed's final checkpoint happened to
+land clean") rests on 2 seeds × 3,000 steps — narrower than this
+document's own standard elsewhere for architecture-level claims (the
+Basic RNN seed-sensitivity investigation used 8 seeds); treat "clipping
+reliably prevents this collapse" as well-supported but not exhaustively
+checked.
 
 **Production retrain, paper scale**: `hedging_agent_mlp_alpha0_997.pt`
 retrained with `--grad-clip-norm 1.0`, otherwise identical settings
 (batch=1,000, 25,000 steps, seed=0) to every other checkpoint in this
-document. Verified against the same seed-42, 500,000-path stress test used
-for the checkpoint scan above:
+document. Unlike the reduced-budget probes above, the production CLI run
+doesn't log delta span directly — but the collapsed state's signature
+(`cvar_loss` flat in the 0.20-0.23 dead-zone band, `mean_wealth` pinned
+within 0.002 of zero) is visible in `cvar_loss`/`mean_wealth` alone, and
+neither appears anywhere in this run's 252 logged points across all 25,000
+steps (minimum logged `mean_wealth` was -0.0196, at epoch 1 before
+training ramps up; every later point is positive and none sit near zero).
+So this is a direct, checked claim about the actual production run, not
+an inference from the shorter probes: **this specific training run never
+entered the collapsed state at all**, rather than entering and reliably
+escaping it. Verified against the same seed-42, 500,000-path stress test
+used for the checkpoint scan above:
 
 | | Before (unclipped) | After (`grad_clip_norm=1.0`) |
 |---|---|---|
