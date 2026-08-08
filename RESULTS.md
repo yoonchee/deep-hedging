@@ -853,12 +853,92 @@ pattern found was tested with controlled synthetic probes:
   1.0, confirming the hidden state isn't permanently stuck: the paper's
   fixed 30-step horizon is simply too short for GRU's own recovery rate
   after this kind of shock.
-- **No fix was attempted** — this was a diagnosis pass, not a fix pass, and
-  neither `grad_clip_norm` (mechanism (a)'s fix) nor `orthogonal_init` (Basic
-  RNN (TimeGAN)'s attempted, unsuccessful fix) has an obvious mechanism to
-  address a gating-dynamics recovery-rate problem, unlike either previous
-  case. The GRU (WGAN-GP) row in the checkpoint scan table above is
-  unchanged; still open.
+- ~~**No fix was attempted**~~ — **since attempted**: `grad_clip_norm=1.0`
+  substantially, though not completely, fixes this at full training scale.
+  See [Fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it)
+  below. The GRU (WGAN-GP) row in the checkpoint scan table above is
+  unchanged, since the fix has not been promoted to the production
+  checkpoint (see that subsection for why).
+
+#### Fix attempt: `grad_clip_norm` substantially improves GRU (WGAN-GP), does not fully close it
+
+The diagnosis above found the production checkpoint's recurrent weight norms
+were 2.3-3.5x larger than a 3,000-step checkpoint of the same run (e.g.
+`weight_ih_l1` 73.3 → 169.9), and that its layer-0 update gate settles into a
+persistently high value (~0.93-0.94) right after a downward shock — barely
+updating the hidden state each step. That read as circumstantial evidence
+for an unclipped-gradient weight-growth story similar to mechanism (a)'s,
+so `grad_clip_norm=1.0` was tried as a targeted fix, trained at the
+production checkpoint's exact full scale (25,000 steps, same seed, same
+generator, into a scratch checkpoint path — not overwriting
+`checkpoints/hedging_agent_gru.pt`).
+
+**Reduced-scale (3,000-step) probes were tried first and found
+uninformative**: the down-then-rally defect that afflicts the production
+checkpoint does not reproduce at all at 3,000 steps regardless of
+`grad_clip_norm`/`orthogonal_init` (the baseline probe recovers immediately
+even at a -0.71 dip), unlike Basic RNN (TimeGAN)'s saturation, which *did*
+reproduce at reduced scale. That result is recorded here as a methodology
+finding, not swept aside: the reduced-scale probe recipe that worked for one
+mechanism does not transfer to this one, and any future diagnosis attempt
+here needs the full 25,000-step schedule to say anything meaningful.
+
+**The fix works, but not for the reason that motivated trying it.** Final
+recurrent weight norms after clipping are barely different from the
+unclipped production checkpoint's (`weight_ih_l0` 50.6 → 46.9,
+`weight_hh_l0` 117.5 → 114.9, `weight_ih_l1` 169.9 → 164.7, `weight_hh_l1`
+111.9 → 113.1 — one *larger*, not smaller). The weight-growth hypothesis
+that motivated this experiment is not what changed; clipping altered the
+training *trajectory* and landed on a qualitatively different solution with
+essentially the same final weight magnitudes, not a smaller-norm one. This
+is recorded as a falsified hypothesis, not a confirmed one -- consistent
+with this document's recurring pattern of a plausible-sounding mechanism
+turning out not to be the operative one on direct measurement.
+
+**Results, same seed=42 500,000-path scenario used throughout this
+document:**
+
+| | Worst loss | Paths < -50 | Paths < -10 | std(wealth) | CVaR₉₅ | CVaR₉₉ |
+|---|---|---|---|---|---|---|
+| Production (unclipped) | -417.5 | 34 (0.0068%) | 327 (0.065%) | 1.427 | 2.418 | 5.353 |
+| `grad_clip_norm=1.0` (full scale) | **-137.5** | **4** (0.0008%) | **97** (0.019%) | **0.773** | **2.139** | **3.814** |
+
+Every metric improves substantially (worst loss down 67%, catastrophic path
+count down 88%, CVaR₉₉ down 29%), and the down-depth sweep diagnostic
+confirms why: at every dip depth up to -0.71 (the actual worst path's
+depth), the clipped checkpoint's delta stays at or above 0.69 throughout —
+no collapse at all, where the unclipped checkpoint fell to 0.0001-0.04. Only
+at dips of -1.0 or deeper does the clipped checkpoint still show a *brief*
+full collapse (delta hits exactly 0.0), but it now recovers within 1-2
+steps instead of never recovering within the 30-step horizon.
+
+**The residual failures are (mostly) the same mechanism, at reduced
+severity, not a new one.** The 10 worst paths under the clipped checkpoint
+were pulled out directly: 9 of 10 show the familiar down-then-rally shape
+(early dip to log-moneyness -0.49 to -2.08) and a `min_delta_after_dip`
+of exactly 0.0 — the brief collapse the down-depth sweep predicted for deep
+dips — even though most of these paths' delta *does* recover close to 1.0
+by the end (final delta 0.68-1.00 in 8 of 10 cases). This is the same
+lag-during-the-largest-price-increments story as the unclipped checkpoint,
+just shorter and less severe. One of the 10 (idx 59141) does not fit this
+pattern at all — log-moneyness rises monotonically from 0 with no preceding
+dip, yet still ends with a low final delta (0.02) and a real loss (-33.9) —
+a reminder that clipping's partial fix doesn't fully explain every
+remaining tail loss, and this residual case wasn't investigated further.
+
+**Not promoted to the production checkpoint.** The improved checkpoint is
+strictly better on every metric measured here, but `checkpoints/` is
+gitignored and every number in this document's Stress-test and
+checkpoint-scan tables was produced against the *current*
+`hedging_agent_gru.pt` — swapping it would silently invalidate those rows
+without regenerating them, the exact failure mode the accidental-overwrite
+incident earlier in this project already caused once (see
+[Mechanism (a)](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients)'s
+writeup). `tests/test_tail_risk.py`'s `_KNOWN_BAD_CHECKPOINTS`
+entry for GRU is unaffected by this and needs no change, since it asserts
+against the current, unpromoted, still-catastrophic checkpoint. Promotion
+is a separate decision, not bundled into this diagnosis-and-fix-attempt
+commit.
 - **LSTM/GRU (TimeGAN): confirmed *not* saturated** (span 0.99-1.0, moderate
   logits) — this is the expected signature for mechanism (b) (generalizing
   badly to price extremes the training distribution never produced, not an
@@ -1528,17 +1608,28 @@ Roughly in priority order:
     at 500,000 paths. GRU (WGAN-GP) confirmed **not** the same mechanism
     (healthy delta span on the same diagnostic) — see
     [Extending the fix](#extending-the-fix-alpha099-confirmed-same-mechanism-gruwgan-gp-and-basic-rnntimegan-confirmed-different-ones).
-    **GRU (WGAN-GP) is now characterized, not just ruled out**: a
+    **GRU (WGAN-GP) is now characterized and partially fixed**: a
     GRU-specific hidden-state recovery lag after a rare (~1st-percentile)
     downward shock, confirmed not shared by LSTM under an identical shock —
     see the [full diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation).
-    Still open (no fix attempted); candidates not yet tried: a lower peak
-    learning rate or LR warmup for the recurrent weights (the same
-    growth-during-training hypothesis floated for Basic RNN (TimeGAN)
-    below), or training against price paths that include this kind of rare
-    down-then-rally excursion (the WGAN-GP generator's own output only
-    reaches this depth at its ~1st percentile — see the diagnosis for the
-    measured figure).
+    ~~Candidates not yet tried: a lower peak learning rate or LR warmup for
+    the recurrent weights (motivated by a weight-growth hypothesis)~~ —
+    **`grad_clip_norm=1.0` tried at full scale, substantially improves but
+    does not fully close it** (worst loss -417.5 → -137.5, catastrophic
+    paths 34 → 4 at 500,000 paths) — see the
+    [fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it).
+    The weight-growth hypothesis that motivated trying it turned out to be
+    falsified (clipped and unclipped final weight norms are nearly
+    identical), which also weakens the case for the LR-warmup variant, since
+    both were motivated by the same now-falsified growth story. Not yet
+    tried: training against price paths that include this kind of rare
+    down-then-rally excursion directly (the WGAN-GP generator's own output
+    only reaches this depth at its ~1st percentile — see the diagnosis for
+    the measured figure), or investigating why clipping changes the training
+    trajectory enough to fix most of the failure despite not changing final
+    weight magnitudes. The fix has not been promoted to the production
+    checkpoint (see the fix-attempt writeup for why); that's a separate,
+    still-open decision.
   - For TimeGAN-driven RNN/LSTM/GRU's generalization failure: training-time
     exposure to more extreme price excursions — either by widening the
     regime-switching stress scenario into the training distribution
