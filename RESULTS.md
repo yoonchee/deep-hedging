@@ -473,7 +473,7 @@ never printed side by side:
 | MLP, Basic RNN, LSTM (WGAN-GP) | 0 / 500,000 | 0-4 | ≤ -12.8 | normal |
 | **GRU (WGAN-GP)** | 34 / 500,000 (0.0068%) | 327 | **-417.5** | normal (0.0120) |
 | α ∈ {0.5, 0.75, 0.9, 0.95, 0.995} (MLP) | 0 / 500,000 | 3-4 | ≤ -12.8 | normal |
-| **α = 0.99 (MLP)** | 0 / 500,000 | **5,452** | -48.7 | normal, but ~half the rest (0.0044) |
+| ~~**α = 0.99 (MLP)**~~ **α = 0.99 (MLP) — fixed, see below** | 0 / 500,000 | ~~**5,452**~~ 0 | ~~-48.7~~ -9.7 | ~~normal, but ~half the rest (0.0044)~~ normal (0.0100) |
 | ~~**α = 0.997 (MLP)**~~ **α = 0.997 (MLP) — fixed, see below** | ~~814 / 500,000 (0.16%)~~ 0 / 500,000 | ~~5,257~~ 0 | ~~-6202.5~~ -9.7 | ~~0.0000~~ normal (0.0115) |
 | MLP (TimeGAN) | 0 / 500,000 | 0 | ≤ -8.8 | normal |
 | **Basic RNN (TimeGAN)** | 238 / 500,000 (0.048%) | 1,849 | -2564.7 | normal (0.0018) |
@@ -702,15 +702,17 @@ verified against this document's own main stress-test table
 matched to the last reported digit) before treating the recovery as
 complete.
 
-**Scope: this fixes mechanism (a) only, for the one checkpoint it was
-confirmed on.** GRU (WGAN-GP)'s milder tail issue and α=0.99's
-thickened-tail warning sign (see the checkpoint scan table above) were
-*not* retrained with clipping — both are plausible candidates for the same
-underlying saturation mechanism, since neither has been ruled out, but
-neither has been checked either, so no claim is made about them here.
-Mechanism (b) (TimeGAN-trained recurrent policies generalizing badly to
-price extremes) is a wholly separate failure mode, untouched by this fix —
-see [Known limitations](#known-limitations) item 5 and [Ideas for future
+**Scope at the time this fix first landed: confirmed on one checkpoint
+only.** GRU (WGAN-GP)'s milder tail issue and α=0.99's thickened-tail
+warning sign (see the checkpoint scan table above) were initially left
+untouched, since neither had been checked. Both were subsequently checked
+directly (not guessed) — see [Extending the
+fix](#extending-the-fix-alpha099-confirmed-same-mechanism-gruwgan-gp-and-basic-rnntimegan-confirmed-different-ones)
+in the multi-alpha sweep section below for the full results: α=0.99 turned
+out to be the same mechanism (now also fixed), GRU (WGAN-GP) confirmed
+*not* to be. Mechanism (b) (TimeGAN-trained recurrent policies generalizing
+badly to price extremes) remains a wholly separate failure mode, untouched
+by this fix — see [Known limitations](#known-limitations) item 5 and [Ideas for future
 work](#ideas-for-future-work).
 
 ### Multi-alpha risk-return sweep, extended to the paper's own Part II grid
@@ -726,8 +728,11 @@ rerunning the sweep backtest under the same, now paper-matched,
 
 Includes P₀ (see [above](#terminal-wealth-and-the-p₀-premium-term)):
 
-**Regenerated after the α=0.997 fix** ([above](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients));
-α=0.5-0.995 are unchanged checkpoints, re-evaluated on the same seed-42 batch and matching the previous table to the last reported digit — included here as confirmation that fixing α=0.997 had no side effects on the others, not as new results:
+**Regenerated after both the α=0.997 and α=0.99 fixes** (below); α=0.5-0.995
+excluding 0.99 are unchanged checkpoints, re-evaluated on the same seed-42
+batch and matching the previous table to the last reported digit — included
+here as confirmation the fixes had no side effects on the others, not as new
+results:
 
 | α | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
 |---|---|---|---|---|---|
@@ -735,32 +740,92 @@ Includes P₀ (see [above](#terminal-wealth-and-the-p₀-premium-term)):
 | 0.75 | -0.039 | 2.25 | 3.50 | -2.21 | 7.7 |
 | 0.90 | -0.038 | 2.25 | 3.50 | -2.17 | 7.4 |
 | 0.95 | -0.037 | 2.38 | 3.69 | -2.08 | 6.9 |
-| 0.99 | -0.031 | 7.99 | 14.33 | -5.00 | 35.7 |
+| ~~0.99~~ **0.99 (fixed)** | ~~-0.031~~ -0.038 | ~~7.99~~ 2.25 | ~~14.33~~ 3.50 | ~~-5.00~~ -2.13 | ~~35.7~~ 7.2 |
 | 0.995 | -0.038 | 2.28 | 3.54 | -2.13 | 7.2 |
 | ~~0.997~~ **0.997 (fixed)** | ~~-0.031~~ -0.039 | ~~**11.76**~~ 2.22 | ~~**43.15**~~ 3.46 | ~~**-248.9**~~ -2.21 | ~~**80,781**~~ 7.7 |
 
-α=0.997 now sits comfortably inside the same range as every α ≤ 0.995 —
-the fix above didn't just reduce the damage, it made this row
-indistinguishable from a normal, well-behaved checkpoint. **α=0.99 is the
-one remaining warning sign in this table**, and it was deliberately *not*
-retrained with clipping as part of that fix (see that section's scope
-note) — CVaR₉₉ (14.33) and kurtosis (35.7) are still clearly elevated
-relative to every other row, including both its neighbors (α=0.995 at 3.54
-un-flagged, and α=0.997 now also clean). Whether α=0.99's thickened tail
-is the same sigmoid-saturation mechanism at a milder, non-fully-collapsed
-stage, or something else, hasn't been checked — it's a natural next
-candidate given the fix now available, but no claim is made about it here.
-Each checkpoint in this table is still a single training run at a single
-seed, and this project has already found (three times, in the RNN/LSTM
-investigation above) that single-seed training outcomes in this codebase
-are noisy enough on their own to matter — so α=0.99's isolation from its
-neighbors shouldn't yet be read as a clean, deterministic threshold effect
-either. Nor was this tested against the paper's own numbers at these α
-levels (the paper's Part II uses TimeGAN and Basic RNN specifically, not
-this repo's WGAN-GP+MLP combination), so no match/mismatch verdict is
-claimed either — only that the sweep now covers
-the risk-aversion range the paper cares about, at the paper's own test
-scale, instead of stopping short of it.
+**Every α in this table is now clean** — the entire risk-aversion sweep
+lands in the same tight range regardless of α, with no outliers. α=0.99
+turned out to be the same mechanism as α=0.997 (confirmed, not assumed —
+see [below](#extending-the-fix-alpha099-confirmed-same-mechanism-gruwgan-gp-and-basic-rnntimegan-confirmed-different-ones)),
+just less severe (a raw pre-sigmoid logit range of roughly [-718, -43]
+depending on time step, vs. α=0.997's ≈-250 — deeper saturation than
+α=0.997 had, somewhat surprisingly, despite the milder stress-test damage).
+Retrained the same way (`grad_clip_norm=1.0`, same paper-scale batch=1,000,
+25,000 steps) and verified at the full 500,000-path scale: 0 catastrophic
+paths (was 5,452 below -10), worst loss -9.7 (was -48.7). Each checkpoint
+in this table is still a single training run at a single seed — this
+project has already found (three times, in the RNN/LSTM investigation
+above) that single-seed training outcomes here are noisy enough to matter,
+so "every α is clean" describes this specific seed, not a proven general
+property of `grad_clip_norm=1.0` at every α. Nor was this tested against
+the paper's own numbers at these α levels (the paper's Part II uses
+TimeGAN and Basic RNN specifically, not this repo's WGAN-GP+MLP
+combination), so no match/mismatch verdict is claimed either — only that
+the sweep now covers the risk-aversion range the paper cares about, at the
+paper's own test scale, instead of stopping short of it.
+
+### Extending the fix: α=0.99 confirmed same mechanism, GRU(WGAN-GP) and Basic RNN(TimeGAN) confirmed *different* ones
+
+Rather than guessing which of the other flagged checkpoints (GRU (WGAN-GP),
+α=0.99, and the three TimeGAN recurrent checkpoints) shared α=0.997's
+sigmoid-saturation mechanism, each was checked directly with the same
+training-free diagnostic that found and fixed it: load the checkpoint,
+sweep a spot grid across several time steps, and read off the raw
+pre-activation logit (for `HedgingAgent`) or hidden state (for
+`RecurrentHedgingAgent`) alongside delta span. This took seconds per
+checkpoint and reordered the whole remaining list before any retraining:
+
+- **α=0.99 (MLP): confirmed saturated**, even more severely than α=0.997 —
+  logits as extreme as [-718, -684] at t=0, span exactly 0.0000 at every
+  timestep checked. Retrained with the same fix; verified clean above.
+- **GRU (WGAN-GP): confirmed *not* saturated.** Delta span 1.0000 at every
+  timestep checked, logits in a moderate range ([-16, 21]) — indistinguishable
+  from the healthy calibration checkpoints. Its catastrophic tail (34/500,000
+  paths, worst loss -417.5) is a genuine, still-uncharacterized mechanism,
+  not this one. A `grad_clip_norm` retrain was *not* attempted here, since
+  the diagnostic gives no reason to expect it would help — this remains
+  open, and the GRU (WGAN-GP) row in the checkpoint scan table above is
+  unchanged.
+- **LSTM/GRU (TimeGAN): confirmed *not* saturated** (span 0.99-1.0, moderate
+  logits) — this is the expected signature for mechanism (b) (generalizing
+  badly to price extremes the training distribution never produced, not an
+  output-layer pathology), consistent with these checkpoints' documented
+  *normal* transaction costs. No fix attempted; still open, still a
+  training-distribution problem, not a `grad_clip_norm` problem.
+- **Basic RNN (TimeGAN): confirmed saturated, but through a third, distinct
+  mechanism** — not `HedgingAgent`'s sigmoid output, but
+  `RecurrentHedgingAgent`'s recurrent *hidden state*. Its raw logit was
+  *exactly* constant (`0.349268`, to the same six decimal places) across
+  every spot price tested, even sweeping the input across an absurdly wide
+  range (moneyness 0.02-50). Direct inspection found why: the vanilla RNN's
+  hidden state was pinned at `tanh`'s boundary, exactly ±1.0, regardless of
+  input — a well-known vanilla-RNN pathology (the same reason LSTM/GRU exist),
+  distinct from mechanism (a)'s single-step sigmoid saturation.
+  `grad_clip_norm=1.0` was tested at reduced scale (3,000 steps, matching
+  the methodology that validated mechanism (a)'s fix) and made **no
+  difference** — hidden state still pinned at ±1.0, delta span still ≈0
+  throughout. `RecurrentHedgingAgent`'s own `orthogonal_init` parameter
+  (whose docstring names this exact failure mode — "can otherwise leave the
+  network stuck at an input-insensitive constant output no matter how long
+  it trains" — but was, like `grad_clip_norm`, never wired to
+  `train_policy.py`'s CLI) was also tested, alone and combined with
+  clipping: **also no improvement** in either case. Unlike mechanism (a),
+  where a single fix cleanly resolved a confirmed cause, this is a
+  confirmed cause (recurrent hidden-state saturation) with two plausible,
+  purpose-built fixes both empirically ruled out — genuinely open, not
+  merely unattempted. `Basic RNN (TimeGAN)` stays in the known-bad list.
+- **A production-scale retrain of Basic RNN (TimeGAN) was started and
+  killed after 50 minutes at only 14,000/25,000 steps** — far slower than
+  the ~27 minutes MLP retrains take at the same step count, apparently
+  because `use_bs_baseline` (used for every Basic RNN checkpoint in this
+  project) computes a second forward pass through the closed-form
+  Black-Scholes policy every step, compounding with the recurrent
+  architecture's own higher per-step cost. Killed cleanly before any
+  partial checkpoint was written (`torch.save` only happens at the very
+  end), so nothing was lost, but this is a real operational constraint
+  worth recording: this specific checkpoint doesn't fit into an
+  hour-scale compute budget the way MLP retrains do.
 
 **A process note on training these 7 checkpoints (plus the 8 architecture
 checkpoints above) at `batch_size=1000, 25,000 steps`**: the first attempt
@@ -1187,7 +1252,23 @@ Roughly in priority order:
    baseline (`PolicyTrainer`'s `use_bs_baseline`, math_spec.md section 6)
    substantially reduces this variance (cross-seed CVaR₉₉ std 6.89 → 1.20)
    and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
-   a real improvement, though still short of LSTM/GRU's ~5.0.
+   a real improvement, though still short of LSTM/GRU's ~5.0. **Closing
+   this gap further was explicitly considered and deferred, not forgotten**:
+   the same 8-seed-sweep methodology that resolved the seed-sensitivity
+   question would be needed to properly test combining `use_bs_baseline`
+   with `orthogonal_init` or a lower recurrent learning rate, but at this
+   project's observed per-step costs for `RecurrentHedgingAgent` +
+   `use_bs_baseline` (a single 25,000-step run took over 50 minutes for
+   only 14,000 steps before being stopped — see the TimeGAN saturation
+   investigation below), an 8-seed sweep at paper scale would take many
+   hours, well beyond a single session's compute budget. A reduced 2-4
+   seed version was considered and rejected: mechanism (a)'s batch-size
+   experiment worked at 2 seeds because the effect was a stark binary
+   (collapse / no collapse); a further variance *reduction* on top of
+   `use_bs_baseline` is a smaller, noisier effect that 2-4 seeds likely
+   can't distinguish from chance, matching this document's own repeated
+   finding that single-seed (and likely few-seed) conclusions here are
+   unreliable. Left for whenever a multi-hour budget is available.
 5. **Catastrophic tail risk in several trained policies — newly discovered
    at paper scale; mechanism (a) root-caused and fixed, mechanism (b) still
    open.** Rerunning the stress test at the paper's own 500,000-path scale
@@ -1213,13 +1294,30 @@ Roughly in priority order:
      --grad-clip-norm`, at the paper's unmodified batch=1,000. Verified at
      the full 500,000-path scale: 0 catastrophic paths (was 814), worst
      loss -9.7 (was -6202.5), CVaR₉₅/₉₉ 2.22/3.46 — fully in line with
-     every other clean checkpoint. GRU (WGAN-GP)'s milder tail issue and
-     α=0.99's thickened-tail warning sign were *not* retrained with
-     clipping and remain open, plausible candidates for the same
-     mechanism.
+     every other clean checkpoint. **Extended, not just left open**: every
+     remaining candidate was checked directly with the same diagnostic
+     (raw pre-activation logit / hidden state across a spot grid, no
+     training needed) rather than guessed at — see [Extending the
+     fix](#extending-the-fix-alpha099-confirmed-same-mechanism-gruwgan-gp-and-basic-rnntimegan-confirmed-different-ones).
+     α=0.99 turned out to be the same mechanism (even more severely
+     saturated than α=0.997) and is now also fixed, verified clean at
+     500,000 paths. GRU (WGAN-GP) and LSTM/GRU (TimeGAN) are confirmed
+     **not** saturated (healthy delta span, moderate logits) — their
+     failures are genuinely different mechanisms, not this one guessed
+     wrong. Basic RNN (TimeGAN) *is* saturated, but through a third,
+     distinct mechanism (the vanilla RNN's recurrent hidden state pinned
+     at tanh's ±1.0 bound, not the sigmoid output layer) — confirmed via
+     direct inspection, and confirmed **not fixed** by `grad_clip_norm`,
+     `RecurrentHedgingAgent`'s own (also never-wired-up) `orthogonal_init`,
+     or both together, all tested at reduced scale. Genuinely open, not
+     merely unattempted.
    - **(b) TimeGAN-trained recurrent policies (not MLP) generalize badly
      to price extremes** outside their training distribution, hedging
-     *badly* rather than *not at all* — still open, see [Ideas for future
+     *badly* rather than *not at all* — still open for LSTM/GRU (TimeGAN),
+     confirmed via the same diagnostic to be a distinct failure from both
+     (a) and Basic RNN (TimeGAN)'s hidden-state saturation above (healthy
+     delta span, moderate logits — consistent with their documented
+     *normal* transaction costs). See [Ideas for future
      work](#ideas-for-future-work) (adversarial/extreme-scenario
      augmentation for TimeGAN-driven training).
 6. **~~Scale~~ — resolved.** Training and evaluation now run at the
@@ -1338,18 +1436,34 @@ Roughly in priority order:
     existing `grad_clip_norm`, newly exposed as `train_policy.py
     --grad-clip-norm`, at the paper's unmodified batch=1,000 — see the
     [full writeup](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients).
-    **New, highest priority now**: apply the same fix to GRU (WGAN-GP)'s
-    milder tail issue and α=0.99's thickened-tail warning sign (see that
-    section's scope note) — both are untested candidates for the same
-    saturation mechanism, not confirmed cases.
+    ~~**New, highest priority now**: apply the same fix to GRU (WGAN-GP)'s
+    milder tail issue and α=0.99's thickened-tail warning sign~~ — **done,
+    checked rather than assumed**: α=0.99 confirmed the same mechanism (even
+    more severely saturated) and is now fixed the same way, verified clean
+    at 500,000 paths. GRU (WGAN-GP) confirmed **not** the same mechanism
+    (healthy delta span on the same diagnostic) — still open, and now known
+    to need a different explanation, not just an untried fix. See
+    [Extending the fix](#extending-the-fix-alpha099-confirmed-same-mechanism-gruwgan-gp-and-basic-rnntimegan-confirmed-different-ones).
   - For TimeGAN-driven RNN/LSTM/GRU's generalization failure: training-time
     exposure to more extreme price excursions — either by widening the
     regime-switching stress scenario into the training distribution
     itself, or an adversarial/extreme-scenario data augmentation step —
     since the core issue is TimeGAN's training data (bounded by real
     `^GSPC` history) never produces the kind of extreme excursion the
-    regime-switching stress test does. Still open, unaffected by the
-    grad-clipping fix (a different mechanism entirely).
+    regime-switching stress test does. Still open for LSTM/GRU (TimeGAN),
+    confirmed via the saturation diagnostic to be unaffected by
+    grad-clipping (a genuinely different mechanism). **Basic RNN (TimeGAN)
+    specifically is a narrower, better-characterized sub-problem**: its
+    vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
+    regardless of input — confirmed via direct inspection, and confirmed
+    *not* fixed by `grad_clip_norm`, `orthogonal_init` (now both wired to
+    the CLI), or the combination. Candidates not yet tried: a learning-rate
+    warmup or lower peak LR specifically for the recurrent weights (to
+    prevent the runaway growth that causes the saturation in the first
+    place, rather than clipping or reorienting it after the fact), or
+    simply switching this checkpoint's cell type away from vanilla RNN
+    (LSTM/GRU's gating exists precisely to avoid this failure mode, and
+    LSTM/GRU under TimeGAN don't show it).
   - ~~Add a committed regression test asserting the fraction of paths with
     wealth below some threshold stays bounded for known-good checkpoints~~
     — **done**: `tests/test_tail_risk.py`, backed by

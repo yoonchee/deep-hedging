@@ -40,21 +40,31 @@ _SCAN_BATCH_SIZE = 50_000
 _SCAN_SEED = 42
 
 # RESULTS.md's "Catastrophic tail risk" table: checkpoints with 0/500,000
-# paths below -50 (a loss > 25x the option premium). "MLP (alpha=0.997)"
-# joined this list after mechanism (a) was root-caused and fixed (sigmoid
-# output saturation under CVaR's (1/(1-alpha)) gradient amplification --
-# see RESULTS.md's mechanism (a) writeup) via PolicyTrainer's grad_clip_norm,
-# newly wired up to train_policy.py's --grad-clip-norm CLI flag; it was
-# never wired up before, so every prior checkpoint in this repo trained with
-# clipping disabled.
-_KNOWN_GOOD_CHECKPOINTS = ["MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)"]
+# paths below -50 (a loss > 25x the option premium). "MLP (alpha=0.997)" and
+# "MLP (alpha=0.99)" joined this list after mechanism (a) was root-caused and
+# fixed (sigmoid output saturation under CVaR's (1/(1-alpha)) gradient
+# amplification -- see RESULTS.md's mechanism (a) writeup) via
+# PolicyTrainer's grad_clip_norm, newly wired up to train_policy.py's
+# --grad-clip-norm CLI flag; it was never wired up before, so every prior
+# checkpoint in this repo trained with clipping disabled.
+_KNOWN_GOOD_CHECKPOINTS = [
+    "MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)", "MLP (alpha=0.99)",
+]
 
-# Same table's checkpoints with a confirmed, not-yet-fixed catastrophic tail:
-# GRU (WGAN-GP) and every RecurrentHedgingAgent trained against TimeGAN --
-# this is mechanism (b) (TimeGAN-trained recurrent policies generalizing
-# badly to price extremes), a distinct, still-open failure mode from
-# mechanism (a) above. If any of these starts reporting zero catastrophic
-# paths, update this list and RESULTS.md's Known Limitations item 5 together.
+# Same table's checkpoints with a confirmed, not-yet-fixed catastrophic tail.
+# GRU (WGAN-GP): checked directly against the same saturation diagnostic that
+# found and fixed mechanism (a) -- its delta span is a healthy 1.0000 at
+# every timestep checked, so this is confirmed NOT sigmoid saturation; a
+# distinct, still-uncharacterized mechanism. Basic RNN/LSTM/GRU (TimeGAN):
+# mechanism (b) (TimeGAN-trained recurrent policies generalizing badly to
+# price extremes) for LSTM/GRU (also checked: healthy delta span, not
+# saturated). Basic RNN (TimeGAN) specifically was further diagnosed and
+# turned out to be a third, distinct mechanism: its vanilla-RNN hidden state
+# is saturated to tanh's +-1.0 bound regardless of input (constant delta
+# output) -- confirmed not fixed by grad_clip_norm, orthogonal_init, or both
+# together (all tested; see RESULTS.md). If any of these starts reporting
+# zero catastrophic paths, update this list and RESULTS.md's Known
+# Limitations item 5 together.
 _KNOWN_BAD_CHECKPOINTS = ["GRU", "Basic RNN (TimeGAN)", "LSTM (TimeGAN)", "GRU (TimeGAN)"]
 
 _checkpoints_available = pytest.mark.skipif(

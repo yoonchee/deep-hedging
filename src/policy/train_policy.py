@@ -219,6 +219,15 @@ def main() -> None:
     parser.add_argument("--num-hidden-layers", type=int, default=2, help="policy hidden layer count (mlp)")
     parser.add_argument("--rnn-hidden-dim", type=int, default=64, help="recurrent hidden state size (rnn/lstm/gru)")
     parser.add_argument("--rnn-num-layers", type=int, default=2, help="stacked recurrent layers (rnn/lstm/gru)")
+    parser.add_argument(
+        "--orthogonal-init",
+        action="store_true",
+        help="orthogonally initialize RecurrentHedgingAgent's recurrent weight matrices "
+        "(see RecurrentHedgingAgent's orthogonal_init) -- was implemented but never wired "
+        "to this CLI, like --grad-clip-norm; see RESULTS.md's mechanism (a) writeup, "
+        "'Extending the fix' subsection, for why neither fixed Basic RNN (TimeGAN)'s "
+        "recurrent hidden-state saturation on its own.",
+    )
     parser.add_argument("--noise-dim", type=int, default=8, help="fallback generator noise dim")
     parser.add_argument("--gen-hidden-dim", type=int, default=64, help="fallback generator hidden dim")
     parser.add_argument("--gen-num-layers", type=int, default=2, help="fallback generator layer count")
@@ -335,6 +344,7 @@ def _train_and_save(
             strike=args.strike,
             implied_vol=args.implied_vol,
             time_to_maturity=args.dt * (args.seq_len - 1),
+            orthogonal_init=args.orthogonal_init,
         )
         sequence_policy = True
 
