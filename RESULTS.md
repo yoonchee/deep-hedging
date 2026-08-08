@@ -753,7 +753,14 @@ depending on time step, vs. α=0.997's ≈-250 — deeper saturation than
 α=0.997 had, somewhat surprisingly, despite the milder stress-test damage).
 Retrained the same way (`grad_clip_norm=1.0`, same paper-scale batch=1,000,
 25,000 steps) and verified at the full 500,000-path scale: 0 catastrophic
-paths (was 5,452 below -10), worst loss -9.7 (was -48.7). Each checkpoint
+paths (was 5,452 below -10), worst loss -9.7 (was -48.7). As with α=0.997,
+the production run's own log was checked directly for the collapse
+signature (`mean_wealth` pinned near zero, `cvar_loss` flat in the
+dead-zone band) across all 252 logged points spanning the full 25,000
+steps — absent throughout (`mean_wealth` ranged -0.0196 to 0.0530, always
+outside the collapse band), so this run never entered the collapsed state,
+matching the α=0.997 evidence standard rather than inferring cleanliness
+from the final checkpoint alone. Each checkpoint
 in this table is still a single training run at a single seed — this
 project has already found (three times, in the RNN/LSTM investigation
 above) that single-seed training outcomes here are noisy enough to matter,
@@ -1457,11 +1464,15 @@ Roughly in priority order:
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
     regardless of input — confirmed via direct inspection, and confirmed
     *not* fixed by `grad_clip_norm`, `orthogonal_init` (now both wired to
-    the CLI), or the combination. Candidates not yet tried: a learning-rate
-    warmup or lower peak LR specifically for the recurrent weights (to
-    prevent the runaway growth that causes the saturation in the first
-    place, rather than clipping or reorienting it after the fact), or
-    simply switching this checkpoint's cell type away from vanilla RNN
+    the CLI), or the combination. The final checkpoint's recurrent weight
+    norms are large (`weight_ih_l1` ≈ 14.6) and saturation was already
+    present by epoch 100 in the reduced-scale probes — consistent with,
+    but not confirmed as, runaway growth during training (the weight
+    trajectory itself wasn't logged, so early-saturation-from-initialization
+    hasn't been ruled out as a competing explanation). Candidates not yet
+    tried: a learning-rate warmup or lower peak LR specifically for the
+    recurrent weights (motivated by the growth hypothesis, if it holds up),
+    or simply switching this checkpoint's cell type away from vanilla RNN
     (LSTM/GRU's gating exists precisely to avoid this failure mode, and
     LSTM/GRU under TimeGAN don't show it).
   - ~~Add a committed regression test asserting the fraction of paths with
