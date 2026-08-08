@@ -279,11 +279,28 @@ class TimeGANPriceGenerator(nn.Module):
     GBMDataSource in backtester/replicate_part1.py.
     """
 
-    def __init__(self, timegan: TimeGAN, scaler: "MinMaxScaler") -> None:
+    def __init__(
+        self,
+        timegan: TimeGAN,
+        scaler: "MinMaxScaler",
+        output_scale: Annotated[
+            float,
+            "amplifies the tanh-bounded recovered signal before inverse-transform, "
+            "widening the generated price distribution -- see RESULTS.md's mechanism "
+            "(b) follow-up. 1.0 (default) reproduces the checkpoint's original "
+            "training distribution exactly. Scaling the input noise z instead was "
+            "tried first and measured to do essentially nothing (Generator -> "
+            "Supervisor -> Recovery's three stacked tanh layers absorb a 20x noise "
+            "increase into <10% output-range change) -- this scales the recovered "
+            "signal itself, after the saturating nonlinearities, where it actually "
+            "has effect.",
+        ] = 1.0,
+    ) -> None:
         super().__init__()
         self.timegan = timegan
         self.scaler = scaler
         self.price_index = timegan.price_index
+        self.output_scale = output_scale
 
     def sample_noise(
         self,
@@ -299,15 +316,33 @@ class TimeGANPriceGenerator(nn.Module):
         # [Batch, Time_Steps, noise_dim] -> [Batch, Time_Steps, F], in [-1, 1]
         x_hat_scaled = self.timegan.generate(z)
 
+        # Widen before inverse-transform, not the input noise z -- z-scaling
+        # doesn't propagate through the tanh-saturated generation path (see
+        # output_scale's docstring above). self.scaler.inverse_transform is a
+        # simple per-feature affine map (MinMaxScaler.inverse_transform), so
+        # this amplifies the recovered signal's deviation from the scaler's
+        # fitted center, linearly, exactly as intended.
+        x_hat_scaled = x_hat_scaled * self.output_scale
+
         # [Batch, Time_Steps, F] -> [Batch, Time_Steps, F], price-ratio scale
         x_hat = self.scaler.inverse_transform(x_hat_scaled)
 
         # [Batch, Time_Steps, F] -> [Batch, Time_Steps, 1]
-        return x_hat[..., self.price_index : self.price_index + 1]
+        price = x_hat[..., self.price_index : self.price_index + 1]
+
+        # The affine inverse-transform has no positivity floor -- at large
+        # enough output_scale (or on rare extreme draws even at moderate
+        # scale), it can map to zero or negative "prices", which breaks
+        # every downstream log-moneyness computation. Clamp explicitly
+        # rather than assume a given output_scale is always safe.
+        return price.clamp(min=1e-3)
 
 
 def load_timegan_price_generator(
     checkpoint_path: Annotated[Path, "checkpoint saved by this module's --checkpoint"],
+    output_scale: Annotated[
+        float, "see TimeGANPriceGenerator.output_scale; 1.0 (default) is a no-op"
+    ] = 1.0,
 ) -> TimeGANPriceGenerator:
     """Loads a trained TimeGAN checkpoint as a frozen TimeGANPriceGenerator,
     ready to be passed to policy/train_policy.py::PolicyTrainer in place of
@@ -333,7 +368,7 @@ def load_timegan_price_generator(
     scaler = MinMaxScaler(len(feature_columns))
     scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
-    return TimeGANPriceGenerator(timegan, scaler)
+    return TimeGANPriceGenerator(timegan, scaler, output_scale=output_scale)
 
 
 def _synthetic_multivariate_prices(

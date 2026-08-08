@@ -316,6 +316,47 @@ def test_load_timegan_price_generator_round_trips_checkpoint(tmp_path) -> None:
         assert not param.requires_grad
 
 
+def test_timegan_price_generator_output_scale_widens_distribution() -> None:
+    # RESULTS.md's mechanism (b) follow-up: scaling the input noise z barely
+    # moves TimeGAN's output (the three stacked tanh layers in Generator ->
+    # Supervisor -> Recovery absorb it), so output_scale widens the
+    # recovered signal itself, after those saturating nonlinearities,
+    # before the (linear) inverse-transform -- this is the mechanism that
+    # actually has effect.
+    batch, seq, feature_dim = 500, 10, 5
+    torch.manual_seed(0)
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1, price_index=3)
+    scaler = MinMaxScaler(feature_dim=feature_dim)
+    scaler.fit(_synthetic_multivariate_prices(200, seq))
+
+    z = TimeGANPriceGenerator(timegan, scaler).sample_noise(batch, seq)
+
+    narrow = TimeGANPriceGenerator(timegan, scaler, output_scale=1.0)(z)
+    wide = TimeGANPriceGenerator(timegan, scaler, output_scale=3.0)(z)
+
+    assert wide.std().item() > narrow.std().item()
+
+
+def test_timegan_price_generator_output_scale_clamps_to_stay_positive() -> None:
+    # MinMaxScaler.inverse_transform is a plain affine map with no
+    # positivity floor -- a large enough output_scale can map to zero or
+    # negative "prices" (breaks every downstream log-moneyness
+    # computation), so TimeGANPriceGenerator.forward must clamp explicitly
+    # rather than assume any given scale is safe.
+    batch, seq, feature_dim = 500, 10, 5
+    torch.manual_seed(0)
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1, price_index=3)
+    scaler = MinMaxScaler(feature_dim=feature_dim)
+    scaler.fit(_synthetic_multivariate_prices(200, seq))
+
+    adapter = TimeGANPriceGenerator(timegan, scaler, output_scale=50.0)
+    z = adapter.sample_noise(batch, seq)
+    prices = adapter(z)
+
+    assert torch.all(prices > 0.0)
+    assert torch.isfinite(prices).all()
+
+
 def test_moment_loss_pulls_price_channel_skew_kurtosis_toward_target() -> None:
     torch.manual_seed(0)
     seq = 20

@@ -253,6 +253,18 @@ def main() -> None:
         help="checkpoint saved by generator/train_timegan.py (--generator-type timegan)",
     )
     parser.add_argument(
+        "--timegan-output-scale",
+        type=float,
+        default=1.0,
+        help="widen TimeGAN's generated price distribution by this factor before "
+        "training (see TimeGANPriceGenerator.output_scale) -- addresses mechanism "
+        "(b) (RESULTS.md): TimeGAN's own training distribution (real ^GSPC-bounded, "
+        "log-moneyness ~+-0.13-0.17) is far narrower than the stress test's extreme "
+        "paths, and LSTM/GRU (TimeGAN) hit a sharp delta-collapse cliff just inside "
+        "that boundary. 1.0 (default) is a no-op, reproducing every existing TimeGAN "
+        "checkpoint's training distribution exactly.",
+    )
+    parser.add_argument(
         "--use-bs-baseline",
         action="store_true",
         help="train on CVaR of (policy_wealth - black_scholes_wealth) instead of raw "
@@ -292,8 +304,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.generator_type == "timegan":
-        generator = load_timegan_price_generator(Path(args.timegan_checkpoint))
-        print(f"Loaded pretrained TimeGAN from {args.timegan_checkpoint}")
+        generator = load_timegan_price_generator(
+            Path(args.timegan_checkpoint), output_scale=args.timegan_output_scale
+        )
+        print(
+            f"Loaded pretrained TimeGAN from {args.timegan_checkpoint}"
+            + (f" (output_scale={args.timegan_output_scale})" if args.timegan_output_scale != 1.0 else "")
+        )
         suffix = "_timegan"
     else:
         generator = _load_or_init_generator(

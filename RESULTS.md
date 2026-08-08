@@ -1206,6 +1206,20 @@ applied to GRU (WGAN-GP) above, finds a precise mechanism:
   opposite of GRU (WGAN-GP)'s mechanism (c) above, where LSTM (WGAN-GP)
   didn't share the failure under an identical shock from the same
   generator.
+- **Control: MLP (TimeGAN) shows no cliff at all, out to log-moneyness
+  ±8.0.** `hedging_agent_timegan.pt` was swept across the same log-moneyness
+  range at several `delta_prev` values (its state includes `delta_prev`,
+  `T-t`, and `implied_vol` explicitly, unlike the recurrent policies). Delta
+  rises smoothly and monotonically from 0.43 at log-moneyness 0 to
+  1.00000 by log-moneyness 0.5, and *stays* at 1.00000 all the way to 8.0 —
+  correctly saturated at a deep-ITM call's natural bound, not collapsing.
+  The selloff direction is equally well-behaved, falling smoothly toward 0
+  as log-moneyness drops to -1.0. This is the missing control this
+  diagnosis lacked before: mechanism (b) is specific to the *recurrent*
+  policies, not a property of TimeGAN's training data that every
+  architecture trained against it would show. A feed-forward network with
+  no compounding hidden state extrapolates a learned monotonic relationship
+  cleanly; the recurrent policies' hidden-state dynamics do not.
 - **An "inverted delta" hypothesis was considered and ruled out.** An
   earlier, cruder probe (jumping straight to a target level rather than
   ramping smoothly) suggested delta might be tracking the *wrong sign* —
