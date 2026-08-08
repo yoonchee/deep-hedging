@@ -41,6 +41,7 @@ from backtester.plotting import (  # noqa: E402
     style_axes,
 )
 from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
+from common.checkpoints import checkpoint_filename  # noqa: E402
 from common.stats import excess_kurtosis, skewness  # noqa: E402
 from environment.market_env import MarketEnvironment, estimate_premium_monte_carlo  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
@@ -301,12 +302,14 @@ def load_alpha_sweep_checkpoints(
     architecture: Annotated[str, "'mlp', 'rnn', 'lstm', or 'gru'"],
     alphas: List[float],
     checkpoint_dir: Path,
+    suffix: Annotated[
+        str, "'_timegan' for TimeGAN-trained alpha-sweep checkpoints, '' (default) for WGAN-GP"
+    ] = "",
 ) -> Dict[float, Tuple[Any, bool]]:
     """Loads per-alpha checkpoints saved by `train_policy.py --alpha-sweep ...`."""
     policies: Dict[float, Tuple[Any, bool]] = {}
     for alpha in alphas:
-        alpha_str = f"{alpha:.4g}".replace(".", "_")
-        path = checkpoint_dir / f"hedging_agent_{architecture}_alpha{alpha_str}.pt"
+        path = checkpoint_dir / checkpoint_filename(architecture, alpha=alpha, suffix=suffix)
         loaded = _load_policy_checkpoint(path)
         if loaded is None:
             print(f"No checkpoint at {path} -- skipping alpha={alpha}.")
@@ -634,10 +637,8 @@ def _load_all_policies(
     optional second comparison, not the primary one.
     """
     checkpoint_paths = {
-        "mlp": checkpoint_dir / f"hedging_agent{suffix}.pt",
-        "rnn": checkpoint_dir / f"hedging_agent_rnn{suffix}.pt",
-        "lstm": checkpoint_dir / f"hedging_agent_lstm{suffix}.pt",
-        "gru": checkpoint_dir / f"hedging_agent_gru{suffix}.pt",
+        arch: checkpoint_dir / checkpoint_filename(arch, suffix=suffix)
+        for arch in ARCHITECTURE_DISPLAY_NAMES
     }
 
     policies: Dict[str, Tuple[Any, bool]] = {}

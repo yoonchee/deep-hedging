@@ -20,6 +20,7 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
+from common.checkpoints import checkpoint_filename  # noqa: E402
 from environment.market_env import MarketEnvironment, estimate_premium_monte_carlo  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from generator.train_timegan import load_timegan_price_generator  # noqa: E402
@@ -307,18 +308,15 @@ def main() -> None:
     if args.alpha_sweep is not None:
         alphas = [float(a) for a in args.alpha_sweep.split(",")]
         for alpha in alphas:
-            alpha_str = f"{alpha:.4g}".replace(".", "_")
-            checkpoint_path = Path(
-                f"checkpoints/hedging_agent_{args.architecture}_alpha{alpha_str}{suffix}.pt"
+            checkpoint_path = Path("checkpoints") / checkpoint_filename(
+                args.architecture, alpha=alpha, suffix=suffix
             )
             _train_and_save(args, alpha, checkpoint_path, generator, device)
         return
 
     checkpoint_path = Path(args.checkpoint) if args.checkpoint else Path(
-        f"checkpoints/hedging_agent{suffix}.pt"
-        if args.architecture == "mlp"
-        else f"checkpoints/hedging_agent_{args.architecture}{suffix}.pt"
-    )
+        "checkpoints"
+    ) / checkpoint_filename(args.architecture, suffix=suffix)
     _train_and_save(args, args.cvar_alpha, checkpoint_path, generator, device)
 
 

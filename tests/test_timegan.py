@@ -139,7 +139,7 @@ def test_train_step_phase3_runs_and_returns_expected_keys() -> None:
 
 
 def test_discriminator_loss_defaults_to_bce() -> None:
-    batch, seq, feature_dim = 4, 15, 5
+    feature_dim = 5
     timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1)
     trainer = TimeGANTrainer(timegan, n_critic=1, device=torch.device("cpu"))
 

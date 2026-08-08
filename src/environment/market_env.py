@@ -13,7 +13,7 @@ See math_spec.md section 1.1 for why omitting it made every mean wealth in
 this repo negative, and RESULTS.md for where P_0 is (and isn't) wired in.
 """
 
-from typing import Annotated, Optional, Protocol, Tuple, Union
+from typing import Annotated, Callable, Optional, Protocol, Tuple, Union
 
 import torch
 
@@ -67,7 +67,7 @@ def european_call_payoff(
 
 def estimate_premium_monte_carlo(
     sample_prices: Annotated[
-        "Callable[[int], torch.Tensor]",
+        Callable[[int], torch.Tensor],
         "callable(batch_size) -> [Batch, Time_Steps, 1] price paths, from whatever "
         "simulator/generator is in use (regime-switching, WGAN-GP, TimeGAN, ...)",
     ],

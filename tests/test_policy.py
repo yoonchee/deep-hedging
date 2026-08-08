@@ -227,6 +227,48 @@ def test_gradient_propagates_to_all_policy_parameters() -> None:
         assert torch.any(param.grad != 0), f"zero gradient for {name}"
 
 
+def test_grad_clip_norm_actually_clips_the_applied_gradient() -> None:
+    # This is the mechanism (a) fix (RESULTS.md): a single CVaR-amplified
+    # gradient step can push HedgingAgent's sigmoid output into permanent
+    # numerical saturation. grad_clip_norm exists specifically to cap step
+    # size, but had no test at all before -- only real training runs
+    # exercised it. Two trainers, identical seed/setup, differing only in
+    # grad_clip_norm: the unclipped run's own pre-clip grad_norm confirms
+    # the natural gradient is larger than the clip target (otherwise this
+    # test wouldn't be exercising clipping at all), and the clipped run's
+    # actual post-step parameter gradients (not the pre-clip grad_norm
+    # PolicyTrainer returns) must have total norm at or below the target.
+    clip_target = 1e-3
+
+    def make_trainer(grad_clip_norm) -> PolicyTrainer:
+        torch.manual_seed(0)
+        policy = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+        generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+        environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+        cvar_loss = CVaRLoss(alpha=0.95)
+        return PolicyTrainer(
+            policy, environment, generator, cvar_loss,
+            implied_vol=0.2, lr=1e-2, device=torch.device("cpu"),
+            grad_clip_norm=grad_clip_norm,
+        )
+
+    torch.manual_seed(0)
+    unclipped = make_trainer(grad_clip_norm=None)
+    stats_unclipped = unclipped.train_step(batch_size=16, seq_len=12)
+    assert stats_unclipped["grad_norm"] > clip_target, (
+        "natural gradient norm must exceed the clip target for this test to "
+        "actually exercise clipping -- if this fails, raise clip_target"
+    )
+
+    torch.manual_seed(0)
+    clipped = make_trainer(grad_clip_norm=clip_target)
+    clipped.train_step(batch_size=16, seq_len=12)
+    applied_grad_norm = torch.sqrt(
+        sum((p.grad**2).sum() for p in clipped.policy.parameters() if p.grad is not None)
+    )
+    assert applied_grad_norm.item() <= clip_target * 1.001
+
+
 @pytest.mark.parametrize("cell_type", ["rnn", "lstm", "gru"])
 def test_recurrent_agent_output_shape_and_range(cell_type: str) -> None:
     batch_size, seq_len = 8, 10
