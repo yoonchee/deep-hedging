@@ -537,6 +537,15 @@ as the genuinely unaffected checkpoints above it.
    sees the instantaneous price ratio and never sequence history, is
    unaffected — consistent with a
    recurrence-specific extrapolation failure, not a shared data problem.
+   (**Less coincidental than it looked at the time**: a later diagnosis
+   found LSTM's delta on this exact path collapses from 0.9998 to 0.0001 in
+   a single step, at log-moneyness just 0.071 — still comfortably inside
+   TimeGAN's own training range — and stays near zero for the remaining 27
+   steps of the rally. Given that, netting to ≈0 hedge P&L on an almost
+   entirely unhedged path is closer to expected than coincidental; see the
+   [follow-up
+   diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure)
+   below for the precise mechanism and threshold.)
 
 **Verified against a control that rules out a test-set artifact.**
 Black-Scholes' closed-form delta hedge on the identical seed-42 batch
@@ -971,8 +980,12 @@ moved to the known-good list, since 4/500,000 is not actually clean.
   logits) — this is the expected signature for mechanism (b) (generalizing
   badly to price extremes the training distribution never produced, not an
   output-layer pathology), consistent with these checkpoints' documented
-  *normal* transaction costs. No fix attempted; still open, still a
-  training-distribution problem, not a `grad_clip_norm` problem.
+  *normal* transaction costs. ~~No fix attempted; still open~~ — **since
+  characterized precisely**: this spot-grid diagnostic evidently didn't
+  probe far enough to find the actual cliff. See [the follow-up
+  diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure)
+  below. Still no fix attempted; still open, still a training-distribution
+  problem, not a `grad_clip_norm` problem.
 - **Basic RNN (TimeGAN): confirmed saturated, but through a third, distinct
   mechanism** — not `HedgingAgent`'s sigmoid output, but
   `RecurrentHedgingAgent`'s recurrent *hidden state*. Its raw logit was
@@ -1072,6 +1085,89 @@ fixed-path convention to find checkpoints automatically — but worth noting
 for the next person: `--alpha-sweep` has no output-path override, so any
 throwaway/exploratory run using it needs an isolated cwd, not just a
 different `--checkpoint` flag.
+
+#### Follow-up diagnosis: mechanism (b) is a sharp cliff at TimeGAN's training-distribution boundary, not a gradual generalization failure
+
+The spot-grid diagnostic that found "healthy delta span 0.99-1.0, moderate
+logits" for LSTM/GRU (TimeGAN) evidently didn't probe far enough to find
+where these checkpoints actually break. Pulling the checkpoints' own
+worst-loss paths from the 500,000-path scan (seed=42) and testing with
+controlled synthetic ramps, using the same training-free methodology
+applied to GRU (WGAN-GP) above, finds a precise mechanism:
+
+- **TimeGAN's own training distribution is far narrower than either
+  generator used elsewhere in this project.** Sampling 20,000 fresh paths
+  from the trained TimeGAN checkpoint (`checkpoints/timegan.pt`) and
+  converting to the same log-moneyness scale the policy sees: log-moneyness
+  spans only **-0.173 to +0.133** — versus WGAN-GP's roughly -1.43 to +0.27
+  (the range measured for GRU (WGAN-GP) above), and versus the actual
+  500,000-path stress test's most extreme paths, which reach log-moneyness
+  **+8.34** (a shared worst-case path both LSTM and GRU (TimeGAN) fail on —
+  expected, not evidence of anything, since it's the same seed-42 price
+  tensor for every policy) — the stress test's most extreme paths reach
+  about **60x** further out than TimeGAN's own training distribution's
+  positive tail ever produced.
+- **On the actual worst path, LSTM's delta collapses from 0.9998 to 0.0001
+  in a single step**, at a log-moneyness of just **0.071** — comfortably
+  inside the training range's positive tail (max 0.133), not even past it
+  yet. A finer, controlled sweep (a smooth 29-step ramp from log-moneyness 0
+  to a target, isolating the effect of level from the noisy actual path)
+  pins down the real threshold: delta stays correctly high (>0.98) through
+  log-moneyness ≈0.088-0.093, then falls to <0.02 by ≈0.098-0.107 over a
+  handful of steps (steps 18-22 of the ramp, so step-count and level are
+  confounded here — this doesn't isolate a pure step-count-driven
+  transition, only the level range). **The stronger, more precise finding
+  than "at the boundary": these checkpoints fail *before* reaching the
+  edge of their own training distribution**, not right at it — the cliff
+  (≈0.09-0.11) sits measurably inside the measured positive-tail boundary
+  (0.133), and the worst path's actual collapse (0.071) sits further
+  inside still. GRU (TimeGAN) shows the same cliff at a nearly identical
+  threshold (≈0.10-0.11).
+  **Both architectures failing at essentially the same threshold, despite
+  different cell types, is the discriminating evidence that this is a
+  training-distribution problem, not an architecture-specific one** — the
+  opposite of GRU (WGAN-GP)'s mechanism (c) above, where LSTM (WGAN-GP)
+  didn't share the failure under an identical shock from the same
+  generator.
+- **An "inverted delta" hypothesis was considered and ruled out.** An
+  earlier, cruder probe (jumping straight to a target level rather than
+  ramping smoothly) suggested delta might be tracking the *wrong sign* —
+  collapsing toward 0 for rallies but climbing toward 1 for selloffs, the
+  opposite of a call's correct ∂delta/∂S > 0 relationship. That probe
+  confounded path *shape* with path *endpoint* (a jump has a different
+  per-step trajectory than a ramp to the same target), so it couldn't
+  actually support that claim. Redone as a proper controlled comparison —
+  identical 29-step ramp construction, sign of the target flipped, full
+  per-step delta path compared rather than just the final value — the
+  rally direction still shows the sharp cliff described above, but the
+  selloff direction shows *no* comparable collapse: delta stays at or above
+  0.98 throughout a ramp to log-moneyness -0.13, and stays near 1.0 all the
+  way out to -0.4 in the coarser sweep that first surfaced this asymmetry.
+  This isn't evidence of a learned sign inversion — it's an asymmetric
+  failure specific to the rally direction, with no explanation attempted
+  here for *why* the selloff direction doesn't show it (the CVaR/fee
+  structure may make "stay hedged during a selloff" a cheaper mistake than
+  "stop hedging during a rally," but that's a hypothesis, not tested).
+- **This is not mechanism (a)'s dead-gradient saturation, reconciling
+  rather than contradicting the original "moderate logits" finding.** The
+  raw pre-sigmoid logits at the collapsed steps sit around -16 to -21, not
+  mechanism (a)'s ≈-250 — `sigmoid(-21) ≈ 7.6×10⁻¹⁰` is a very small but
+  numerically real float32 value, not an underflowed dead zone with exactly
+  zero gradient. In practice this is still effectively a dead end for
+  learning, just not for the same underflow reason as mechanism (a):
+  `sigmoid'(-21) ≈ sigmoid(-21) ≈ 7.6×10⁻¹⁰` is representable but far too
+  small for a gradient step to move the weights in any meaningful number of
+  steps, so training stalls in practice even though it isn't mathematically
+  zero. The original diagnostic's "moderate logits" finding was correct for
+  whatever range it actually tested; it simply didn't extend far enough to
+  reach this specific cliff, which — per the point above — sits inside
+  TimeGAN's own training boundary, not past it.
+- **No fix attempted.** The likely fix is the one already on this
+  document's list — training-time exposure to more extreme price
+  excursions than TimeGAN's real-data-bounded training distribution can
+  produce, either by widening the regime-switching stress scenario into
+  the training loop itself or an adversarial/extreme-scenario augmentation
+  step — but that wasn't tried here; this was a diagnosis pass.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -1492,14 +1588,29 @@ Roughly in priority order:
      or both together, all tested at reduced scale. Genuinely open, not
      merely unattempted.
    - **(b) TimeGAN-trained recurrent policies (not MLP) generalize badly
-     to price extremes** outside their training distribution, hedging
-     *badly* rather than *not at all* — still open for LSTM/GRU (TimeGAN),
-     confirmed via the same diagnostic to be a distinct failure from both
-     (a) and Basic RNN (TimeGAN)'s hidden-state saturation above (healthy
-     delta span, moderate logits — consistent with their documented
-     *normal* transaction costs). See [Ideas for future
-     work](#ideas-for-future-work) (adversarial/extreme-scenario
-     augmentation for TimeGAN-driven training).
+     to price extremes** outside their training distribution — since
+     precisely characterized, not just confirmed distinct from (a) and
+     Basic RNN (TimeGAN)'s hidden-state saturation. TimeGAN's own training
+     distribution (bounded by real historical `^GSPC` daily moves) spans
+     only log-moneyness -0.17 to +0.13 — versus the stress test's most
+     extreme paths (+8.34, about 60x further out) or even WGAN-GP's own
+     training range (-1.43 to +0.27). Both LSTM and GRU (TimeGAN) collapse
+     from a healthy delta (>0.98) to near-zero over a handful of steps, at
+     a threshold (≈0.09-0.11) that sits measurably *inside* the training
+     distribution's own positive boundary (0.133), not at or past it — a
+     sharp cliff, not a gradual degradation, and both architectures fail at
+     essentially the same threshold despite different cell types, which is
+     what marks this as training-data-driven rather than
+     architecture-specific (unlike mechanism (c) below). An "inverted
+     delta" hypothesis (collapsing for
+     rallies, climbing for selloffs — the wrong sign) was considered and
+     ruled out via a properly path-shape-controlled comparison; the failure
+     is asymmetric (rally-side only, no comparable selloff-side collapse
+     found), not sign-inverted. See [the follow-up
+     diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure)
+     and [Ideas for future work](#ideas-for-future-work)
+     (adversarial/extreme-scenario augmentation for TimeGAN-driven
+     training). No fix attempted; still open.
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -1673,9 +1784,13 @@ Roughly in priority order:
     itself, or an adversarial/extreme-scenario data augmentation step —
     since the core issue is TimeGAN's training data (bounded by real
     `^GSPC` history) never produces the kind of extreme excursion the
-    regime-switching stress test does. Still open for LSTM/GRU (TimeGAN),
-    confirmed via the saturation diagnostic to be unaffected by
-    grad-clipping (a genuinely different mechanism). **Basic RNN (TimeGAN)
+    regime-switching stress test does. **Now precisely characterized**: a
+    sharp cliff at log-moneyness ≈0.09-0.11, almost exactly TimeGAN's own
+    measured positive-tail boundary (0.133), shared by both LSTM and GRU
+    (TimeGAN) at nearly the same threshold — see [the follow-up
+    diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure).
+    Still open, no fix attempted; the training-time-augmentation candidates
+    above are informed but untested by this diagnosis. **Basic RNN (TimeGAN)
     specifically is a narrower, better-characterized sub-problem**: its
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
     regardless of input — confirmed via direct inspection, and confirmed
