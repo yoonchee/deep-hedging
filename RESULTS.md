@@ -20,7 +20,7 @@ found, and — deliberately — what didn't work and why, not just what did.
 | Paper component | This repo | Status |
 |---|---|---|
 | CVaR-minimizing direct policy search | `loss/cvar.py`, `policy/train_policy.py` | Matches |
-| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting LSTM/GRU match, Basic RNN is seed-sensitive and improved (not fully closed) by a CVaR control-variate baseline — see below |
+| Basic RNN / LSTM / GRU comparison vs. Black-Scholes | `policy/hedging_agent.py` (`RecurrentHedgingAgent`) | Matches in Part I (all three cell types replicate Black-Scholes-level CVaR after a standardized-log-moneyness input fix); in the harder stress-test setting Basic RNN was seed-sensitive, addressed by a CVaR control-variate baseline — the current checkpoint's stress-test CVaR₉₉ (2.58) is now the best of the three recurrent architectures, ahead of LSTM (3.49) and GRU (3.81) — see below |
 | Frictionless Part I (GBM, no transaction costs) | `backtester/replicate_part1.py` | Matches paper's exact Table 1 params, including scale: 500,000-scenario train/test sets, 25,000 gradient steps (the paper's "50 epochs" over that dataset size at batch=1000, in this codebase's per-step convention) — see below |
 | Part II: GAN-driven nonparametric scenarios | `generator/market_gan.py` (WGAN-GP) + `generator/timegan.py` (TimeGAN) | Both implemented, both now scaled to paper's Table 2 (TimeGAN) and paper-scale evaluation. TimeGAN's generator fidelity is now close (87.3% diversity), but its trained policies show catastrophic tail risk at the paper's own 500,000-path test scale — see TimeGAN section and Known limitations |
 | Multi-alpha risk-return sweep | `train_policy.py --alpha-sweep`, `evaluate.py::run_alpha_sweep_backtest` | Matches, now extended to the paper's own Part II grid {0.5, 0.75, 0.99, 0.995, 0.997} |
@@ -440,13 +440,38 @@ substantially and consistently **reduces the variance of the outcome**:
 mean CVaR₉₉ drops 40%, cross-seed standard deviation drops 5.7x, and —
 critically — the worst-case seed's CVaR₉₉ improves from catastrophic
 (20.14, an essentially unhedged position) to merely mediocre (7.27 at the
-time, **6.61 under the current P₀-inclusive convention** — the number in
-the table above). Retraining the project's canonical seed-0 checkpoint with
-this flag: CVaR₉₉ 19.26 → 7.27 (→ 6.61 today). It doesn't close the gap to
-LSTM/GRU's ~5.0 (~4.4 today), but it turns Basic RNN from a coin-flip
+time, ~~6.61 under the current P₀-inclusive convention~~ — see the
+correction below). Retraining the project's canonical seed-0 checkpoint with
+this flag: CVaR₉₉ 19.26 → 7.27. It turns Basic RNN from a coin-flip
 between "works" and "completely broken" into a consistently
-mediocre-but-functional policy — a genuine, measured win for the technique,
-even though it doesn't fully solve Basic RNN's stress-test performance.
+mediocre-but-functional policy — a genuine, measured win for the technique
+at the time — though see below for why "the number in the table above" no
+longer matches this document's own current main table.
+
+**Correction: the "6.61" figure above is stale, and now the reason is
+established.** Directly measuring the checkpoint currently at
+`checkpoints/hedging_agent_rnn.pt` (same file used to generate the current
+[Stress-test table](#stress-test-backtest)) gives CVaR₉₉ **2.575** —
+matching that table's Basic RNN row (2.58) exactly, not the "6.61" claimed
+here. `git log -S"7.27"` (the pre-P₀ number "6.61" was derived from) dates
+this 8-seed sweep to commit `c810358` (Aug 6 23:30) — *before* this
+project's paper-scale rescaling in `5928efb`, which changed training budget
+(200 → 25,000 epochs, `batch_size` 64 → 1,000) and the stress test's own
+evaluation batch (2,000 → 500,000 paths) together in the same commit,
+confirmed by reading its diff directly. The checkpoint on disk now (mtime
+Aug 7 20:10, `epochs: 25000` in its saved args) postdates that rescaling —
+it was retrained at the paper's full training budget and re-evaluated at
+the paper's full test-set scale sometime after this sweep ran, the same
+kind of change that improved several other checkpoints in this project.
+The "→ 6.61 today" annotation was simple arithmetic (7.27 − 0.663 for the
+P₀ convention change) applied to the *pre-rescaling* sweep's number, never
+re-verified against the checkpoint that was later retrained and
+re-evaluated at paper scale — the same class of staleness this document
+already flags for the RNN/LSTM table earlier ("predates the paper-scale
+rerun"), just not
+caught here until now. **The reliable number is the current main table's
+2.58** (verified via direct re-measurement, seed=42, 500,000 paths), and
+that's the baseline used below.
 
 This is the third correction of this kind in this project's RNN/LSTM
 investigation (see the moneyness-fix self-correction in Part I, and the
@@ -454,6 +479,58 @@ TimeGAN GRU-attribution retraction below) — worth stating plainly rather
 than smoothing over: single-seed conclusions about *why* a specific
 architecture fails are unreliable in this codebase's training regime, and
 should be treated as provisional until checked across multiple seeds.
+
+#### Follow-up: `use_bs_baseline` + `orthogonal_init`, the deferred 8-seed experiment — a negative result
+
+[Known limitations](#known-limitations) item 4 explicitly deferred testing
+whether `orthogonal_init` on top of `use_bs_baseline` would close Basic
+RNN's remaining gap further, citing compute cost. Run to completion (8
+seeds, full 25,000-step scale, `--use-bs-baseline --orthogonal-init`,
+otherwise identical to the canonical checkpoint's hyperparameters):
+
+| | Current incumbent (`use_bs_baseline` alone, seed=0) | `use_bs_baseline` + `orthogonal_init` (8 seeds) |
+|---|---|---|
+| CVaR₉₉ | 2.575 | mean 3.616, min 2.727, max 4.598 |
+| CVaR₉₅ | 1.641 | mean 2.229 |
+| Catastrophic paths (< -50) | 0/500,000 | 0/500,000 for 7 seeds, **2/500,000** for seed 0 |
+| Worst loss | -7.34 | ranges -9.05 to -74.78 |
+
+**Every one of the 8 new seeds does worse than the current incumbent on
+CVaR₉₉, including the best one** (2.727 vs. 2.575) — that direction is
+well-evidenced (8-for-8). The *size* of the effect is less certain than it
+looks: the incumbent is a single seed-0 draw, not a distribution, and this
+sweep's own cross-seed std (0.625) shows meaningful seed-to-seed spread —
+so the mean-to-mean gap (3.616 vs. 2.575) could overstate the true effect
+if the incumbent happens to be a favorable draw. `orthogonal_init` does not
+help here; whether it actively hurts or merely fails to help is less
+certain than "every seed lost" alone establishes. This closes the question
+item 4 left open, with a negative answer rather than the hoped-for further
+variance reduction. No checkpoint was promoted, since none beat the
+incumbent — `checkpoints/hedging_agent_rnn.pt` is unchanged.
+
+**Not comparable to this section's own historical 6.89/1.20 cross-seed std
+figures.** `orthogonal_init` consumes additional random draws during weight
+initialization (`nn.init.orthogonal_` calls), shifting the RNG stream for
+every subsequent training step — so "seed 0 with `orthogonal_init`" isn't a
+controlled single-variable ablation of "seed 0 without it," any more than
+two different seeds are directly comparable. The old table also predates
+changes this document already flags as unregenerated (see its own note
+above). This new sweep's cross-seed std (0.625) is reported as a fresh,
+independent measurement of Basic RNN's seed sensitivity under the *current*
+codebase — the first such measurement this document has, since the
+original 8-seed sweep is explicitly historical — not as something to
+difference against the old figure.
+
+**Practical implication**: the incumbent `hedging_agent_rnn.pt` (seed=0,
+`use_bs_baseline` alone, no `orthogonal_init`) remains the best available
+Basic RNN checkpoint under this stress test — and per the corrected numbers
+above, there may no longer be a gap to close at all. The current main
+table's CVaR₉₉ is 2.58 for Basic RNN, actually *better* than both LSTM
+(3.49) and GRU (3.81), the reverse of this document's stale "doesn't close
+the gap to LSTM/GRU's ~4.4" framing. The incumbent's paper-scale retrain
+(see the correction above) already resolved the practical priority this
+deferred item was chasing, independent of this `orthogonal_init`
+experiment.
 
 ### Catastrophic tail risk, invisible below ~500,000 test paths
 
@@ -1516,35 +1593,37 @@ Roughly in priority order:
    still runs a bit low (~3.1 vs. ~4.0-5.5, itself a noisy target — see
    above). A learned, per-batch-adaptive weighting (vs. the current fixed
    `--lambda-moment`) could plausibly tighten this further.
-4. **Basic RNN's stress-test performance is improved but not fully closed
-   to LSTM/GRU's level.** The DC-dominance input fix (Part I) closed the
-   gap completely in Part I's frictionless setting and for LSTM in the
-   harder WGAN-GP stress-test setting (CVaR₉₉ 18.37 → 5.02). Basic RNN was
-   initially believed to have a separate, deterministic architectural
-   limitation in the stress-test setting — that diagnosis was wrong: it's
-   actually extreme seed-sensitivity (bimodal outcomes across random
-   seeds, confirmed via an 8-seed sweep), masked because every experiment
-   in this project used the same default seed. A CVaR control-variate
-   baseline (`PolicyTrainer`'s `use_bs_baseline`, math_spec.md section 6)
-   substantially reduces this variance (cross-seed CVaR₉₉ std 6.89 → 1.20)
-   and turns the canonical seed-0 checkpoint's CVaR₉₉ from 19.26 to 7.27 —
-   a real improvement, though still short of LSTM/GRU's ~5.0. **Closing
-   this gap further was explicitly considered and deferred, not forgotten**:
-   the same 8-seed-sweep methodology that resolved the seed-sensitivity
-   question would be needed to properly test combining `use_bs_baseline`
-   with `orthogonal_init` or a lower recurrent learning rate, but at this
-   project's observed per-step costs for `RecurrentHedgingAgent` +
-   `use_bs_baseline` (a single 25,000-step run took over 50 minutes for
-   only 14,000 steps before being stopped — see the TimeGAN saturation
-   investigation below), an 8-seed sweep at paper scale would take many
-   hours, well beyond a single session's compute budget. A reduced 2-4
-   seed version was considered and rejected: mechanism (a)'s batch-size
-   experiment worked at 2 seeds because the effect was a stark binary
-   (collapse / no collapse); a further variance *reduction* on top of
-   `use_bs_baseline` is a smaller, noisier effect that 2-4 seeds likely
-   can't distinguish from chance, matching this document's own repeated
-   finding that single-seed (and likely few-seed) conclusions here are
-   unreliable. Left for whenever a multi-hour budget is available.
+4. **~~Basic RNN's stress-test performance is improved but not fully closed
+   to LSTM/GRU's level~~ — resolved (deferred experiment run, negative
+   result; and the "gap" itself turned out to be stale).** The DC-dominance
+   input fix (Part I) closed the gap completely in Part I's frictionless
+   setting and for LSTM in the harder WGAN-GP stress-test setting (CVaR₉₉
+   18.37 → 5.02). Basic RNN was initially believed to have a separate,
+   deterministic architectural limitation in the stress-test setting — that
+   diagnosis was wrong: it's actually extreme seed-sensitivity (bimodal
+   outcomes across random seeds, confirmed via an 8-seed sweep), masked
+   because every experiment in this project used the same default seed. A
+   CVaR control-variate baseline (`PolicyTrainer`'s `use_bs_baseline`,
+   math_spec.md section 6) substantially reduces this variance (cross-seed
+   CVaR₉₉ std 6.89 → 1.20) and turns the canonical seed-0 checkpoint's
+   CVaR₉₉ from 19.26 to 7.27 — a real improvement at the time, before this
+   project's paper-scale rescaling. **The "still short of LSTM/GRU's ~5.0"
+   framing turned out to be stale**: that 8-seed sweep (and its 7.27/6.61
+   figures) predates the paper-scale retrain, and the checkpoint currently
+   on disk (paper-scale, `epochs: 25000`) was never re-measured against it
+   — directly re-measuring now gives CVaR₉₉ 2.575, matching the current
+   main table's 2.58, not 7.27; see [the
+   correction](#fixing-the-seed-sensitivity-a-cvar-control-variate-baseline)
+   for the full dating. Against the *current, verified* numbers, Basic RNN
+   (2.58) already beats both LSTM (3.49) and GRU (3.81) — there was no gap
+   left to close.
+   **The deferred `orthogonal_init` experiment was run anyway** (8 seeds,
+   full 25,000-step scale) once the compute budget allowed, and gives a
+   clean negative result: every one of the 8 new seeds does worse than the
+   current incumbent (CVaR₉₉ mean 3.62, best seed 2.73, vs. the incumbent's
+   2.58), and seed 0 newly shows 2/500,000 catastrophic paths where the
+   incumbent shows 0. No checkpoint was promoted. See [the full
+   writeup](#follow-up-use_bs_baseline--orthogonal_init-the-deferred-8-seed-experiment--a-negative-result).
 5. **Catastrophic tail risk in several trained policies — newly discovered
    at paper scale; mechanism (a) root-caused and fixed, mechanism (b) still
    open.** Rerunning the stress test at the paper's own 500,000-path scale
@@ -1709,14 +1788,25 @@ Roughly in priority order:
   fidelity only, not the downstream policy-training + stress-test
   pipeline. Running the ablation checkpoint through the same 4-policy
   retrain + stress test as attempt 3 would close this remaining gap.
-- Close the remaining gap between Basic RNN's `use_bs_baseline` result
-  (CVaR₉₉ 6.61 under the current P₀-inclusive convention) and LSTM/GRU's
-  (~4.4): try combining the baseline with
-  orthogonal init (not re-tested together since the input-scaling fix),
-  average over multiple seeds and pick the best rather than a single fixed
-  seed, or an entropy bonus per the paper's own future-work section
-  (untried; this project only adapted the actor-critic-baseline half of
-  the paper's two suggestions).
+- ~~Close the remaining gap between Basic RNN's `use_bs_baseline` result
+  and LSTM/GRU's~~ — **done, negative result, and the gap itself was
+  stale**: `orthogonal_init` combined with `use_bs_baseline`, tested at
+  full 8-seed/25,000-step scale, regresses every seed (best of 8: CVaR₉₉
+  2.73 vs. the incumbent's verified-current 2.58) — see [the
+  writeup](#follow-up-use_bs_baseline--orthogonal_init-the-deferred-8-seed-experiment--a-negative-result).
+  Separately, the "6.61 vs. LSTM/GRU's ~4.4" framing this bullet was
+  chasing turned out to be stale: that number predates this project's
+  paper-scale rescaling and was never re-verified against the checkpoint
+  later retrained at full scale (verified 2.58, already better than LSTM's
+  3.49 and GRU's 3.81) — see [the correction](#fixing-the-seed-sensitivity-a-cvar-control-variate-baseline).
+  Still
+  untried: averaging over multiple `use_bs_baseline`-alone seeds (no
+  `orthogonal_init`) and picking the best rather than a single fixed one —
+  not the same experiment as the negative result above, since every seed
+  in that sweep also had `orthogonal_init` applied and none beat the
+  current incumbent — or an entropy bonus per the paper's own future-work
+  section (untried; this project only adapted the actor-critic-baseline
+  half of the paper's two suggestions).
 - Apply the same 8-seed-sweep methodology used to catch Basic RNN's
   seed-sensitivity to every other single-seed claim in this document —
   it's the third time in this project a single-seed conclusion turned out
