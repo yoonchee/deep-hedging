@@ -786,14 +786,79 @@ checkpoint and reordered the whole remaining list before any retraining:
 - **α=0.99 (MLP): confirmed saturated**, even more severely than α=0.997 —
   logits as extreme as [-718, -684] at t=0, span exactly 0.0000 at every
   timestep checked. Retrained with the same fix; verified clean above.
-- **GRU (WGAN-GP): confirmed *not* saturated.** Delta span 1.0000 at every
-  timestep checked, logits in a moderate range ([-16, 21]) — indistinguishable
-  from the healthy calibration checkpoints. Its catastrophic tail (34/500,000
-  paths, worst loss -417.5) is a genuine, still-uncharacterized mechanism,
-  not this one. A `grad_clip_norm` retrain was *not* attempted here, since
-  the diagnostic gives no reason to expect it would help — this remains
-  open, and the GRU (WGAN-GP) row in the checkpoint scan table above is
-  unchanged.
+- **GRU (WGAN-GP): confirmed *not* saturated** by the spot-grid diagnostic
+  (delta span 1.0000, logits in a moderate [-16, 21] range) — but that only
+  ruled out mechanism (a); the actual mechanism was left "still
+  uncharacterized" at the time. A follow-up diagnosis pass (below) has since
+  characterized it directly, still without attempting a fix.
+
+#### Follow-up diagnosis: GRU (WGAN-GP) is a GRU-specific hidden-state recovery lag, not saturation
+
+Rather than leave GRU (WGAN-GP)'s 34/500,000 catastrophic paths (worst loss
+-417.5) as an unexplained residual, its own worst-loss paths from the
+500,000-path scan (seed=42) were pulled out directly and inspected, then the
+pattern found was tested with controlled synthetic probes:
+
+- **Every one of the 10 worst paths shares the same shape**: an early
+  downward move (log-moneyness dipping to roughly -0.4 to -2.0 within the
+  first ~10 steps) followed by a large rally (final log-moneyness +4.0 to
+  +5.3 — the call finishes deep in the money).
+- **This is not simply "extreme log-moneyness confuses the network."** A
+  smooth, monotonic ramp straight up to the same extreme levels (no
+  preceding down-move) reaches delta=1.0 correctly every time, including
+  under heavy added noise (tested up to amplitude 2.0 — more than double the
+  down-move that breaks the down-then-rally case). The down-move
+  specifically triggers the failure, not the eventual price level.
+- **A down-depth sweep** (down-move to a given log-moneyness, then a smooth
+  ramp to the same +4.87 target used by the actual worst path) shows a sharp
+  threshold: recovers to delta≈1.0 for a dip to -0.4, degrades to 0.83 at
+  -0.6, and collapses to 0.04 at -0.71 (the actual worst path's dip) and
+  below 0.001 for dips of -1.0 or deeper. Measured against 200,000 fresh
+  samples from the same WGAN-GP generator this checkpoint trained against,
+  -0.6 sits at that generator's own 0.77th percentile and -0.71 at its
+  0.35th percentile — pooled across all (path, timestep) observations, not
+  per-path minima, but still genuinely rare for this generator's own output,
+  not an artifact of the synthetic probe. (This threshold is specific to the
+  smooth-ramp construction used to measure it, not a general property of any
+  path reaching that depth.)
+- **This is architecture-specific, not shared by LSTM.** `hedging_agent_lstm.pt`
+  was checked against `hedging_agent_gru.pt`'s saved training args directly:
+  identical in every hyperparameter (seed=0, 25,000 steps, `rnn_hidden_dim`=64,
+  `rnn_num_layers`=2, `use_bs_baseline`=False, same generator checkpoint) except
+  `architecture` itself and the Monte Carlo premium estimate (0.06580 vs.
+  0.06578, noise-level difference) — and confirmed clean at 0 catastrophic
+  paths on this exact 500,000-path stress test. Run through the identical
+  down-depth sweep and the identical worst-path reproduction, LSTM recovers
+  to delta≈1.0 within 1-2 steps at every tested depth, including the -0.71
+  shock that collapses GRU to 0.04 for the remaining ~26 steps of the same
+  window, and even at -1.5 (deeper than any dip in the actual worst-path
+  scan). Same generator, same shock, same extremity relative to the shared
+  training distribution — only GRU fails to recover on this timescale. Note
+  LSTM still needs *some* downward move to see any effect at all (delta=1.0
+  immediately at down_depth=0.0), so this isn't "GRU's gating is simply
+  broken" — it's specifically the interaction between an out-of-distribution
+  downward shock and GRU's gating dynamics that LSTM's gating doesn't share.
+  (`hedging_agent_gru_timegan.pt` was not checked for the same signature —
+  if this is a general GRU gating property, it should show it too, but that
+  wasn't tested here.)
+- **The defect is recovery *lag*, not permanent pinning** — and not always
+  "delta stays near 0" at the end, either. 2 of the top-10 worst paths (idx
+  288684, 492971) show delta eventually recovering to 0.95-0.97 by the end
+  of the path, yet still lose -237.3 and -126.7. Because the price path is
+  exponential, the largest absolute price increments happen early in the
+  rally — exactly while delta is still catching up — so even a late,
+  near-complete recovery misses most of the hedge P&L. Extending the horizon
+  well past the paper's 30-step convention (60-90+ steps, an untrained
+  regime for this checkpoint) does eventually let delta climb back toward
+  1.0, confirming the hidden state isn't permanently stuck: the paper's
+  fixed 30-step horizon is simply too short for GRU's own recovery rate
+  after this kind of shock.
+- **No fix was attempted** — this was a diagnosis pass, not a fix pass, and
+  neither `grad_clip_norm` (mechanism (a)'s fix) nor `orthogonal_init` (Basic
+  RNN (TimeGAN)'s attempted, unsuccessful fix) has an obvious mechanism to
+  address a gating-dynamics recovery-rate problem, unlike either previous
+  case. The GRU (WGAN-GP) row in the checkpoint scan table above is
+  unchanged; still open.
 - **LSTM/GRU (TimeGAN): confirmed *not* saturated** (span 0.99-1.0, moderate
   logits) — this is the expected signature for mechanism (b) (generalizing
   badly to price extremes the training distribution never produced, not an
@@ -1327,6 +1392,19 @@ Roughly in priority order:
      *normal* transaction costs). See [Ideas for future
      work](#ideas-for-future-work) (adversarial/extreme-scenario
      augmentation for TimeGAN-driven training).
+   - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
+     rare downward shock** — since diagnosed (not just ruled out as
+     saturation): every one of its worst-loss paths is a rare early
+     downturn (below roughly the 1st percentile of its own training
+     generator's output) followed by a large rally, and the checkpoint's
+     hedge ratio takes far longer than the paper's 30-step horizon to
+     climb back up, missing most of the rally's P&L before it catches up.
+     Confirmed architecture-specific, not a property of the shock itself:
+     `LSTM` (WGAN-GP) — same generator, same shock, confirmed clean at
+     0/500,000 catastrophic paths — recovers within a single step where
+     GRU does not. See [the full
+     diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation).
+     No fix attempted; still open.
 6. **~~Scale~~ — resolved.** Training and evaluation now run at the
    paper's own scale throughout: Part I's 500,000 train/test scenarios and
    25,000 gradient steps (item 2 above), TimeGAN's Table 2 batch size (178)
@@ -1448,9 +1526,19 @@ Roughly in priority order:
     checked rather than assumed**: α=0.99 confirmed the same mechanism (even
     more severely saturated) and is now fixed the same way, verified clean
     at 500,000 paths. GRU (WGAN-GP) confirmed **not** the same mechanism
-    (healthy delta span on the same diagnostic) — still open, and now known
-    to need a different explanation, not just an untried fix. See
+    (healthy delta span on the same diagnostic) — see
     [Extending the fix](#extending-the-fix-alpha099-confirmed-same-mechanism-gruwgan-gp-and-basic-rnntimegan-confirmed-different-ones).
+    **GRU (WGAN-GP) is now characterized, not just ruled out**: a
+    GRU-specific hidden-state recovery lag after a rare (~1st-percentile)
+    downward shock, confirmed not shared by LSTM under an identical shock —
+    see the [full diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation).
+    Still open (no fix attempted); candidates not yet tried: a lower peak
+    learning rate or LR warmup for the recurrent weights (the same
+    growth-during-training hypothesis floated for Basic RNN (TimeGAN)
+    below), or training against price paths that include this kind of rare
+    down-then-rally excursion (the WGAN-GP generator's own output only
+    reaches this depth at its ~1st percentile — see the diagnosis for the
+    measured figure).
   - For TimeGAN-driven RNN/LSTM/GRU's generalization failure: training-time
     exposure to more extreme price excursions — either by widening the
     regime-switching stress scenario into the training distribution
