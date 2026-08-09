@@ -1359,28 +1359,136 @@ scale.
   unusual — it's exactly the kind of single-anecdote result the aggregate
   scan above was built to guard against. Whether the augmented GRU's
   recovery rate on the *same* real-path population is lower than pre-fix
-  GRU's 64.6%, and if so why, was not measured — the smooth-ramp threshold
-  sweep (above) shows the augmented GRU's post-cliff behavior is markedly
-  less monotonic than LSTM's (final delta at ramp target +5.0 jumps back up
-  to 0.91 after being ≈0 at every neighboring target), consistent with
-  GRU's collapse being harder to characterize with any single scalar
-  threshold, pre- or post-fix. **This remains open and unexplained beyond
-  that characterization.**
-- **Not promoted; no further compute spent chasing variants.** LSTM's gain
-  is small and single-seed; GRU regressed on the primary tail metrics. This
-  document has already established elsewhere (the Basic RNN 8-seed
-  experiment) that single-seed conclusions in this codebase are unreliable
-  in both directions — that cuts against treating GRU's regression as
-  definitively real *and* against treating LSTM's gain as definitively
-  real. Both augmented checkpoints remain out-of-tree
+  GRU's 64.6%, and if so why, was not measured at the time — **now measured,
+  see the follow-up section immediately below: it is lower, confirming the
+  regression rather than leaving it ambiguous.**
+- **Not promoted.** LSTM's gain is small and single-seed; GRU regressed on
+  the primary tail metrics, and the follow-up below confirms this
+  regression directly on real paths rather than leaving it as an aggregate-
+  metric inference. Both augmented checkpoints remain out-of-tree
   (`timegan_augment/{lstm,gru}_timegan_scale3.pt`, not copied into
-  `checkpoints/`). A larger or different `output_scale`, or a multi-seed
-  retrain, might resolve the ambiguity, but that's more hours of compute to
-  interpret with a diagnostic already shown here to be an unreliable proxy
-  for aggregate tail-metric improvement, even when it correctly predicts
-  the threshold shift it was designed to move — not a good next spend
-  without a better diagnostic for GRU's non-monotonic post-cliff behavior
-  first.
+  `checkpoints/`).
+
+#### Follow-up: measuring the augmented GRU's real-path collapse rate directly — confirms the regression, and explains its mechanism
+
+The question left open above — does the augmented GRU actually recover less
+often on real paths, not just score worse on aggregate CVaR — was measured
+directly, on the same 500,000-path population (seed=42) and the same
+"final log-moneyness > 0.5" subsample construction used for the original
+64.6%/97.0% real-path figures:
+
+- **The augmented GRU collapses more often, not less.** Among 2,000 sampled
+  real paths ending past log-moneyness 0.5: pre-fix GRU's end-of-path
+  collapse rate (delta_final < 0.1) is **66.3%** (consistent with the
+  64.6% reported above; the ~2-point difference is subsample-draw noise,
+  not a discrepancy — this run fixed a subsample seed the original script
+  didn't). The `output_scale=3.0` checkpoint's rate is **86.8%** — worse by
+  20.5 points, not better. The fraction of paths that *ever* dip below
+  delta 0.1 at some point rises too (80.6% → 96.9%), and the fraction that
+  recover to delta > 0.5 given they dipped *falls* (6.5% → 4.1%). This
+  directly settles the open question: widening the generator's training
+  distribution made GRU's real-path behavior measurably worse, not just its
+  aggregate CVaR table.
+- **A finer ramp sweep (targets 0.05 → 8.0, the real stress test's actual
+  extreme range) explains why.** Pre-fix GRU collapses sharply at its
+  cliff (~0.13) but then settles into a **stable partial-hedge basin** for
+  everything beyond it — delta ≈0.17-0.39 across targets 3.0-8.0, not
+  correct, but not fully dead either, and this basin is what keeps its
+  real-path collapse rate at "only" 66% rather than higher. The
+  `output_scale=3.0` checkpoint pushes its cliff outward to ~0.30-0.40 as
+  designed (delta 0.85-1.00 through target 0.20, matching the 3x-shift
+  claim already on record above), but **loses the recovery basin instead
+  of moving it**: from target 0.40 to 8.0 delta is pinned near 0.00 almost
+  everywhere, punctuated by two narrow, unstable spikes (0.606 and 0.915 at
+  targets exactly 4.0 and 5.0) with near-total collapse on either side —
+  not a basin, closer to two accidental non-monotonic bumps in an otherwise
+  dead extrapolated function. Widening the training distribution improved
+  the *interpolated* region (correctly extended high delta out to ~0.2-0.3)
+  but made the *extrapolated* region — where the real stress test's worst
+  paths actually live — behave worse, not better. This reframes the
+  earlier "non-monotonic post-cliff behavior... remains open and
+  unexplained" note: it isn't unexplained anymore, and it isn't specific to
+  this one scale factor — the mechanism (a bounded generator produces a
+  policy with no principled behavior once its input leaves *any* bounded
+  training range, however wide) predicts that a larger `output_scale` would
+  just relocate the same problem further out, not remove it. This is why
+  the fix attempted next targets the input transform directly instead of
+  widening training data again.
+
+#### Fix attempt: clipping the RNN's log-moneyness input at the training boundary — free (no retraining), works for GRU, does not work for LSTM
+
+The recovery-basin finding above suggests a specific alternative to
+widening training data: if the RNN only behaves correctly on inputs it saw
+during training, and any *finite* widening just relocates the same edge
+further out, then instead of trying to cover an unbounded input range with
+bounded training data, clip the input itself so out-of-range prices always
+present an in-range value. `RecurrentHedgingAgent.moneyness_scale`'s log-
+moneyness transform already reduces price to a single scalar per step
+(`math_spec.md`); clamping that scalar to `[-0.15, 0.10]` — just inside
+TimeGAN's own measured training boundary (-0.173/+0.133), tightened to stay
+inside the range independently confirmed clean (delta > 0.98 up to
+≈0.093) — before it reaches the recurrent cell means an arbitrarily extreme
+real price looks identical, at the input layer, to a value the network
+already handles correctly. This needs no retraining: it's a forward-pass
+wrapper around the existing production checkpoint's weights.
+
+Tested on both `hedging_agent_lstm_timegan.pt` and
+`hedging_agent_gru_timegan.pt` (production checkpoints, unmodified), single
+seed, no code changes to the checkpoints themselves — the clip was applied
+in a wrapper `forward()` that clamps `log(S_t/K) / moneyness_scale` before
+the `self.rnn(...)` call, otherwise identical:
+
+| Metric | GRU unclipped | GRU clipped (-0.15, 0.10) | LSTM unclipped | LSTM clipped |
+|---|---|---|---|---|
+| worst_loss | -6033.30 | **-4481.16** (+25.7%) | -6202.41 | -6202.31 (~0%) |
+| below −50 (count) | 578 | **456** (+21.1%) | 793 | 789 (~0%) |
+| CVaR95 | 8.212 | 8.201 (~flat) | 10.860 | 10.725 (~1%) |
+| CVaR99 | 31.979 | **28.422** (+11.1%) | 42.139 | 41.945 (~0.5%) |
+| mean wealth | -0.0299 | -0.0484 (worse) | -0.0398 | -0.0410 (worse) |
+| real-path collapse rate (final lm > 0.5) | 66.3% | **43.4%** | 97.5% | 96.8% |
+
+- **GRU improves substantially and for free**: worst_loss, below_-50, and
+  CVaR99 all improve 11-26% with zero retraining cost, and the real-path
+  collapse rate among extreme-moneyness paths drops from 66.3% to 43.4%
+  (mean delta on those paths 0.19 → 0.44). The ramp sweep shows why: clipped
+  delta now stays 0.98-1.00 through target 2.0 (fully correct, vs. collapsed
+  unclipped), directly confirming the interpolation-vs-extrapolation
+  reframing above. Mean wealth is slightly worse (-0.0299 → -0.0484, likely
+  a transaction-cost effect from the clipped policy still adjusting its
+  hedge on price moves it can no longer distinguish once clipped — not
+  investigated further here), a small cost against a much larger CVaR gain.
+- **LSTM is essentially unaffected** (all metrics within ~1% either way).
+  Consistent with this document's existing finding that LSTM collapses
+  near-deterministically (97.5%) versus GRU's more history/path-dependent
+  66.3% — LSTM's failure isn't primarily an input-level extrapolation
+  problem the way GRU's partially is, so clamping the input doesn't reach
+  it. What *does* explain LSTM's failure is still open.
+- **The clip itself isn't complete even for GRU**: the same ramp sweep that
+  shows the fix working through target 2.0 also shows a *new* degradation
+  further out — clipped delta falls back to ≈0.067 at targets 4.0-8.0,
+  actually below the unclipped checkpoint's 0.17-0.21 there. Holding the
+  input pinned at exactly the clip bound for many consecutive steps (as the
+  ramp construction does) is itself a path shape the checkpoint never saw
+  in training — TimeGAN's real training paths are noisy, not flat — so this
+  isn't evidence the clipping idea is wrong, but it does mean the current
+  clip bound trades one out-of-distribution failure mode for a narrower
+  one, rather than eliminating the category. Not investigated further here.
+- **Not yet tried**: training a checkpoint with the clip active from the
+  start (rather than wrapping an already-trained checkpoint at inference
+  time only), which would let the network's own weights adapt to the
+  clipped-and-possibly-repeated input distribution instead of encountering
+  it only at test time; a systematic sweep over the clip bound (only
+  `(-0.15, 0.10)` was tried, chosen from the already-measured training
+  boundary rather than from any search); and multi-seed validation, since
+  this is a single checkpoint pair, same caveat as everywhere else in this
+  document. **Not promoted to production** — this is a promising, free
+  result for GRU specifically, but "promoted" in this document has meant
+  copying a checkpoint into `checkpoints/`, regenerating every affected
+  table, and updating `tests/test_tail_risk.py`; this finding hasn't gone
+  through that protocol yet, pending a decision on whether to build the
+  clip into `RecurrentHedgingAgent` properly (a CLI-exposed parameter,
+  applied during training too) rather than ship it as an inference-only
+  wrapper.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -1837,7 +1945,27 @@ Roughly in priority order:
      below_-50/CVaR95/CVaR99 despite improving worst_loss/skew/kurtosis. Not
      promoted. See [the fix-attempt
      writeup](#fix-attempt-widening-timegans-own-training-distribution-output_scale--mixed-not-promoted).
-     Still open.
+     **Follow-up: the GRU regression is confirmed directly on real paths, not
+     just aggregate CVaR** (collapse rate among real extreme-moneyness paths
+     66.3% pre-fix → 86.8% post-`output_scale`), and a ramp sweep shows why:
+     widening training data extended pre-fix GRU's correct region but
+     destroyed its accidental partial-hedge recovery basin at the far tail,
+     trading a broader dead zone for a narrower one rather than shrinking it
+     — see [the follow-up
+     measurement](#follow-up-measuring-the-augmented-grus-real-path-collapse-rate-directly--confirms-the-regression-and-explains-its-mechanism).
+     **A second, different fix attempt — clipping the RNN's log-moneyness
+     input at the training boundary, no retraining required — works for
+     GRU** (worst_loss/below_-50/CVaR99 improve 11-26%, real-path collapse
+     rate 66.3% → 43.4%) **but not for LSTM** (~1% either way, consistent
+     with LSTM's failure being closer to deterministic/history-independent
+     than GRU's). Not yet promoted (single seed, clip bound not swept, and
+     the clip itself still degrades at very extreme targets 4.0-8.0 where
+     the checkpoint sees a path shape — many consecutive identical clipped
+     readings — it never saw in training). See [the fix-attempt
+     writeup](#fix-attempt-clipping-the-rnns-log-moneyness-input-at-the-training-boundary--free-no-retraining-works-for-gru-does-not-work-for-lstm).
+     GRU is now a substantially narrower, better-characterized problem than
+     LSTM within mechanism (b); LSTM's failure mechanism remains unexplained
+     beyond "near-deterministic collapse past the training boundary."
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -2034,11 +2162,32 @@ Roughly in priority order:
     moved the smooth-ramp cliff outward 3x for both architectures as
     designed, but at full stress-test scale only LSTM improved (modestly,
     single seed), while GRU regressed on below_-50/CVaR95/CVaR99. Not
-    promoted; still open. A remaining, unexplored idea from the diagnosis
-    that this fix didn't try: an adversarial/extreme-scenario data
-    augmentation step targeted at GRU's specific non-monotonic, less
-    threshold-like post-cliff behavior, rather than a uniform distributional
-    widening. **Basic RNN (TimeGAN)
+    promoted. **The GRU regression was then confirmed directly on real
+    paths** (collapse rate 66.3% → 86.8%) and root-caused via a ramp sweep:
+    widening the generator relocates the training-distribution boundary but
+    doesn't remove the underlying problem (no principled behavior once the
+    input leaves *any* finite training range), so it traded pre-fix GRU's
+    broad, shallow partial-hedge recovery basin at extreme moneyness for a
+    narrower one with two unstable spikes instead of a basin — see the
+    [follow-up
+    measurement](#follow-up-measuring-the-augmented-grus-real-path-collapse-rate-directly--confirms-the-regression-and-explains-its-mechanism).
+    **A different fix — clipping the RNN's log-moneyness input at the
+    training boundary instead of widening the training data — was tried
+    next and works for GRU without any retraining** (worst_loss/below_-50/
+    CVaR99 improve 11-26%, real-path collapse rate 66.3% → 43.4%), **but not
+    for LSTM** (~1% either way): see the [clipping fix-attempt
+    writeup](#fix-attempt-clipping-the-rnns-log-moneyness-input-at-the-training-boundary--free-no-retraining-works-for-gru-does-not-work-for-lstm).
+    Not yet promoted — single seed, clip bound not swept, and the clip
+    itself degrades again at very extreme targets (4.0-8.0) where the
+    checkpoint faces a many-consecutive-identical-readings path shape it
+    never saw in training. Remaining unexplored ideas: training with the
+    clip active from the start rather than only at inference time; a
+    systematic clip-bound sweep; and LSTM's failure, which the clipping
+    result suggests is a genuinely different (and still unexplained)
+    mechanism from GRU's, not the same problem at a different severity. An
+    adversarial/extreme-scenario data augmentation step targeted at GRU's
+    non-monotonic post-cliff behavior specifically (rather than a uniform
+    distributional widening) remains untried. **Basic RNN (TimeGAN)
     specifically is a narrower, better-characterized sub-problem**: its
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
     regardless of input — confirmed via direct inspection, and confirmed
