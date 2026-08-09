@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from backtester.evaluate import scan_checkpoint_tail_risk, tail_risk_summary
+from backtester.evaluate import _load_policy_checkpoint, scan_checkpoint_tail_risk, tail_risk_summary
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
 
@@ -57,7 +57,11 @@ _SCAN_SEED = 42
 # --grad-clip-norm default is still None, so `--architecture gru` with no
 # extra flags reproduces the *pre-fix*, more-catastrophic checkpoint, not
 # the one currently at checkpoints/hedging_agent_gru.pt. Pass
-# --grad-clip-norm 1.0 explicitly to reproduce the promoted one.
+# --grad-clip-norm 1.0 explicitly to reproduce the promoted one. Same trap
+# for GRU (TimeGAN): `--architecture gru --generator-type timegan` with no
+# extra flags reproduces the *pre-fix* checkpoint (preserved as
+# checkpoints/hedging_agent_gru_timegan.pt.bak-pre-moneyness-clip-fix), not
+# the promoted one -- pass `--moneyness-clip -0.15 0.10` explicitly.
 _KNOWN_GOOD_CHECKPOINTS = [
     "MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)", "MLP (alpha=0.99)",
 ]
@@ -236,3 +240,20 @@ def test_gru_timegan_checkpoint_substantially_improved_but_not_fully_clean(tail_
     # accidentally overwritten with a clip=None retrain.
     assert summary["below_-50_count"] > 0
     assert summary["below_-50_fraction"] < 0.003  # pre-fix was ~0.0016 at this scale; loose margin
+
+
+@pytest.mark.skipif(
+    not (CHECKPOINT_DIR / "hedging_agent_gru_timegan.pt").exists(),
+    reason="checkpoints/hedging_agent_gru_timegan.pt not found (gitignored; train locally first)",
+)
+def test_gru_timegan_checkpoint_loads_with_moneyness_clip_active() -> None:
+    # The tail-risk bound above (below_-50_fraction < 0.003) can't tell a
+    # correctly-clipped checkpoint apart from one where moneyness_clip
+    # silently failed to round-trip through _load_policy_checkpoint's
+    # saved-args reconstruction -- both the pre-fix and promoted checkpoints
+    # pass that bound at this file's 50,000-path scan scale (fractions
+    # ~0.0012 vs ~0.0008, both well under 0.003). This test covers the one
+    # thing that bound can't: that the promoted checkpoint's args actually
+    # carry the clip through to the reconstructed RecurrentHedgingAgent.
+    policy, _, _ = _load_policy_checkpoint(CHECKPOINT_DIR / "hedging_agent_gru_timegan.pt")
+    assert policy.moneyness_clip == (-0.15, 0.10)

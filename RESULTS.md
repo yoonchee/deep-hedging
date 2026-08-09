@@ -1537,6 +1537,22 @@ test time the way the wrapper experiment above did.
   clip boundary repeated across many consecutive steps, at least often
   enough to settle on one answer for it, even if that answer isn't the
   financially correct one.
+- **Checked, not assumed: the gain isn't just "trades less."** Mean
+  transaction cost drops alongside the CVaR gain (0.0111 → 0.0082), which is
+  exactly the confound this document has flagged before — a policy that
+  trades less can look better on CVaR while actually just paying less to
+  hedge worse (the retrospective read on attempts 1-3's "beats
+  Black-Scholes" TimeGAN checkpoints above, and the pattern Basic RNN's
+  transaction-cost signature has shown repeatedly). Re-ran both checkpoints
+  at `proportional_fee=0.0` (same seed=42 paths, same premium construction)
+  to isolate this: the trained-with-clip checkpoint's advantage barely
+  moves — CVaR95 8.187 → 5.993, CVaR99 31.937 → 25.480, below_-50 577 → 400,
+  all within noise of the with-fee numbers above. The gain survives zeroing
+  out the one channel that could have explained it away, so it's a genuine
+  reduction in hedging-driven tail risk, not a cost-cutting artifact. (Mean
+  wealth is still worse for the trained-with-clip checkpoint even at zero
+  fees, -0.0188 vs. -0.0330 — a real, separate trade-off, not resolved by
+  this check and not investigated further here.)
 - **Promoted.** `checkpoints/hedging_agent_gru_timegan.pt` is now this
   `moneyness_clip=(-0.15, 0.10)` checkpoint (pre-fix version preserved as
   `hedging_agent_gru_timegan.pt.bak-pre-moneyness-clip-fix`); the
