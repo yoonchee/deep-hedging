@@ -2666,13 +2666,62 @@ Roughly in priority order:
   fresh checkpoints at attempt 1/2's exact settings (sigmoid or tanh latent,
   no diversity loss, old hyperparameters) and rerunning them through the
   current 500,000-path stress test would settle it.
-- Investigate the alpha-sweep's puzzling α=0.995 dip: sandwiched between
-  α=0.99 (elevated CVaR₉₉, thickened tail) and α=0.997 (catastrophic,
-  confirmed degenerate), α=0.995 trained cleanly (CVaR₉₉ 3.54,
-  indistinguishable from α≤0.95) despite having only **5** tail
-  samples/step at batch=1000 — *fewer* than α=0.99's 10, not more.
-  Tail-sample count alone doesn't order these three outcomes. Whether this
-  is the sparse-gradient mechanism being probabilistic rather than a hard
-  threshold, or genuine seed luck (a single training run per α, same
-  caveat as everywhere else in this document), is unresolved; a
-  multi-seed sweep at α ∈ {0.99, 0.995, 0.997} would tell them apart.
+- ~~Investigate the alpha-sweep's puzzling α=0.995 dip~~ — **done: severity
+  trends with α, but the clean/elevated split at a given α is seed-driven,
+  not α-driven — the single-seed table's ordering doesn't generalize.** The
+  single-seed table's picture (α=0.99 elevated, α=0.995 clean, α=0.997
+  catastrophic) used seed 0 for every α; a 4-seed sweep (seeds 0-3,
+  unclipped MLP/WGAN-GP, otherwise identical settings, stress-tested the
+  same way as every other tail-risk scan in this document — 500,000
+  regime-switching paths, seed=42, `<-50`/`<-10` path counts) shows that
+  ordering doesn't hold seed-to-seed:
+
+  | α | seed 0 | seed 1 | seed 2 | seed 3 |
+  |---|---|---|---|---|
+  | 0.99 | worst −49.1, 5275 `<-10` | worst −42.5, 2919 `<-10` | worst −29.3, 639 `<-10` | worst −10.2, 1 `<-10` (clean) |
+  | 0.995 | worst −10.2, 1 `<-10` (clean) | worst −48.9, **5544** `<-10` | worst −10.1, 1 `<-10` (clean) | worst −9.7, 0 `<-10` (clean) |
+  | 0.997 | worst **−6202**, **814** `<-50` (catastrophic) | worst −49.2, 2935 `<-10` | worst −59.1, 4 `<-50` | worst −34.1, 2709 `<-10` |
+
+  **Reproduction anchor**: α=0.997 seed 0 in this sweep is bit-for-bit
+  identical to the previously-documented, since-fixed pre-`grad_clip_norm`
+  checkpoint (`hedging_agent_mlp_alpha0_997.pt.bak-pre-gradclip-fix`) —
+  same worst_loss (−6202.48), same 814-path `<-50` count, and the same
+  CVaR₉₅/CVaR₉₉/skew/kurtosis (11.76 / 43.15 / −248.9 / 80,781) already in
+  this document — confirming this sweep's harness and the original scan
+  agree exactly, not just approximately. α=0.99 seed 0 and α=0.995 seed 0
+  likewise reproduce the original single-seed "elevated" vs. "clean"
+  finding, so the other seeds' disagreement is informative, not a
+  methodology artifact.
+
+  **The actual pattern**: `below_-50 > 0` (catastrophic) appears only at
+  α=0.997 — but even there the two occurrences aren't the same severity:
+  seed 0 is a clear repeat of mechanism (a)'s dead-policy signature (worst
+  −6202, 814 paths, matching the documented −250-logit sigmoid-underflow
+  case exactly), while seed 2 is marginal (worst −59.1, just 4 paths past
+  the −50 line) — a quick pre-activation-logit probe on seed 2 didn't
+  cleanly replicate seed 0's saturation pattern, so seed 2 is reported here
+  as "marginal," not claimed as the same failure. Even reading it
+  conservatively as 1-of-4 clearly catastrophic rather than 2-of-4,
+  catastrophic outcomes are exclusive to α=0.997, consistent with CVaR's
+  `1/(1-α)` loss amplification making the underlying sparse-gradient
+  instability worse as α climbs. But **the clean/elevated split within a
+  single α is seed-driven, not α-driven**: α=0.995 seed 1 (5,544 paths
+  `<-10`) is worse than three of the four α=0.99 seeds and worse than two
+  of the four α=0.997 seeds; α=0.99 seed 3 (1 path `<-10`) is exactly as
+  clean as the cleanest α=0.995 seeds. The original table's "α=0.995
+  trained cleanly" was true of seed 0 specifically, not of α=0.995 as a
+  risk level — a different seed at the same α would have looked exactly as
+  elevated as α=0.99.
+
+  **This has a live production consequence.** α=0.99 and α=0.997's
+  checkpoints were already retrained with `grad_clip_norm=1.0` and
+  promoted (mechanism (a) above); α=0.995's was not —
+  `hedging_agent_mlp_alpha0_995.pt` is still the original unclipped seed-0
+  run, kept on the strength of a single training run this sweep now shows
+  isn't representative (its own seed 1 would have shipped a checkpoint with
+  5,544 stress-test paths losing more than 10x the premium). It hasn't been
+  retrained here — this sweep's checkpoints are diagnostic scratch runs,
+  not a promotion — but the case for giving α=0.995 the same
+  `grad_clip_norm=1.0` treatment as its two neighbors is now direct
+  evidence, not speculation, and should be the first thing whoever revisits
+  this does.
