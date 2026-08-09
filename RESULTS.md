@@ -1625,8 +1625,12 @@ training-free direct-inspection methodology used for GRU (WGAN-GP)'s
 recovery-lag diagnosis and Basic RNN (TimeGAN)'s hidden-state saturation.
 `nn.LSTM` doesn't expose per-step cell state or gate values through its
 normal `forward()`, so a manual step-by-step unroll of the same trained
-weights was used instead (verified to match `nn.LSTM`'s actual output to
-1e-6 before trusting it for diagnosis).
+weights was used instead — `common/lstm_introspection.py::unroll_lstm_with_gates`,
+committed (not left in a scratch script) since every claim in this
+subsection depends on it, with `tests/test_common_lstm_introspection.py`
+checking it reproduces `nn.LSTM`'s real forward pass to 1e-6 at both 1 and
+2 layers, so this diagnosis stays reproducible from the repo rather than
+resting on an ephemeral session artifact.
 
 - **The earlier "moderate logits, not saturated" finding was checking the
   wrong signal.** The top recurrent layer's hidden state `h_t` (bounded

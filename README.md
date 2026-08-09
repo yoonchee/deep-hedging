@@ -57,6 +57,7 @@ src/
   common/
     stats.py                   Shared skewness/excess-kurtosis/terminal-log-return helpers (tensor + float)
     black_scholes.py           Analytic Black-Scholes call delta + price (delta used as a CVaR control-variate baseline; price used as Part I's P0 premium)
+    lstm_introspection.py      Manual LSTM unroll exposing per-step cell state/gates nn.LSTM.forward() doesn't return; backs RESULTS.md's mechanism (b) diagnosis
   generator/
     market_gan.py             WGAN-GP Generator (GRU) + Discriminator (LSTM), single-feature
     timegan.py                TimeGAN: Embedder/Recovery/Generator/Supervisor/Discriminator, multi-feature
