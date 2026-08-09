@@ -346,6 +346,51 @@ def test_recurrent_agent_rnn_input_is_standardized_log_moneyness() -> None:
     assert torch.allclose(captured["rnn_input"], expected, atol=1e-6)
 
 
+def test_recurrent_agent_moneyness_clip_defaults_to_noop() -> None:
+    torch.manual_seed(0)
+    agent_unclipped = RecurrentHedgingAgent(cell_type="gru", hidden_dim=8, num_layers=1, strike=1.0)
+    agent_default = RecurrentHedgingAgent(
+        cell_type="gru", hidden_dim=8, num_layers=1, strike=1.0, moneyness_clip=None
+    )
+    agent_default.load_state_dict(agent_unclipped.state_dict())
+
+    prices = torch.tensor([[[0.5], [1.0], [2.0], [8.0]]])  # extreme moneyness, well past any plausible clip
+    assert torch.allclose(agent_unclipped(prices), agent_default(prices))
+
+
+def test_recurrent_agent_moneyness_clip_bounds_rnn_input() -> None:
+    # Regression test for the RESULTS.md mechanism (b) input-clipping fix: an
+    # arbitrarily extreme price must present the recurrent cell with the same
+    # clamped value, not an unbounded one, so a network trained only on a
+    # bounded generator's output never sees an input outside what it was
+    # trained on.
+    strike, implied_vol, time_to_maturity = 1.0, 0.2, 1.0
+    lo, hi = -0.15, 0.10
+    agent = RecurrentHedgingAgent(
+        cell_type="gru", hidden_dim=8, num_layers=1, strike=strike,
+        implied_vol=implied_vol, time_to_maturity=time_to_maturity,
+        moneyness_clip=(lo, hi),
+    )
+
+    captured = {}
+
+    def hook(module, args):
+        captured["rnn_input"] = args[0]
+
+    agent.rnn.register_forward_pre_hook(hook)
+
+    # log-moneyness well outside [lo, hi] on both sides, plus one inside it
+    prices = torch.tensor([[[1e-6], [1.0], [1e6], [1.05]]])  # [1, 4, 1]
+    agent(prices)
+
+    assert torch.all(captured["rnn_input"] >= lo - 1e-6)
+    assert torch.all(captured["rnn_input"] <= hi + 1e-6)
+    # the extreme low/high inputs should sit exactly at the clip bounds, not
+    # merely somewhere inside them
+    assert torch.isclose(captured["rnn_input"][0, 0, 0], torch.tensor(lo), atol=1e-5)
+    assert torch.isclose(captured["rnn_input"][0, 2, 0], torch.tensor(hi), atol=1e-5)
+
+
 def test_recurrent_agent_moneyness_input_is_order_one_scale_for_realistic_params() -> None:
     # The regression this fix targets: raw S/K for Part I's params (S0=K=100,
     # vol=0.15, T=1/12) has std ~0.03 (measured directly on real GBM paths --

@@ -13,7 +13,7 @@ Two families:
 """
 
 import math
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, List, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -145,6 +145,22 @@ class RecurrentHedgingAgent(nn.Module):
             "callers (e.g. shape/gradient tests) that don't care about "
             "matching a specific market scenario.",
         ] = 1.0,
+        moneyness_clip: Annotated[
+            Optional[Tuple[float, float]],
+            "(lo, hi) bounds clamped onto the standardized log-moneyness input "
+            "before it reaches the recurrent cell. None (default) is a no-op. "
+            "Motivation: a bounded generator's training data only ever covers "
+            "a finite input range, and this network has no principled behavior "
+            "once its input leaves that range (see RESULTS.md mechanism (b)) "
+            "-- widening the generator's training distribution just relocates "
+            "that edge rather than removing it. Clamping the input instead "
+            "means an arbitrarily extreme real price presents the same "
+            "in-range value the network was actually trained on. Set to just "
+            "inside the generator's own measured training boundary. Applied "
+            "during training too (not just at inference) so the network's "
+            "weights adapt to the clipped distribution rather than encounter "
+            "it only at test time.",
+        ] = None,
     ) -> None:
         super().__init__()
         if cell_type not in self.CELL_TYPES:
@@ -158,6 +174,7 @@ class RecurrentHedgingAgent(nn.Module):
         self.implied_vol = implied_vol
         self.time_to_maturity = time_to_maturity
         self.moneyness_scale = implied_vol * math.sqrt(time_to_maturity)
+        self.moneyness_clip = moneyness_clip
 
         rnn_cls = self.CELL_TYPES[cell_type]
         self.rnn = rnn_cls(
@@ -199,6 +216,13 @@ class RecurrentHedgingAgent(nn.Module):
         # [Batch, Time_Steps - 1, 1] -> [Batch, Time_Steps - 1, 1] (standardized
         # log-moneyness: log(S_t/K) / (implied_vol * sqrt(T)), O(1)-scaled)
         inputs = torch.log(inputs / self.strike) / self.moneyness_scale
+
+        # [Batch, Time_Steps - 1, 1] -> [Batch, Time_Steps - 1, 1] (clamp to the
+        # generator's own training-distribution boundary, if configured -- see
+        # moneyness_clip docstring)
+        if self.moneyness_clip is not None:
+            lo, hi = self.moneyness_clip
+            inputs = inputs.clamp(min=lo, max=hi)
 
         # [Batch, Time_Steps - 1, 1] -> [Batch, Time_Steps - 1, hidden_dim]
         hidden_states, _ = self.rnn(inputs)

@@ -609,6 +609,7 @@ def _load_policy_checkpoint(
         )
         sequence_policy = False
     else:
+        moneyness_clip = policy_args.get("moneyness_clip")
         policy = RecurrentHedgingAgent(
             cell_type=architecture,
             hidden_dim=policy_args["rnn_hidden_dim"],
@@ -616,6 +617,7 @@ def _load_policy_checkpoint(
             strike=policy_args["strike"],
             implied_vol=policy_args["implied_vol"],
             time_to_maturity=policy_args["dt"] * (policy_args["seq_len"] - 1),
+            moneyness_clip=tuple(moneyness_clip) if moneyness_clip else None,
         )
         sequence_policy = True
 

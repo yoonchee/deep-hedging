@@ -562,7 +562,7 @@ never printed side by side:
 | MLP (TimeGAN) | 0 / 500,000 | 0 | ≤ -8.8 | normal |
 | **Basic RNN (TimeGAN)** | 238 / 500,000 (0.048%) | 1,849 | -2564.7 | normal (0.0018) |
 | **LSTM (TimeGAN)** | 793 / 500,000 (0.16%) | 4,754 | **-6202.4** | normal (0.0093) |
-| **GRU (TimeGAN)** | 578 / 500,000 (0.12%) | 3,608 | -6033.3 | normal (0.0111) |
+| ~~**GRU (TimeGAN)**~~ **GRU (TimeGAN) — substantially improved on aggregate tail metrics, not on its single worst path** | ~~578~~ **402** / 500,000 (~~0.12%~~ 0.08%) | ~~3,608~~ **2,327** | -6033.3 → **-6199.8** (not improved — see writeup) | normal (~~0.0111~~ **0.0082**) |
 
 α=0.99's "0 / 500,000" at the -50 threshold looks clean at a glance —
 its 5,452-path count at the -10 threshold (vs. 3-5 for every clean
@@ -1477,18 +1477,85 @@ the `self.rnn(...)` call, otherwise identical:
   start (rather than wrapping an already-trained checkpoint at inference
   time only), which would let the network's own weights adapt to the
   clipped-and-possibly-repeated input distribution instead of encountering
-  it only at test time; a systematic sweep over the clip bound (only
-  `(-0.15, 0.10)` was tried, chosen from the already-measured training
-  boundary rather than from any search); and multi-seed validation, since
-  this is a single checkpoint pair, same caveat as everywhere else in this
-  document. **Not promoted to production** — this is a promising, free
-  result for GRU specifically, but "promoted" in this document has meant
-  copying a checkpoint into `checkpoints/`, regenerating every affected
-  table, and updating `tests/test_tail_risk.py`; this finding hasn't gone
-  through that protocol yet, pending a decision on whether to build the
-  clip into `RecurrentHedgingAgent` properly (a CLI-exposed parameter,
-  applied during training too) rather than ship it as an inference-only
-  wrapper.
+  it only at test time — **done, see the follow-up immediately below**; a
+  systematic sweep over the clip bound (still only `(-0.15, 0.10)` was
+  tried, chosen from the already-measured training boundary rather than
+  from any search); and multi-seed validation, since this is still a
+  single checkpoint pair, same caveat as everywhere else in this document.
+
+#### Follow-up: training with the clip active from the start closes more of the gap than the inference-only wrapper did
+
+`RecurrentHedgingAgent` gained a `moneyness_clip: Optional[Tuple[float, float]]`
+constructor parameter (default `None`, a no-op — every existing checkpoint's
+behavior is reproduced exactly) that clamps the standardized log-moneyness
+input before it reaches `self.rnn`, wired to `train_policy.py` as
+`--moneyness-clip LO HI`. GRU (TimeGAN) was retrained from scratch with
+`--moneyness-clip -0.15 0.10`, otherwise identical hyperparameters to the
+production checkpoint (25,000 steps, batch=1,000, seed=0), so the network's
+own weights see the clipped distribution throughout training, not just at
+test time the way the wrapper experiment above did.
+
+- **Better than both the pre-fix checkpoint and the inference-only wrapper
+  on every metric this document treats as most decision-relevant**, at
+  full 500,000-path stress-test scale:
+
+  | Metric | pre-fix | inference-only clip | trained-with-clip |
+  |---|---|---|---|
+  | below −50 (count) | 578 | 456 | **402** |
+  | CVaR95 | 8.212 | 8.201 | **6.014** |
+  | CVaR99 | 31.979 | 28.422 | **25.519** |
+  | real-path collapse rate (final lm>0.5) | 66.3% | 43.4% | **31.5%** |
+  | worst_loss | -6033.30 | **-4481.16** | -6199.84 |
+  | mean_wealth | -0.0299 | -0.0484 | -0.0412 |
+
+  CVaR95 improves substantially more than the inference-only wrapper managed
+  (26.7% vs. essentially 0%), and the real-path collapse rate roughly halves
+  again (43.4% → 31.5%). worst_loss and mean_wealth are the two exceptions,
+  both explained below rather than left as an unexplained trade-off.
+- **worst_loss is driven by one single path out of 500,000, not a general
+  regression.** Inspecting it directly: idx=72858, wealth=-6199.8, a
+  sustained one-directional rally from log-moneyness 0 to +8.34 over the
+  full 29-step path. Delta tracks correctly (0.96-0.98) through the first 7
+  steps, then collapses to <0.002 at step 8 (log-moneyness 1.04) and never
+  recovers for the remaining 21 steps, all the way out to +8.34 — the same
+  qualitative failure this whole mechanism (b) investigation is about, just
+  at a somewhat higher threshold (~1.0 log-moneyness) than the pre-fix
+  checkpoint's ~0.13, and without pre-fix's partial recovery. This is a
+  single rare path (2/500,000 ≈ 0.0004%); it moves worst_loss and (via the
+  same path) skew/kurtosis, but not the aggregate metrics above, which is
+  exactly why this document has repeatedly treated below_-50/CVaR₉₅/CVaR₉₉
+  as more decision-relevant than worst_loss alone for comparing checkpoints
+  (see GRU (WGAN-GP)'s `grad_clip_norm` fix above for the same pattern:
+  substantially improved, not fully closed).
+- **The ramp sweep's earlier 4.0-8.0 degradation is gone, replaced by a
+  flat, constant response** (delta ≈0.00138, identical to 5 significant
+  figures, at every ramp target from 3.0 to 8.0) rather than the
+  inference-only wrapper's erratic near-zero-with-occasional-spikes
+  pattern. Still wrong (a deep-ITM call's correct delta is ~1.0, not
+  ~0.001), but now a single stable failure mode instead of a chaotic one —
+  consistent with training itself (not just inference) having now seen the
+  clip boundary repeated across many consecutive steps, at least often
+  enough to settle on one answer for it, even if that answer isn't the
+  financially correct one.
+- **Promoted.** `checkpoints/hedging_agent_gru_timegan.pt` is now this
+  `moneyness_clip=(-0.15, 0.10)` checkpoint (pre-fix version preserved as
+  `hedging_agent_gru_timegan.pt.bak-pre-moneyness-clip-fix`); the
+  Catastrophic tail risk table and this section's own table above were both
+  regenerated from a fresh 500,000-path scan, not hand-edited.
+  `tests/test_tail_risk.py` was updated to match. GRU (TimeGAN) remains on
+  the "known bad" list (`below_-50_count` is 402, not 0 — this is a real
+  improvement, not a fix), now with a dedicated regression test pinning the
+  improved bound the same way `test_gru_checkpoint_substantially_improved_but_not_fully_clean`
+  already does for GRU (WGAN-GP).
+- **LSTM (TimeGAN) was not retrained with this fix.** The inference-only
+  wrapper experiment already showed clipping doesn't meaningfully move
+  LSTM's numbers (~1% either way, see the fix-attempt writeup above), and
+  training LSTM from scratch with the clip active wouldn't be expected to
+  change that conclusion — the wrapper test is exactly the ablation that
+  would show *if* clipping were going to help, and it didn't. LSTM's
+  failure mechanism remains open; per the fix-attempt writeup, it looks
+  closer to deterministic/history-independent than GRU's, which is itself
+  evidence it isn't primarily an input-clipping-shaped problem.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -1754,7 +1821,21 @@ paper-scale, 500,000-path regime-switching stress test:
 | MLP (TimeGAN) | -0.039 | 1.98 | 3.10 | -2.35 | 8.5 | 0.0113 |
 | Basic RNN (TimeGAN) | -0.031 | 4.47 | **17.46** | **-250.1** | **81,339** | 0.0018 |
 | LSTM (TimeGAN) | -0.040 | 10.86 | **42.13** | **-249.4** | **81,035** | 0.0093 |
-| GRU (TimeGAN) | -0.030 | 8.21 | **31.97** | **-307.8** | **145,523** | 0.0111 |
+| ~~GRU (TimeGAN)~~ **GRU (TimeGAN, `moneyness_clip` fix)** | ~~-0.030~~ -0.041 | ~~8.21~~ **6.01** | ~~**31.97**~~ **25.52** | ~~**-307.8**~~ **-314.3** | ~~**145,523**~~ **126,426** | ~~0.0111~~ 0.0082 |
+
+**GRU (TimeGAN)'s row reflects a promoted fix** (`RecurrentHedgingAgent.moneyness_clip`,
+retrained from scratch with the clip active for the full paper-scale 25,000
+steps, not just applied at inference time) — see [the fix-attempt
+writeup](#fix-attempt-clipping-the-rnns-log-moneyness-input-at-the-training-boundary--free-no-retraining-works-for-gru-does-not-work-for-lstm)
+and the [training-from-scratch
+follow-up](#follow-up-training-with-the-clip-active-from-the-start-closes-more-of-the-gap-than-the-inference-only-wrapper-did)
+for the full story. CVaR₉₅/₉₉ and the below_-50/-10 path counts all improve
+20-30%; mean wealth and the single worst-case loss are both slightly worse,
+so this is a genuine but partial fix, the same "improved, not fully
+closed" pattern already on record for GRU (WGAN-GP)'s `grad_clip_norm` fix
+above. LSTM (TimeGAN)'s row is unchanged — the same clipping approach was
+tested on it and found not to help (see the fix-attempt writeup); its
+failure mechanism remains open.
 
 **The best-fidelity generator to date produced the worst-behaved policies
 to date, and the "attractor" framing from attempts 1-3 is superseded by a
@@ -1772,7 +1853,7 @@ this.** Basic RNN's signature across attempts 2-4 has consistently been
 "lowest transaction cost, most separated from the pack" (attempt 2: near
 Black-Scholes; attempt 3: still separated, though not matching; attempt
 4: lowest CVaR₉₉ of the three catastrophic architectures, and the fewest
-catastrophic paths, 238 vs. 578-793). Read against the tail-risk finding,
+catastrophic paths, 238 vs. 402-793). Read against the tail-risk finding,
 the retrospective interpretation is that "beats Black-Scholes" in attempts
 1-2 was plausibly never a genuinely better hedge — it was a policy that
 traded less and looked good on a test set too small to catch the rare
@@ -1954,18 +2035,30 @@ Roughly in priority order:
      — see [the follow-up
      measurement](#follow-up-measuring-the-augmented-grus-real-path-collapse-rate-directly--confirms-the-regression-and-explains-its-mechanism).
      **A second, different fix attempt — clipping the RNN's log-moneyness
-     input at the training boundary, no retraining required — works for
-     GRU** (worst_loss/below_-50/CVaR99 improve 11-26%, real-path collapse
-     rate 66.3% → 43.4%) **but not for LSTM** (~1% either way, consistent
-     with LSTM's failure being closer to deterministic/history-independent
-     than GRU's). Not yet promoted (single seed, clip bound not swept, and
-     the clip itself still degrades at very extreme targets 4.0-8.0 where
-     the checkpoint sees a path shape — many consecutive identical clipped
-     readings — it never saw in training). See [the fix-attempt
+     input at the training boundary — works for GRU, not for LSTM.**
+     Tried first as a free, no-retraining inference-only wrapper
+     (worst_loss/below_-50/CVaR99 improve 11-26%, real-path collapse rate
+     66.3% → 43.4%; LSTM ~1% either way, consistent with LSTM's failure
+     being closer to deterministic/history-independent than GRU's). See the
+     [fix-attempt
      writeup](#fix-attempt-clipping-the-rnns-log-moneyness-input-at-the-training-boundary--free-no-retraining-works-for-gru-does-not-work-for-lstm).
-     GRU is now a substantially narrower, better-characterized problem than
-     LSTM within mechanism (b); LSTM's failure mechanism remains unexplained
-     beyond "near-deterministic collapse past the training boundary."
+     **Then retrained from scratch with the clip active throughout
+     training** (`RecurrentHedgingAgent.moneyness_clip`, `train_policy.py
+     --moneyness-clip`) — beats both the pre-fix checkpoint and the
+     inference-only wrapper on every metric this document treats as most
+     decision-relevant (CVaR₉₅ 8.21 → **6.01**, CVaR₉₉ 31.98 → **25.52**,
+     below_-50 578 → **402**, real-path collapse rate 66.3% → **31.5%**);
+     worst_loss and mean wealth are both slightly worse, traced to a single
+     rare sustained-rally path out of 500,000, the same qualitative failure
+     at a higher threshold rather than a new one. **Promoted** — see the
+     [training-from-scratch
+     follow-up](#follow-up-training-with-the-clip-active-from-the-start-closes-more-of-the-gap-than-the-inference-only-wrapper-did)
+     for the full numbers and the worst-path inspection.
+     GRU is now a substantially narrower, better-characterized (and now
+     partially fixed) problem than LSTM within mechanism (b); LSTM's
+     failure mechanism remains unexplained beyond "near-deterministic
+     collapse past the training boundary," and clipping — the one fix idea
+     tested against it — doesn't touch it.
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -2177,17 +2270,28 @@ Roughly in priority order:
     CVaR99 improve 11-26%, real-path collapse rate 66.3% → 43.4%), **but not
     for LSTM** (~1% either way): see the [clipping fix-attempt
     writeup](#fix-attempt-clipping-the-rnns-log-moneyness-input-at-the-training-boundary--free-no-retraining-works-for-gru-does-not-work-for-lstm).
-    Not yet promoted — single seed, clip bound not swept, and the clip
-    itself degrades again at very extreme targets (4.0-8.0) where the
-    checkpoint faces a many-consecutive-identical-readings path shape it
-    never saw in training. Remaining unexplored ideas: training with the
-    clip active from the start rather than only at inference time; a
-    systematic clip-bound sweep; and LSTM's failure, which the clipping
-    result suggests is a genuinely different (and still unexplained)
-    mechanism from GRU's, not the same problem at a different severity. An
-    adversarial/extreme-scenario data augmentation step targeted at GRU's
-    non-monotonic post-cliff behavior specifically (rather than a uniform
-    distributional widening) remains untried. **Basic RNN (TimeGAN)
+    **Then retrained from scratch with the clip active throughout
+    training** (not just wrapped around inference) — closes more of the gap
+    than the wrapper did (CVaR₉₅ 8.21 → 6.01, CVaR₉₉ 31.98 → 25.52,
+    below_-50 578 → 402, real-path collapse rate 66.3% → 31.5%) and is now
+    **promoted** to `checkpoints/hedging_agent_gru_timegan.pt`; see the
+    [training-from-scratch
+    follow-up](#follow-up-training-with-the-clip-active-from-the-start-closes-more-of-the-gap-than-the-inference-only-wrapper-did).
+    Still not a full close: worst_loss is slightly worse than pre-fix
+    (-6033.3 → -6199.8), traced to a single rare sustained-rally path out of
+    500,000 where delta collapses around log-moneyness 1.0 and never
+    recovers through +8.34 — the same qualitative failure mode at a higher
+    threshold, not a new one, but confirmation this fix narrows mechanism
+    (b) rather than eliminating it for GRU. Remaining unexplored ideas: a
+    systematic clip-bound sweep (only `(-0.15, 0.10)` has been tried);
+    multi-seed validation (single seed throughout, same caveat as
+    everywhere else in this document); and LSTM's failure, which the
+    clipping result suggests is a genuinely different (and still
+    unexplained) mechanism from GRU's, not the same problem at a different
+    severity — clipping was the one fix idea tested against it, and it
+    didn't move LSTM's numbers. An adversarial/extreme-scenario data
+    augmentation step targeted at GRU's remaining single-path failure
+    (rather than the input transform) remains untried. **Basic RNN (TimeGAN)
     specifically is a narrower, better-characterized sub-problem**: its
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
     regardless of input — confirmed via direct inspection, and confirmed

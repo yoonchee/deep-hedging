@@ -229,6 +229,20 @@ def main() -> None:
         "'Extending the fix' subsection, for why neither fixed Basic RNN (TimeGAN)'s "
         "recurrent hidden-state saturation on its own.",
     )
+    parser.add_argument(
+        "--moneyness-clip",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("LO", "HI"),
+        help="(rnn/lstm/gru only) clamp the standardized log-moneyness input to [LO, HI] "
+        "before it reaches the recurrent cell (see RecurrentHedgingAgent's moneyness_clip). "
+        "Default None is a no-op. Motivated by RESULTS.md mechanism (b): a bounded "
+        "generator's training data only covers a finite input range, and this network has "
+        "no principled behavior once its input leaves that range -- e.g. "
+        "'--moneyness-clip -0.15 0.10' for TimeGAN, just inside its own measured "
+        "training-distribution boundary.",
+    )
     parser.add_argument("--noise-dim", type=int, default=8, help="fallback generator noise dim")
     parser.add_argument("--gen-hidden-dim", type=int, default=64, help="fallback generator hidden dim")
     parser.add_argument("--gen-num-layers", type=int, default=2, help="fallback generator layer count")
@@ -360,6 +374,7 @@ def _train_and_save(
             implied_vol=args.implied_vol,
             time_to_maturity=args.dt * (args.seq_len - 1),
             orthogonal_init=args.orthogonal_init,
+            moneyness_clip=tuple(args.moneyness_clip) if args.moneyness_clip else None,
         )
         sequence_policy = True
 

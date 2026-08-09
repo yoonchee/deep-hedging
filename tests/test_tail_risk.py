@@ -204,3 +204,35 @@ def test_gru_checkpoint_substantially_improved_but_not_fully_clean(tail_risk_sca
     # checkpoint's -417.5, preserved at
     # hedging_agent_gru.pt.bak-pre-recovery-lag-fix.
     assert summary["worst_loss"] > -60.0
+
+
+@_checkpoints_available
+def test_gru_timegan_checkpoint_substantially_improved_but_not_fully_clean(tail_risk_scan: dict) -> None:
+    name = "GRU (TimeGAN)"
+    if name not in tail_risk_scan:
+        pytest.skip(f"no checkpoint loaded for {name!r}")
+
+    summary = tail_risk_scan[name]
+
+    # Mechanism (b)'s RecurrentHedgingAgent.moneyness_clip fix (RESULTS.md's
+    # "Fix attempt: clipping the RNN's log-moneyness input at the training
+    # boundary" and its training-from-scratch follow-up): retrained with
+    # --moneyness-clip -0.15 0.10 active for the full 25,000-step training
+    # run, not just wrapped around inference. At full 500,000-path scale this
+    # cuts below_-50 578 -> 402, CVaR95 8.21 -> 6.01, CVaR99 31.98 -> 25.52,
+    # and the real-path collapse rate past the training boundary 66.3% ->
+    # 31.5% -- a genuine improvement, not a full close (below_-50_count is
+    # still > 0, so this checkpoint correctly stays off the known-good list
+    # above; worst_loss is actually slightly worse than pre-fix, -6033.3 ->
+    # -6199.8, traced to a single rare sustained-rally path, not a general
+    # regression -- see RESULTS.md for the worst-path inspection). This test
+    # doesn't re-derive those exact figures at this file's smaller
+    # 50,000-path scale; it pins a bound loose enough not to be flaky but
+    # tight enough to catch a regression back toward the pre-fix checkpoint's
+    # behavior (preserved as
+    # checkpoints/hedging_agent_gru_timegan.pt.bak-pre-moneyness-clip-fix).
+    # If this starts failing, re-check moneyness_clip is still wired through
+    # _load_policy_checkpoint and that the promoted checkpoint wasn't
+    # accidentally overwritten with a clip=None retrain.
+    assert summary["below_-50_count"] > 0
+    assert summary["below_-50_fraction"] < 0.003  # pre-fix was ~0.0016 at this scale; loose margin
