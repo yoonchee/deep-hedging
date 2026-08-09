@@ -2694,13 +2694,18 @@ Roughly in priority order:
   methodology artifact.
 
   **The actual pattern**: `below_-50 > 0` (catastrophic) appears only at
-  α=0.997 — but even there the two occurrences aren't the same severity:
-  seed 0 is a clear repeat of mechanism (a)'s dead-policy signature (worst
-  −6202, 814 paths, matching the documented −250-logit sigmoid-underflow
-  case exactly), while seed 2 is marginal (worst −59.1, just 4 paths past
-  the −50 line) — a quick pre-activation-logit probe on seed 2 didn't
-  cleanly replicate seed 0's saturation pattern, so seed 2 is reported here
-  as "marginal," not claimed as the same failure. Even reading it
+  α=0.997 — but even there the two occurrences aren't the same severity.
+  Seed 0's checkpoint is, by the reproduction anchor above, bit-for-bit
+  identical to the pre-`grad_clip_norm` checkpoint whose −250-range
+  pre-activation logits and exact sigmoid-underflow were diagnosed
+  directly in [mechanism (a)](#mechanism-a-root-caused-and-fixed-sigmoid-output-saturation-not-sparse-gradients)
+  above — that provenance, not a new probe, is what grounds "dead policy"
+  for seed 0. Seed 2 is only reported as *marginal* on path counts (worst
+  −59.1, 4 paths past the −50 line, vs. seed 0's −6202/814): no logit
+  inspection was run on seed 2's own checkpoint, so this scan doesn't
+  establish whether it shares seed 0's exact saturation mechanism or is a
+  different, less severe failure — only that it's the smaller of the two
+  catastrophic outcomes by an order of magnitude. Even reading it
   conservatively as 1-of-4 clearly catastrophic rather than 2-of-4,
   catastrophic outcomes are exclusive to α=0.997, consistent with CVaR's
   `1/(1-α)` loss amplification making the underlying sparse-gradient
