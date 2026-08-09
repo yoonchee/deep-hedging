@@ -180,15 +180,57 @@ Three things worth stating plainly:
   gap would have shrunk everywhere, not just at one α.
 - **Basic RNN's mismatch got *worse* at the correct scale, not better** —
   59% and 58% off at α=0.5/0.99 (vs. 32% at the old, far smaller
-  500-step/seed-0 run reported previously), and 43% at α=0.75. This is the
-  same default seed=0 as every other Basic RNN result in this project, so
-  it doesn't distinguish "genuinely worse at this scale" from "still the
-  same seed-sensitivity already documented below and in the stress-test
-  section, just expressed differently at a different step count." A
-  multi-seed sweep at 25,000 steps (not done here) would be needed to tell
-  the two apart — this scale-up adds a data point consistent with Basic
-  RNN's instability being real and scale-independent, not evidence that
-  more training resolves it.
+  500-step/seed-0 run reported previously), and 43% at α=0.75. **Followed
+  up with a 4-seed sweep (seeds 0-3, all at the full 25,000-step scale,
+  seed=0 rerun through the identical single-architecture code path used for
+  seeds 1-3 rather than reused from the four-architecture run above, since
+  the two draw different out-of-sample test sets) — confirmed as a real,
+  systematic gap, not primarily the seed-sensitivity already documented
+  below and in the stress-test section.** The right normalization is each
+  run's own RNN/Black-Scholes CVaR *ratio*, not "% above the paper's raw
+  number" — the paper's own ratio itself varies by α (0.849 at α=0.99 to
+  1.006 at α=0.5), so comparing raw percentages conflates that with
+  whatever this repo is doing differently. By ratio:
+
+  | α | repo RNN/BS ratio (seeds 0,1,2,3) | mean | paper's ratio |
+  |---|---|---|---|
+  | 0.50 | 1.574, 1.396, 1.425, 1.572 | 1.492 | 1.006 |
+  | 0.75 | 1.361, 1.173, 1.228, 1.267 | 1.257 | 0.971 |
+  | 0.99 | 1.318, 1.165, 1.104, 1.103 | 1.173 | 0.849 |
+
+  Every seed at every α sits well above the paper's ratio, and the repo's
+  own ratio **decreases monotonically as α rises — true seed-by-seed, not
+  just in the means** (seed 0: 1.574→1.361→1.318; seed 1: 1.396→1.173→1.165;
+  seed 2: 1.425→1.228→1.104; seed 3: 1.572→1.267→1.103; four sequences, four
+  monotone decreases). This is the opposite of a U-shape, and the same
+  direction the paper's own ratio moves, just starting and staying higher
+  throughout. (An earlier draft of this section claimed α=0.75 was the
+  *smallest* gap and speculated about a tails-of-the-distribution quantile
+  effect — that claim used "% above the paper's raw CVaR," which isn't
+  directly comparable across α because it bakes in the paper's own
+  changing ratio; restated in ratio terms, as above, there is no U-shape,
+  just a monotone trend, so that speculation is retracted rather than
+  repeated here.) **A free noise-floor control**: each run's own
+  Black-Scholes CVaR — an analytic, non-learned policy — varies only
+  0.3-0.9% across the four seeds/runs at a given α, while Basic RNN's CVaR
+  varies 11.7-18.3% at the same α, **20-47x** the test-set-sampling noise
+  floor (27x at α=0.5, 47x at α=0.75, 20x at α=0.99). That gap is
+  training-driven, not measurement noise, the same role a zero-fee
+  ablation played for the GRU (TimeGAN) promotion above. **The seed=0
+  rerun also retires a code-drift concern**: it reproduced the original
+  seed=0 table (lines 137-165 above) almost exactly (0.3255 vs. 0.325,
+  0.4654 vs. 0.466, 1.2394 vs. 1.237 at α=0.5/0.75/0.99) despite running
+  through a different code path (single-architecture call vs. the
+  four-architecture sweep that produced the original table) — that
+  original table needed no revision. Seed 0 does sit at or near the top of
+  every α's range rather than the middle, worth flagging honestly rather
+  than averaging away — but even the *lowest* seed at each α (1.396 at
+  α=0.5, 1.173 at α=0.75, 1.103 at α=0.99) stays **21-39%** above that α's
+  paper ratio, so no seed in this 4-seed sample gets close to matching the
+  paper, which is the load-bearing claim: this rules out "bad luck on seed
+  0" as the *whole* explanation, even if seed 0 isn't perfectly typical of
+  the other three. What's systematically different about Basic RNN's
+  training at this scale remains unidentified.
 
 ### The RNN/LSTM training failure, and its real fix
 
@@ -2267,14 +2309,23 @@ Roughly in priority order:
   didn't finish in 180s). 500,000 paths was chosen empirically — cross-seed
   std of the estimate is ~1% relative at that count, vs. 7-10% at 50k/100k
   (see [above](#terminal-wealth-and-the-p₀-premium-term)).
-- Investigate Basic RNN's CVaR gap vs. the paper's own RNN figure at Part I
-  (43-59% off across α=0.5/0.75/0.99 at the paper-matched 25,000-step
-  scale, *worse* than the 32% at the earlier, far smaller 500-step scale)
-  — is this the same seed-sensitivity found in the stress-test setting,
-  now showing up in Part I too and possibly amplified by more training on
-  the same unlucky seed, or something specific to Part I's setup? A
-  multi-seed sweep at 25,000 steps (same methodology as the stress-test
-  one) would tell seed-sensitivity apart from a genuine scale effect.
+- ~~Investigate Basic RNN's CVaR gap vs. the paper's own RNN figure at Part
+  I~~ — **done, and it's a genuine systematic gap, not seed-sensitivity.** A
+  4-seed sweep (seeds 0-3, full 25,000-step scale, seed=0 rerun through the
+  same single-architecture code path as 1-3 to avoid an apples-to-oranges
+  test-set draw) found every seed's RNN/Black-Scholes CVaR ratio well above
+  the paper's own ratio at every α, with the gap monotonically shrinking as
+  α rises (not U-shaped — an earlier draft of this bullet claimed α=0.75
+  showed the smallest gap in raw-percentage terms and speculated about a
+  tails-of-the-distribution effect; restated in ratio terms, which is the
+  correct normalization since the paper's own ratio itself varies by α,
+  there's no U-shape and that speculation doesn't hold up, so it's retracted
+  here). See [above](#part-i-frictionless-replication) for the full
+  per-seed ratio table and the noise-floor control (Black-Scholes CVaR
+  varies <1% across seeds/runs at a given α; Basic RNN's varies 12-18%,
+  ruling out test-set sampling noise as the explanation). What's still
+  open: *why* — the gap is confirmed real, consistent across seeds, and
+  monotone in α, but not yet explained.
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.
