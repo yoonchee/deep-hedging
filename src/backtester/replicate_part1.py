@@ -219,7 +219,23 @@ def run_part1_replication(
     test_batch_size: Annotated[
         int, "out-of-sample evaluation batch size, matches paper Table 1's 500,000-scenario test set"
     ] = 500_000,
-    lr: Annotated[float, "Adam learning rate"] = 1e-2,
+    lr: Annotated[float, "Adam learning rate, used for every architecture except 'rnn' (see rnn_lr)"] = 1e-2,
+    rnn_lr: Annotated[
+        float,
+        "Adam learning rate specifically for architecture='rnn'. At the shared "
+        "lr=1e-2, Basic RNN's recurrent weight norm blows up during training "
+        "(direct inspection: weight_hh norm 7 -> 40-79, hidden-state saturation "
+        "0% -> 93-95%, typically within the first ~4,000-4,500 steps) and never "
+        "recovers, giving a CVaR 43-59% worse than the paper's own RNN figure "
+        "-- confirmed not fixed by --grad-clip-norm or --orthogonal-init, which "
+        "both converge to nearly the same pathological weight norm regardless. "
+        "1e-3 (10x lower) eliminates the blowup entirely (verified across 4 "
+        "seeds: CVaR within 1-2 percentage points of the paper at every alpha, "
+        "vs. 32-59% at lr=1e-2) -- LSTM/GRU/MLP don't show this failure at the "
+        "shared 1e-2 default, consistent with their gating (LSTM/GRU) or lack "
+        "of a compounding hidden state (MLP) providing implicit stability a "
+        "vanilla RNN's recurrence doesn't have. See RESULTS.md.",
+    ] = 1e-3,
     hidden_dim: Annotated[int, "MLP hidden layer width"] = 32,
     num_hidden_layers: Annotated[int, "MLP hidden layer count"] = 2,
     rnn_hidden_dim: Annotated[int, "recurrent hidden state size (paper: 128)"] = 128,
@@ -264,7 +280,8 @@ def run_part1_replication(
         for architecture in architectures:
             torch.manual_seed(seed)
             display_name = ARCHITECTURE_DISPLAY_NAMES[architecture]
-            print(f"  Training {display_name} (alpha={alpha}, {train_epochs} epochs)...")
+            architecture_lr = rnn_lr if architecture == "rnn" else lr
+            print(f"  Training {display_name} (alpha={alpha}, {train_epochs} epochs, lr={architecture_lr})...")
             policy, sequence_policy = train_policy(
                 architecture,
                 alpha,
@@ -274,7 +291,7 @@ def run_part1_replication(
                 epochs=train_epochs,
                 batch_size=train_batch_size,
                 seq_len=seq_len,
-                lr=lr,
+                lr=architecture_lr,
                 device=device,
                 hidden_dim=hidden_dim,
                 num_hidden_layers=num_hidden_layers,
@@ -340,6 +357,8 @@ def run_part1_replication(
             "train_epochs": train_epochs,
             "train_batch_size": train_batch_size,
             "test_batch_size": test_batch_size,
+            "lr": lr,
+            "rnn_lr": rnn_lr,
             "architectures": list(architectures),
             "rnn_hidden_dim": rnn_hidden_dim,
             "rnn_output_hidden_dims": list(rnn_output_hidden_dims),
@@ -364,7 +383,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--train-batch-size", type=int, default=1000)
     parser.add_argument("--test-batch-size", type=int, default=500_000, help="matches paper Table 1's 500,000-scenario test set")
-    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--lr", type=float, default=1e-2, help="used for every architecture except rnn (see --rnn-lr)")
+    parser.add_argument(
+        "--rnn-lr", type=float, default=1e-3,
+        help="Basic RNN-specific learning rate -- 1e-2 (matching every other architecture) causes a "
+        "training-time weight-norm blowup unique to the vanilla RNN cell; see run_part1_replication's "
+        "rnn_lr docstring and RESULTS.md. Pass --rnn-lr 1e-2 to reproduce the old, pre-fix numbers.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="results/part1_replication")
     args = parser.parse_args()
@@ -374,6 +399,7 @@ if __name__ == "__main__":
         train_batch_size=args.train_batch_size,
         test_batch_size=args.test_batch_size,
         lr=args.lr,
+        rnn_lr=args.rnn_lr,
         seed=args.seed,
         output_dir=args.output_dir,
     )

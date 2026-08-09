@@ -136,9 +136,20 @@ scale (reproduce with `python src/backtester/replicate_part1.py`):
 
 | α | Black-Scholes | MLP | Basic RNN | LSTM | GRU |
 |---|---|---|---|---|---|
-| 0.50 | 0.207 | 0.212 | 0.325 | **0.193** | 0.268 |
-| 0.75 | 0.343 | 0.347 | 0.466 | **0.312** | 0.311 |
-| 0.99 | 0.947 | 0.843 | 1.237 | **0.697** | 0.699 |
+| 0.50 | 0.207 | 0.212 | **0.205** | 0.193 | 0.268 |
+| 0.75 | 0.343 | 0.347 | **0.333** | 0.312 | 0.311 |
+| 0.99 | 0.947 | 0.843 | **0.780** | 0.697 | 0.699 |
+
+(Basic RNN's column reflects a fix — `--rnn-lr 1e-3` instead of the shared
+1e-2 default; see below the paper-comparison table for the full story.
+MLP/LSTM/GRU are bit-for-bit reproductions of the previous table: each
+architecture resets `torch.manual_seed(seed)` before its own training loop,
+so Basic RNN's changed learning rate has no effect on the others' training
+or on the shared post-loop test-price draw — confirmed directly, not just
+by argument: the pre-fix `results/part1_replication/part1_summary.json`
+and the post-fix regeneration report identical Black-Scholes `cvar_pnl` to
+full float precision, e.g. `0.20698045194149017` at α=0.5, not merely
+matching to the table's rounded 3 significant figures.)
 
 **This is a genuinely mixed result, not a clean confirmation that more
 compute closes the remaining gaps.** LSTM/GRU still beat Black-Scholes at
@@ -152,17 +163,24 @@ run did:
 | α | Architecture | Paper | This repo | Difference |
 |---|---|---|---|---|
 | 0.50 | Black-Scholes | 0.2028 | 0.207 | 2.1% |
-| 0.50 | Basic RNN | 0.2040 | 0.325 | 59.4% |
+| 0.50 | Basic RNN | 0.2040 | 0.205 | **0.6%** |
 | 0.50 | LSTM | 0.2197 | 0.193 | 12.2% |
 | 0.50 | GRU | 0.2000 | 0.268 | 34.1% |
 | 0.75 | Black-Scholes | 0.3353 | 0.343 | 2.2% |
-| 0.75 | Basic RNN | 0.3257 | 0.466 | 43.0% |
+| 0.75 | Basic RNN | 0.3257 | 0.333 | 2.3% |
 | 0.75 | LSTM | 0.3132 | 0.312 | **0.4%** |
 | 0.75 | GRU | 0.3119 | 0.311 | **0.4%** |
 | 0.99 | Black-Scholes | 0.9203 | 0.947 | 2.9% |
-| 0.99 | Basic RNN | 0.7810 | 1.237 | 58.3% |
+| 0.99 | Basic RNN | 0.7810 | 0.780 | **0.1%** |
 | 0.99 | LSTM | 0.8974 | 0.697 | 22.4% |
 | 0.99 | GRU | 0.7270 | 0.699 | 3.8% |
+
+**Basic RNN went from the worst-matching architecture to the best**:
+0.6%/2.3%/0.1% against the paper, tighter than LSTM's 12.2%/0.4%/22.4% and
+GRU's 34.1%/0.4%/3.8%, and at α=0.5 and α=0.99 tighter even than
+Black-Scholes's own 2.1%/2.9% analytic Monte-Carlo noise floor — this
+turned out not to be a hard architectural limitation at all. Full story
+below.
 
 Three things worth stating plainly:
 
@@ -229,8 +247,90 @@ Three things worth stating plainly:
   paper ratio, so no seed in this 4-seed sample gets close to matching the
   paper, which is the load-bearing claim: this rules out "bad luck on seed
   0" as the *whole* explanation, even if seed 0 isn't perfectly typical of
-  the other three. What's systematically different about Basic RNN's
-  training at this scale remains unidentified.
+  the other three. **What's systematically different about Basic RNN's
+  training at this scale — since found, and fixed: a learning-rate-specific
+  weight-norm blowup. See the section immediately below.**
+
+#### Basic RNN's Part I gap, root-caused and fixed: a learning-rate-specific weight blowup
+
+Direct inspection of training dynamics (loss, gradient norm, recurrent
+weight norm, and hidden-state saturation logged every 500 steps of a full
+25,000-step run, α=0.99) found a sharp, clean training pathology the
+CVaR-loss curve alone didn't make obvious:
+
+- **A sudden blowup between steps 4,000 and 4,500.** `weight_hh` norm jumps
+  7.1 → 38.4 in a single 500-step window; hidden-state saturation
+  (`|h| > 0.999`) jumps from ~0% to **93.5%** of units in the same window;
+  loss jumps from ≈0.93 to ≈4.7 (5x worse) and never returns to its
+  pre-blowup level for the remaining 20,500 steps — the network spends the
+  back four-fifths of training in a mostly-saturated, elevated-loss regime.
+  This, not "not enough training," is why more compute (25,000 vs. the
+  earlier 500-step run) made the mismatch *worse*: the extra steps are
+  spent stuck past this event, not converging further.
+- **`--grad-clip-norm 1.0` — tested, made it worse.** The obvious first
+  hypothesis (a single oversized gradient step, the same mechanism fixed
+  for GRU/MLP checkpoints elsewhere in this document) doesn't fit: clipped,
+  the weight norm grows *continuously* from step 500 onward instead of
+  jumping once, reaching **78.8** by step 25,000 — nearly double the
+  unclipped run's 42.7 — with saturation still ~95% throughout and no
+  improvement in final loss (1.20 either way). Clipping caps each step's
+  size but doesn't change its *direction*; if the gradient consistently
+  points toward larger weights, many small clipped steps accumulate to a
+  larger total displacement than a few large unclipped ones eventually
+  self-limit to.
+- **`orthogonal_init=True` — also tested, converges to nearly the same
+  pathological state as grad_clip_norm.** Weight norm 12.9 → 78.8 (final
+  value differs from the clipped run's 78.8 by less than 0.1%), saturation
+  ~93%, loss ~1.22. Two different, independently-motivated interventions
+  landing on almost identical numbers is itself evidence this isn't about
+  initialization or single-step gradient spikes — both interventions leave
+  whatever is actually driving the growth untouched.
+- **`lr=1e-3` (10x lower than the shared 1e-2 default) — fixes it
+  completely.** No blowup at any point in 25,000 steps: saturation stays
+  ≤0.2% throughout (vs. 93-95% for every other variant), weight norm grows
+  smoothly from 6.5 to 9.0 (vs. 40-79), and final training loss is ~35%
+  lower (0.777 vs. ~1.20-1.22). This points to Adam's step size at the
+  shared default being simply too large for the vanilla RNN's recurrent
+  weights specifically — consistent with LSTM/GRU not showing this failure
+  at the same 1e-2 default (their gating provides implicit stability a
+  vanilla RNN's plain recurrence doesn't have) and MLP not showing it
+  either (no compounding hidden state to blow up in the first place). (The
+  paper specifies Adam but not a learning rate — `1e-2` was this repo's own
+  uniform choice across architectures, not a paper-mandated value, so this
+  is a local hyperparameter fix, not a discrepancy with the paper's own
+  setup.)
+- **Verified at full scale, both on the actual CVaR-of-PnL metric and
+  across seeds — not just the training-loss proxy above.** A 4-seed sweep
+  (seeds 0-3, `--rnn-lr 1e-3`, otherwise identical to the earlier gap-sweep)
+  closes the gap to the paper almost completely and consistently:
+
+  | α | mean gap vs. paper, lr=1e-2 (4 seeds) | mean gap vs. paper, lr=1e-3 (4 seeds) |
+  |---|---|---|
+  | 0.50 | 51.2% | **1.05%** (std 0.98pp) |
+  | 0.75 | 32.2% | **1.36%** (std 0.52pp) |
+  | 0.99 | 41.3% | **-0.43%** (std 1.03pp) |
+
+  Every one of the 4 seeds lands within about 2 percentage points of the
+  paper at every α — a complete reversal from the old 21-59% range, and
+  tighter than this document's own LSTM/GRU match quality (0.4-34%,
+  unaffected by this fix since they were never the problem).
+- **Promoted.** `replicate_part1.py::run_part1_replication` gained an
+  `rnn_lr` parameter (default `1e-3`, applied only to `architecture="rnn"`;
+  `lr` — still defaulting to `1e-2` — continues to apply to MLP/LSTM/GRU
+  unchanged) and a matching `--rnn-lr` CLI flag; pass `--rnn-lr 1e-2` to
+  reproduce the old, pre-fix numbers. Unlike the WGAN-GP/TimeGAN settings'
+  checkpoint-based promotions elsewhere in this document, Part I has no
+  checkpoint to swap — the "canonical" result *is* whatever
+  `python src/backtester/replicate_part1.py` with no extra flags produces,
+  so the fix is a default-parameter change, not a file swap. The headline
+  CVaR table and the paper-comparison table above were regenerated from a
+  single joint run of all four architectures (`--seed 0`, matching the
+  original table's methodology exactly, so all four share one
+  Black-Scholes baseline and one out-of-sample test-price draw) — MLP,
+  LSTM, and GRU's numbers reproduce the previous table bit-for-bit (each
+  architecture resets `torch.manual_seed(seed)` before its own training
+  loop, so RNN's changed learning rate provably can't affect the others),
+  confirming only the Basic RNN column actually needed to change.
 
 ### The RNN/LSTM training failure, and its real fix
 
@@ -2066,8 +2166,8 @@ Roughly in priority order:
    CVaR-minimizing optimal policy. No longer an open limitation; kept
    first, struck through, as a record of what implementing "faithfully"
    actually required fixing.
-2. **~~Part I's training budget doesn't match the paper~~ — resolved,
-   with a mixed result.** The paper's "50 epochs" is over a fixed
+2. **~~Part I's training budget doesn't match the paper~~ — resolved, with
+   a mixed-then-fixed result.** The paper's "50 epochs" is over a fixed
    500,000-scenario dataset at batch_size=1000, i.e. 25,000 gradient
    steps in this codebase's per-step convention — now the default. This
    is a genuine unit reconciliation, not just a bigger number: an earlier
@@ -2075,11 +2175,20 @@ Roughly in priority order:
    actually only ~2% of the paper's real budget. At the corrected scale,
    Black-Scholes matches the paper's absolute CVaR to 2-3% at every α
    (expected, it's analytic); LSTM/GRU are mixed (0.4% at α=0.75, up to
-   34% at α=0.5); Basic RNN's mismatch got *worse*, not better (58-59% at
-   α=0.5/0.99, up from 32% at the old, far smaller scale) — see
-   [above](#part-i-frictionless-replication) for the full table. Scaling
-   up did not uniformly close the remaining gaps, which is itself an
-   informative (if less tidy) result.
+   34% at α=0.5, unchanged by anything below). ~~Basic RNN's mismatch got
+   *worse*, not better (58-59% at α=0.5/0.99, up from 32% at the old, far
+   smaller scale)~~ — **root-caused and fixed**: direct inspection of
+   training dynamics found a clean weight-norm blowup specific to the
+   vanilla RNN cell at the shared lr=1e-2 default (confirmed not fixed by
+   `--grad-clip-norm` or `--orthogonal-init`, both of which converge to
+   nearly the same pathological end state); `--rnn-lr 1e-3` eliminates it
+   entirely and closes the gap to the paper to 0.1-2.3% at every α across
+   4 seeds — tighter than LSTM/GRU's own match quality. See [the
+   diagnosis](#basic-rnns-part-i-gap-root-caused-and-fixed-a-learning-rate-specific-weight-blowup)
+   for the full story. Scaling up training exposed a real, fixable
+   architecture-specific optimization issue that a smaller budget was too
+   short to trigger — not evidence against scaling, in retrospect, but it
+   did mean "just train longer" alone wasn't the fix.
 3. **Generator tail-risk fidelity — improved, not perfect.** The
    moment-matching loss fixed the sign and rough magnitude of both skew and
    kurtosis, and this measurably improved MLP/GRU's stress-test tail risk.
@@ -2327,9 +2436,16 @@ Roughly in priority order:
   here). See [above](#part-i-frictionless-replication) for the full
   per-seed ratio table and the noise-floor control (Black-Scholes CVaR
   varies <1% across seeds/runs at a given α; Basic RNN's varies 12-18%,
-  ruling out test-set sampling noise as the explanation). What's still
-  open: *why* — the gap is confirmed real, consistent across seeds, and
-  monotone in α, but not yet explained.
+  ruling out test-set sampling noise as the explanation). ~~What's still
+  open: *why*~~ — **also done**: direct inspection of training dynamics
+  (loss/grad-norm/weight-norm/saturation logged every 500 steps) found a
+  clean weight-norm blowup specific to the vanilla RNN cell at the shared
+  lr=1e-2 default, confirmed not fixed by `--grad-clip-norm` or
+  `--orthogonal-init` (both converge to nearly the same pathological end
+  state); `--rnn-lr 1e-3` eliminates it and closes the gap to 0.1-2.3% at
+  every α across 4 seeds, now the default for `architecture="rnn"` in
+  `replicate_part1.py`. See the [full
+  diagnosis](#basic-rnns-part-i-gap-root-caused-and-fixed-a-learning-rate-specific-weight-blowup).
 - Tighten the moment-matching loss further (adaptive `lambda_moment`
   schedule, or matching higher moments / a full quantile loss instead of
   just skew+kurtosis) to close the remaining tail-shape gap.
