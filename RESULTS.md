@@ -1253,12 +1253,134 @@ applied to GRU (WGAN-GP) above, finds a precise mechanism:
   whatever range it actually tested; it simply didn't extend far enough to
   reach this specific cliff, which — per the point above — sits inside
   TimeGAN's own training boundary, not past it.
-- **No fix attempted.** The likely fix is the one already on this
-  document's list — training-time exposure to more extreme price
-  excursions than TimeGAN's real-data-bounded training distribution can
-  produce, either by widening the regime-switching stress scenario into
-  the training loop itself or an adversarial/extreme-scenario augmentation
-  step — but that wasn't tried here; this was a diagnosis pass.
+- **Validated against real stress-test paths, not just the smooth-ramp
+  construction used above.** A smooth 29-step ramp isolates level from
+  path shape, but it's a synthetic construction — worth checking it isn't
+  itself an artifact before trusting it. Sampling 2,000 real paths from the
+  500,000-path stress scan (seed=42) that reach final log-moneyness > 0.5
+  (well past the training boundary) and reading each policy's actual final
+  delta: **LSTM collapses (delta < 0.1) on 97.0% of them** — the ramp's
+  "both architectures fail past the boundary" claim holds essentially
+  unconditionally for LSTM. **GRU collapses on only 64.6%** — real, and
+  still a majority, but well short of LSTM's near-certainty. The other
+  35.4% include paths GRU hedges correctly even out past log-moneyness 6-8,
+  which single-path anecdotes (below) can make look like the mechanism
+  doesn't apply to GRU at all; the aggregate rate says otherwise. This
+  matches the asymmetry already on this document's record for GRU (WGAN-GP,
+  mechanism (c) above): GRU's collapse behavior here is also less of a
+  deterministic threshold and more history/path-shape-dependent than
+  LSTM's.
+- **Fix attempted: widening TimeGAN's own training distribution.** See the
+  new subsection immediately below — a mixed result, not promoted.
+
+#### Fix attempt: widening TimeGAN's own training distribution (`output_scale`) — mixed, not promoted
+
+The candidate fix already on this document's list — training-time exposure
+to more extreme price excursions than TimeGAN's real-data-bounded training
+distribution can produce — was implemented and tried at full stress-test
+scale.
+
+- **Design.** `TimeGANPriceGenerator` gained an `output_scale` parameter
+  that widens the generated distribution. The first thing tried — scaling
+  the input noise `z` by up to 20x — barely moved the output distribution
+  (std stayed ≈0.031-0.033), because three stacked tanh layers absorb
+  large-amplitude input noise. Diagnosed via a direct sweep before writing
+  any training code, then pivoted to scaling the *recovered* signal
+  (post-tanh, pre-inverse-transform) instead, which does widen the output
+  roughly proportionally to the scale factor. `MinMaxScaler.inverse_transform`
+  has no positivity floor, so at large scale factors (empirically, ≥8.0)
+  prices went negative and produced `nan` downstream from `log` of a
+  negative number; fixed with an explicit `.clamp(min=1e-3)`.
+- **Retrained LSTM and GRU (TimeGAN) at `output_scale=3.0`, full scale,
+  single seed each**, otherwise identical hyperparameters to the checkpoints
+  diagnosed above — with one caveat: the Monte Carlo premium estimated over
+  the *widened* generator jumped from 0.0106 to 0.0927 (≈8.7x), so the
+  augmented checkpoints were trained against a materially different wealth
+  objective (`P0` in the CVaR loss), not purely wider paths on an otherwise
+  unchanged objective. This confound has a known, checkable direction:
+  `MarketEnvironment.simulate_with_costs` adds `premium` as a flat additive
+  term to every single path's terminal wealth (`wealth = wealth + premium -
+  payoff`, `market_env.py`), so the +0.0821 premium increase uniformly
+  shifts every wealth-level metric (worst_loss, below_-50 count, CVaR95,
+  CVaR99) in the *favorable* direction for both augmented checkpoints,
+  regardless of any change in policy quality — a free +0.0821 improvement
+  baked into the comparison before the policy does anything differently.
+  Skewness and excess kurtosis are location-invariant and unaffected. This
+  matters for reading the table below: it makes LSTM's apparent gain
+  partly (not wholly — the shift is only ≈0.08, small next to the observed
+  changes) attributable to the confound rather than the policy, and it means
+  GRU's regression on CVaR95/CVaR99/below_-50 happened *despite* this
+  favorable tailwind, so the real, confound-adjusted regression is slightly
+  larger than the raw numbers show, not smaller.
+- **The smooth-ramp cliff moved outward as designed, for both
+  architectures.** Pre-fix, both LSTM and GRU collapse between ramp targets
+  +0.10 and +0.13. Post-`output_scale=3.0`, LSTM's cliff moves to between
+  +0.30 and +0.40 (delta 0.997 → 0.005); GRU's moves to the same range
+  (0.742 → 0.000). Roughly a 3x shift, tracking the scale factor — the
+  intervention does what it was designed to do on the diagnostic that
+  motivated it.
+- **At full 500,000-path stress-test scale, the result is mixed and does
+  not clearly justify promoting either checkpoint:**
+
+  | Metric | LSTM pre-fix | LSTM scale=3.0 | GRU pre-fix | GRU scale=3.0 |
+  |---|---|---|---|---|
+  | worst_loss | -6202.41 | **-5909.96** | -6033.30 | **-5548.27** |
+  | below −50 (count) | 793 | **783** | 578 | **744** (worse) |
+  | CVaR95 | 10.860 | **10.344** | 8.212 | **10.061** (worse) |
+  | CVaR99 | 42.133 | **40.982** | 31.974 | **38.556** (worse) |
+  | skewness | -249.4 | -247.7 | -307.8 | **-259.7** |
+  | excess kurtosis | 81,035 | 80,420 | 145,523 | **95,133** |
+
+  LSTM improves modestly and consistently across every metric (~3-5%), but
+  per the premium-direction note above, some of that (≈0.08 of the
+  ≈0.5-1.2 point CVaR moves) is the favorable premium shift rather than the
+  policy — most of the gain still looks real, but it's smaller and less
+  certain than the raw table suggests, on a single seed. GRU is worse on
+  `below_-50`, CVaR95, and CVaR99 — the three metrics this document has
+  otherwise treated as most decision-relevant — *despite* the same
+  favorable premium tailwind working against that regression, which makes
+  it more likely to be a genuine policy-level effect, not less. GRU also
+  improves on worst_loss, skew, and kurtosis. Net, not a fix for GRU;
+  arguably a regression on the metrics that matter most for a tail-risk
+  analysis.
+- **The GRU regression was investigated on individual paths and remains
+  only partially explained.** The augmented GRU's single worst path
+  (idx=93230, wealth=-5548.3) shows a clean collapse: delta starts near
+  1.0, holds through log-moneyness ≈0.96, then crashes to ≈0.03 on the very
+  next step (log-moneyness ≈1.6, a ≈1.0 single-step jump rather than a
+  gradual ramp) and never recovers. The *pre-fix* GRU, run on the identical
+  price path, does not collapse — delta dips to 0.146 then climbs back to
+  0.93-1.0 and stays there through log-moneyness 7+. Taken alone, this
+  looked like evidence that widening the training distribution had traded
+  a graceful-recovery behavior for a sharper, more brittle one. It doesn't
+  hold up as a general explanation, though: per the real-path validation
+  above, pre-fix GRU only recovers on ~35% of real paths past the training
+  boundary in the first place, so idx=93230 landing in that minority is not
+  unusual — it's exactly the kind of single-anecdote result the aggregate
+  scan above was built to guard against. Whether the augmented GRU's
+  recovery rate on the *same* real-path population is lower than pre-fix
+  GRU's 64.6%, and if so why, was not measured — the smooth-ramp threshold
+  sweep (above) shows the augmented GRU's post-cliff behavior is markedly
+  less monotonic than LSTM's (final delta at ramp target +5.0 jumps back up
+  to 0.91 after being ≈0 at every neighboring target), consistent with
+  GRU's collapse being harder to characterize with any single scalar
+  threshold, pre- or post-fix. **This remains open and unexplained beyond
+  that characterization.**
+- **Not promoted; no further compute spent chasing variants.** LSTM's gain
+  is small and single-seed; GRU regressed on the primary tail metrics. This
+  document has already established elsewhere (the Basic RNN 8-seed
+  experiment) that single-seed conclusions in this codebase are unreliable
+  in both directions — that cuts against treating GRU's regression as
+  definitively real *and* against treating LSTM's gain as definitively
+  real. Both augmented checkpoints remain out-of-tree
+  (`timegan_augment/{lstm,gru}_timegan_scale3.pt`, not copied into
+  `checkpoints/`). A larger or different `output_scale`, or a multi-seed
+  retrain, might resolve the ambiguity, but that's more hours of compute to
+  interpret with a diagnostic already shown here to be an unreliable proxy
+  for aggregate tail-metric improvement, even when it correctly predicts
+  the threshold shift it was designed to move — not a good next spend
+  without a better diagnostic for GRU's non-monotonic post-cliff behavior
+  first.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -1699,11 +1821,23 @@ Roughly in priority order:
      rallies, climbing for selloffs — the wrong sign) was considered and
      ruled out via a properly path-shape-controlled comparison; the failure
      is asymmetric (rally-side only, no comparable selloff-side collapse
-     found), not sign-inverted. See [the follow-up
-     diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure)
-     and [Ideas for future work](#ideas-for-future-work)
-     (adversarial/extreme-scenario augmentation for TimeGAN-driven
-     training). No fix attempted; still open.
+     found), not sign-inverted. **Validated against 2,000 real stress-test
+     paths, not just the synthetic ramp**: LSTM collapses on 97.0% of real
+     paths past the training boundary (the ramp's claim holds essentially
+     unconditionally); GRU collapses on 64.6% — real, still a majority, but
+     markedly less deterministic than LSTM, consistent with the
+     history/path-shape-dependence already seen in GRU's mechanism (c)
+     below. See [the follow-up
+     diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure).
+     **Fix attempted** (`TimeGANPriceGenerator.output_scale`, widening the
+     generator's own training distribution 3x) — moved the smooth-ramp
+     cliff outward as designed for both architectures, but at full
+     500,000-path stress-test scale gave only a small, single-seed LSTM
+     improvement (~3-5% across all metrics) and a GRU **regression** on
+     below_-50/CVaR95/CVaR99 despite improving worst_loss/skew/kurtosis. Not
+     promoted. See [the fix-attempt
+     writeup](#fix-attempt-widening-timegans-own-training-distribution-output_scale--mixed-not-promoted).
+     Still open.
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -1893,8 +2027,18 @@ Roughly in priority order:
     measured positive-tail boundary (0.133), shared by both LSTM and GRU
     (TimeGAN) at nearly the same threshold — see [the follow-up
     diagnosis](#follow-up-diagnosis-mechanism-b-is-a-sharp-cliff-at-timegans-training-distribution-boundary-not-a-gradual-generalization-failure).
-    Still open, no fix attempted; the training-time-augmentation candidates
-    above are informed but untested by this diagnosis. **Basic RNN (TimeGAN)
+    **Fix attempted** (`TimeGANPriceGenerator.output_scale=3.0`, widening
+    the generator's own recovered-signal distribution) — see the
+    [fix-attempt
+    writeup](#fix-attempt-widening-timegans-own-training-distribution-output_scale--mixed-not-promoted):
+    moved the smooth-ramp cliff outward 3x for both architectures as
+    designed, but at full stress-test scale only LSTM improved (modestly,
+    single seed), while GRU regressed on below_-50/CVaR95/CVaR99. Not
+    promoted; still open. A remaining, unexplored idea from the diagnosis
+    that this fix didn't try: an adversarial/extreme-scenario data
+    augmentation step targeted at GRU's specific non-monotonic, less
+    threshold-like post-cliff behavior, rather than a uniform distributional
+    widening. **Basic RNN (TimeGAN)
     specifically is a narrower, better-characterized sub-problem**: its
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
     regardless of input — confirmed via direct inspection, and confirmed
