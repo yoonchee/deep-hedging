@@ -1462,7 +1462,10 @@ the `self.rnn(...)` call, otherwise identical:
   near-deterministically (97.5%) versus GRU's more history/path-dependent
   66.3% — LSTM's failure isn't primarily an input-level extrapolation
   problem the way GRU's partially is, so clamping the input doesn't reach
-  it. What *does* explain LSTM's failure is still open.
+  it. **What does explain LSTM's failure is now precisely characterized —
+  see the [follow-up
+  diagnosis](#follow-up-lstm-timegans-failure-is-a-razor-thin-coordinated-hidden-unit-transition-not-a-saturation-or-repetition-artifact)
+  below.**
 - **The clip itself isn't complete even for GRU**: the same ramp sweep that
   shows the fix working through target 2.0 also shows a *new* degradation
   further out — clipped delta falls back to ≈0.067 at targets 4.0-8.0,
@@ -1568,10 +1571,82 @@ test time the way the wrapper experiment above did.
   LSTM's numbers (~1% either way, see the fix-attempt writeup above), and
   training LSTM from scratch with the clip active wouldn't be expected to
   change that conclusion — the wrapper test is exactly the ablation that
-  would show *if* clipping were going to help, and it didn't. LSTM's
-  failure mechanism remains open; per the fix-attempt writeup, it looks
-  closer to deterministic/history-independent than GRU's, which is itself
-  evidence it isn't primarily an input-clipping-shaped problem.
+  would show *if* clipping were going to help, and it didn't. **Its failure
+  mechanism is now precisely characterized, though still not fixed — see
+  the follow-up immediately below.**
+
+#### Follow-up: LSTM (TimeGAN)'s failure is a razor-thin, coordinated hidden-unit transition, not a saturation or repetition artifact
+
+Clipping was tested and ruled out for LSTM above, but *why* it doesn't work
+wasn't yet understood — this follow-up root-causes it via the same
+training-free direct-inspection methodology used for GRU (WGAN-GP)'s
+recovery-lag diagnosis and Basic RNN (TimeGAN)'s hidden-state saturation.
+`nn.LSTM` doesn't expose per-step cell state or gate values through its
+normal `forward()`, so a manual step-by-step unroll of the same trained
+weights was used instead (verified to match `nn.LSTM`'s actual output to
+1e-6 before trusting it for diagnosis).
+
+- **The earlier "moderate logits, not saturated" finding was checking the
+  wrong signal.** The top recurrent layer's hidden state `h_t` (bounded
+  ±1.0 by its own `tanh`) is `abs(h) > 0.999` on **only 1-2 of 64 units** at
+  any point near the cliff — not the broad saturation the aggregate
+  `hidden_states.min()/.max()` check (used for Basic RNN's diagnosis)
+  would flag, since that check only reports whether *any* unit hits the
+  boundary, not how many.
+- **The real mechanism: roughly 10 hidden units move smoothly but in a
+  tightly coordinated way across an extremely narrow input window.**
+  Sweeping the ramp construction in 0.005 increments around the cliff
+  (log-moneyness 0.080 → 0.135) and comparing the top layer's full 64-unit
+  hidden vector at the last-good point (0.100, delta 0.998) against the
+  first-collapsed point (0.135, delta ~0): 10 units (of 64) each shift their
+  contribution to the output logit by roughly 1-3 units, and every one of
+  the 10 moves in the same direction — the raw pre-sigmoid logit falls from
+  **+6.3 to −12.0** over an input window just **0.035 log-moneyness wide**.
+  This is a real, steep, *learned* decision boundary — not a numerical dead
+  zone (mechanism (a)'s sigmoid saturation) and not a single stuck unit
+  (Basic RNN's tanh saturation) — a coordinated multi-unit transition with
+  essentially no margin between "confidently hedge" and "give up."
+- **Two competing hypotheses for why clipping doesn't fix this — both
+  tested, one still standing.** Tracing real paths through the hard-clip
+  wrapper directly: several real paths still collapse under
+  `clip=(-0.15, 0.10)` specifically at the *second* consecutive step the
+  clipped input sits at exactly `0.10` (e.g. idx=157719: first visit to
+  0.10 → delta 0.9998, immediate next step, still clipped to 0.10 → delta
+  0.34 → 0.0002), suggesting exact repetition of an identical clipped value
+  — itself a path shape no noisy real TimeGAN training data ever
+  produces — might be the trigger, not the level per se. **Tested and
+  ruled out**: a corrected soft-clip (identity inside `[lo, hi]`, a smooth
+  `tanh`-based approach to the boundary outside it, C¹-continuous, and
+  critically *never exactly repeating* the same value twice, verified by
+  construction) shows the exact same collapse — real-path rate 97.5% →
+  **97.4%**, statistically unchanged, and the ramp sweep still collapses at
+  the same 0.10-0.135 window despite every input in that region being
+  distinct. (An earlier, uncalibrated soft-clip attempt collapsed even
+  in-distribution ramps, e.g. delta 0.0001 at target 0.05 — a bug in that
+  formula, which compressed the *entire* input range through a single
+  `tanh`, not just the tail beyond `[lo, hi]`; reported here only to record
+  it was a formula bug, not evidence against soft-clipping in general, once
+  corrected to identity-inside/smooth-outside.) With repetition ruled out,
+  the standing explanation is the coordinated-transition finding above: the
+  window between "still correct" (≤0.10) and "fully collapsed" (≥0.135) is
+  narrow enough (0.035) that essentially any clip boundary placed to
+  preserve full in-distribution accuracy sits right at the edge of the
+  transition, with no safe margin to retreat into if training-time noise or
+  evaluation jitter nudges the boundary at all — unlike GRU's broader,
+  gentler degradation and (post-fix) partial-hedge basin, which gave the
+  clipping approach real room to work with.
+- **Not fixed.** No further clipping variant is expected to help, per the
+  above — the problem isn't the shape of the clip function, it's that the
+  learned transition itself is too sharp and too close to the boundary of
+  correct behavior to give any clip room to work with. Untried candidates
+  motivated by this more precise characterization: a smoothness/Lipschitz
+  penalty on the output layer's sensitivity to the top hidden units near
+  this input range during training (directly targeting transition
+  *steepness* rather than the input transform); or training-time exposure
+  to paths that cross this specific boundary slowly and repeatedly (the
+  regime-switching stress test's own paths, not just TimeGAN's), which
+  might teach the network a gentler transition the way real data forced GRU
+  to have one. Both untried here.
 
 ## TimeGAN: the paper's actual Part II generator
 
@@ -2071,10 +2146,30 @@ Roughly in priority order:
      follow-up](#follow-up-training-with-the-clip-active-from-the-start-closes-more-of-the-gap-than-the-inference-only-wrapper-did)
      for the full numbers and the worst-path inspection.
      GRU is now a substantially narrower, better-characterized (and now
-     partially fixed) problem than LSTM within mechanism (b); LSTM's
-     failure mechanism remains unexplained beyond "near-deterministic
-     collapse past the training boundary," and clipping — the one fix idea
-     tested against it — doesn't touch it.
+     partially fixed) problem than LSTM within mechanism (b). **LSTM's
+     failure mechanism is now also precisely characterized, though still
+     unfixed**: a manual step-by-step unroll of the trained LSTM (verified
+     to match `nn.LSTM`'s real output to 1e-6) shows only 1-2 of 64 hidden
+     units are ever individually saturated — the earlier "not saturated"
+     finding was real but incomplete — while roughly 10 units move smoothly
+     but in tight lockstep across an input window just 0.035 log-moneyness
+     wide (pre-sigmoid logit +6.3 → −12.0 between log-moneyness 0.100 and
+     0.135), a genuine steep learned decision boundary, not a numerical dead
+     zone. A corrected, exactly-non-repeating soft-clip variant (identity
+     inside the clip range, smooth `tanh` approach outside it — ruling out
+     "exact repeated input value" as the trigger, the leading alternative
+     hypothesis from tracing real collapsed paths) shows the identical
+     collapse rate (97.5% → 97.4%), confirming the transition itself, not
+     the shape of any clipping function, is the obstacle: the margin between
+     "still correct" and "fully collapsed" is too narrow for any clip
+     boundary to have room to work with, unlike GRU's broader, gentler
+     degradation. See the [full
+     diagnosis](#follow-up-lstm-timegans-failure-is-a-razor-thin-coordinated-hidden-unit-transition-not-a-saturation-or-repetition-artifact).
+     Clipping — every fix idea tested against LSTM so far — doesn't touch
+     it; the untried candidates that follow from this more precise
+     characterization (a steepness/Lipschitz penalty on the transition
+     itself, or training-time exposure to paths that cross this boundary
+     slowly) are different in kind from anything tried for GRU.
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -2301,12 +2396,17 @@ Roughly in priority order:
     (b) rather than eliminating it for GRU. Remaining unexplored ideas: a
     systematic clip-bound sweep (only `(-0.15, 0.10)` has been tried);
     multi-seed validation (single seed throughout, same caveat as
-    everywhere else in this document); and LSTM's failure, which the
-    clipping result suggests is a genuinely different (and still
-    unexplained) mechanism from GRU's, not the same problem at a different
-    severity — clipping was the one fix idea tested against it, and it
-    didn't move LSTM's numbers. An adversarial/extreme-scenario data
-    augmentation step targeted at GRU's remaining single-path failure
+    everywhere else in this document). **LSTM's failure is now precisely
+    characterized** (a manual gate-level unroll found a coordinated,
+    ~10-hidden-unit transition compressed into a 0.035-log-moneyness-wide
+    window, not a saturation or exact-input-repetition artifact — both
+    alternative explanations were directly tested and ruled out; see the
+    [full diagnosis](#follow-up-lstm-timegans-failure-is-a-razor-thin-coordinated-hidden-unit-transition-not-a-saturation-or-repetition-artifact)),
+    but still not fixed — a steepness/Lipschitz penalty on the transition
+    during training, or training-time exposure to paths that cross this
+    specific boundary slowly and repeatedly, are the two candidates this
+    characterization suggests, both untried. An adversarial/extreme-scenario
+    data augmentation step targeted at GRU's remaining single-path failure
     (rather than the input transform) remains untried. **Basic RNN (TimeGAN)
     specifically is a narrower, better-characterized sub-problem**: its
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
