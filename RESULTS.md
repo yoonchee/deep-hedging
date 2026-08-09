@@ -1617,43 +1617,53 @@ weights was used instead (verified to match `nn.LSTM`'s actual output to
   1e-7 — distinct in floating point, not distinguishable to the network.
   The soft-clip reproduced the repetition condition instead of removing
   it, which the writeup should have caught before calling it "verified by
-  construction." **Redone properly**: a clean synthetic probe that ramps to
-  a fixed level, then *holds exactly that level* for 40 further steps
-  (varying only whether the level is reached gradually or approached
-  correctly, with no clipping involved at all) gives a genuinely
-  surprising and more complicated result. Ramping smoothly to log-moneyness
-  0.09 over 10 steps (delta collapses to ~0.0002 by the time the ramp
-  reaches 0.09, a *transient* dip) and then holding at exactly 0.09:
-  **delta recovers on its own**, climbing back from 0.0002 through 0.008,
-  0.54, 0.94, to 0.99998 by step 26 of the hold, and stays there — a
-  genuine, unforced recovery at a constant input, with no clip and no
-  change in level. But this recovery is fragile, not a general "holding
-  fixes it" rule: the identical experiment landing at 0.10 instead of 0.09
-  (one hundredth higher, still gradual approach) does **not** recover —
-  delta stays at 0.00000-0.00009 for the entire 40-step hold. Neither does
-  an *abrupt* single-step jump straight to 0.09 or to 0.10 with no ramp at
-  all (both stay at 0.00000 throughout). So recovery depends on both the
-  landing level *and* the approach velocity in a way this document hasn't
-  fully characterized — not a clean function of level alone (0.09 vs. 0.10
-  differ by only 0.01 yet behave oppositely), not a clean function of
-  repetition alone (the 0.09 slow-ramp case relies on exactly the
-  repeated-value pattern the original "ruled out" claim dismissed), and not
-  explained by approach speed alone either (only the *gradual* 0.09 case
-  recovers, not the abrupt one at the same level). **This is reported as an
-  open, only-partially-characterized finding, not a resolved mechanism** —
-  correcting the earlier overclaim rather than replacing it with a new one.
-  What *is* clear from this and the real-path evidence already on record
-  (43.4%/96.8%/97.4% collapse rates persisting across every clip variant
-  tried): whatever narrow, trajectory-dependent recovery basin exists near
-  0.09 is not one real market paths reliably land in, so it doesn't rescue
-  the aggregate numbers regardless of how it's ultimately explained.
-- **The standing explanation for why clipping doesn't help, net of both
-  corrections above**: the window between "still correct" (≤0.09, and only
-  reliably so if approached gradually) and "fully collapsed" (≥0.10-0.13,
-  or even 0.09 itself if approached abruptly) is narrow enough, and
-  trajectory-dependent enough, that essentially any clip boundary placed to
-  preserve full in-distribution accuracy sits right at the edge of the
-  transition, with no safe margin to retreat into if training-time noise or
+  construction." **Redone properly, twice** — the first redo (ramp to 0.09
+  over 10 steps vs. ramp to 0.10 over 10 steps) still confounded level with
+  velocity (0.09 in 10 steps is a 0.0100 step size, 0.10 in 10 steps is
+  0.0111 — both variables moved at once, the identical mismatched-trajectory
+  problem being corrected above), so it was redone a second time isolating
+  velocity properly: **fix the landing level at exactly 0.09, vary only the
+  number of ramp steps used to reach it** (30, 20, 15, 10, 7, 5, 3, 1),
+  then hold at 0.09 for 40 further steps in every case. The result is clean
+  and monotone in approach speed alone:
+
+  | ramp steps to 0.09 | step size | dip depth (min delta) | recovers after 40-step hold? |
+  |---|---|---|---|
+  | 30 | 0.0030 | 0.470 | yes (never really dips) |
+  | 20 | 0.0045 | 0.305 | yes |
+  | 15 | 0.0060 | 0.0085 | yes |
+  | 10 | 0.0090 | 0.00015 | yes (by step ~22 of the hold) |
+  | 7 | 0.0129 | 0.00000 | yes |
+  | 5 | 0.0180 | 0.00000 | **no** |
+  | 3 | 0.0300 | 0.00000 | no |
+  | 1 | 0.0900 | 0.00000 | no |
+
+  Landing level is identical (0.09) in every row; only the approach speed
+  changes, and recovery flips cleanly between step sizes 0.0129 and 0.0180
+  — **this is a velocity-dependent transition, not a level-dependent one**,
+  confirming the direction the earlier (confounded) 0.09-vs-0.10 comparison
+  pointed at but didn't actually isolate. A slow enough approach barely
+  dips at all; a fast enough approach not only dips but gets stuck there
+  even once the input stops moving and holds steady — a genuine, if
+  narrow, velocity-triggered hysteresis in the recurrent dynamics, not
+  simply a function of "how far in the money." Repetition (the same input
+  value recurring) is present in every row here, including the ones that
+  recover, so it isn't the trigger either — velocity is the variable that
+  actually explains the split. What *is* still clear from the real-path
+  evidence already on record (43.4%/96.8%/97.4% collapse rates persisting
+  across every clip variant tried): real market paths that reach this
+  region essentially never do so slowly enough (≤0.013 log-moneyness per
+  step, sustained) to land in the recovering regime, so this finding
+  explains the mechanism without offering a usable fix — clipping can't
+  slow down the underlying price path's velocity, only its level.
+- **The standing explanation for why clipping doesn't help, net of the
+  corrections above**: the transition itself is real, narrow, and
+  triggered by how fast log-moneyness moves rather than the level it
+  reaches — a variable no input-clamping transform can address, since
+  clipping changes what value the network sees, not how quickly the
+  underlying price got there. Any clip boundary placed to preserve full
+  in-distribution accuracy sits right at the edge of the transition, with
+  no safe margin to retreat into if training-time noise or
   evaluation jitter nudges the boundary at all — unlike GRU's broader,
   gentler degradation and (post-fix) partial-hedge basin, which gave the
   clipping approach real room to work with.
@@ -2177,22 +2187,23 @@ Roughly in priority order:
      narrow band of log-moneyness (roughly 0.04 wide within a single ramp
      trajectory) separates confident hedging from collapse, a real, steep,
      learned transition rather than a numerical dead zone. Whether clipping
-     could work in principle was tested carefully, including a follow-up
-     correction after an initial soft-clip experiment turned out to
-     inadvertently reproduce the same near-identical-input pattern it was
-     meant to rule out: a clean hold-at-fixed-level probe (no clipping
-     involved) found recovery is *possible* but fragile and
-     trajectory-dependent — a slow ramp landing at exactly 0.09 recovers
-     after ~15 steps, but landing at 0.10 instead, or reaching 0.09 via an
-     abrupt jump instead of a gradual ramp, does not. This narrow, fragile
-     recovery basin isn't one real market paths reliably land in (collapse
-     rate stays 96-97% across every clip variant tried), so it doesn't
-     explain a usable fix, but it does mean this document doesn't have a
-     single clean rule (pure level, pure repetition, or pure velocity) for
-     LSTM's transition the way it does for GRU's. See the [full
+     could work in principle was tested carefully, including two rounds of
+     self-correction after earlier probes overclaimed cleaner results than
+     they actually supported (a soft-clip meant to rule out exact input
+     repetition instead reproduced it via `tanh` saturation; a first
+     hold-at-fixed-level probe confounded landing level with approach
+     velocity). **Properly isolated** (fixed landing level at 0.09, only
+     the number of ramp steps used to reach it varied): recovery is clean
+     and monotone in approach speed alone, flipping between step sizes
+     0.0129 (recovers within the 40-step hold) and 0.0180 (never does) —
+     a genuine velocity-triggered hysteresis, not a level threshold and not
+     input repetition. This narrow recovery basin isn't one real market
+     paths reliably land in (collapse rate stays 96-97% across every clip
+     variant tried, since clipping controls level, not velocity), so it
+     explains the mechanism without offering a usable fix. See the [full
      diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
-     for the corrected numbers and the probes that overturned the first
-     draft of this finding. Clipping — every fix idea tested against LSTM
+     for the corrected numbers and the two rounds of self-correction.
+     Clipping — every fix idea tested against LSTM
      so far — doesn't touch it; a steepness/Lipschitz penalty on the
      transition during training, or training-time exposure to paths that
      cross this boundary slowly, are untried candidates different in kind
@@ -2426,14 +2437,17 @@ Roughly in priority order:
     everywhere else in this document). **LSTM's failure is better
     characterized than before, though not fully resolved** (a manual
     gate-level unroll found only 1-2 of 64 hidden units are individually
-    saturated, not the broad saturation an aggregate check would suggest,
-    with a narrow ~0.04-wide transition band instead; a clean hold-at-fixed-
-    level probe found recovery is possible but fragile and
-    trajectory-dependent — level and approach-velocity both matter, and
-    neither a pure-level nor a pure-repetition story fits every case tested;
-    see the [full diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
-    including the corrections made to the first draft of this finding after
-    a flawed probe overclaimed a cleaner result), but still not fixed — a
+    saturated, not the broad saturation an aggregate check would suggest;
+    a velocity-isolated hold-at-fixed-level probe — fixing the landing
+    level and varying only the number of steps used to reach it — found a
+    clean, monotone result: recovery depends on how fast log-moneyness
+    approaches the transition, not the level it reaches or whether the
+    input value repeats, flipping cleanly between approach step sizes
+    0.0129 (recovers) and 0.0180 (doesn't); see the [full
+    diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
+    including two corrections made to earlier drafts of this finding after
+    confounded probes overclaimed cleaner results than the evidence
+    supported), but still not fixed — a
     steepness/Lipschitz penalty on the transition during training, or
     training-time exposure to paths that cross this specific boundary
     slowly and repeatedly, are two candidates this characterization
