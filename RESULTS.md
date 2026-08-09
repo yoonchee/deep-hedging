@@ -1464,7 +1464,7 @@ the `self.rnn(...)` call, otherwise identical:
   problem the way GRU's partially is, so clamping the input doesn't reach
   it. **What does explain LSTM's failure is now precisely characterized —
   see the [follow-up
-  diagnosis](#follow-up-lstm-timegans-failure-is-a-razor-thin-coordinated-hidden-unit-transition-not-a-saturation-or-repetition-artifact)
+  diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
   below.**
 - **The clip itself isn't complete even for GRU**: the same ramp sweep that
   shows the fix working through target 2.0 also shows a *new* degradation
@@ -1575,7 +1575,7 @@ test time the way the wrapper experiment above did.
   mechanism is now precisely characterized, though still not fixed — see
   the follow-up immediately below.**
 
-#### Follow-up: LSTM (TimeGAN)'s failure is a razor-thin, coordinated hidden-unit transition, not a saturation or repetition artifact
+#### Follow-up: LSTM (TimeGAN)'s failure is a narrow, trajectory-dependent transition, not simple saturation
 
 Clipping was tested and ruled out for LSTM above, but *why* it doesn't work
 wasn't yet understood — this follow-up root-causes it via the same
@@ -1593,43 +1593,65 @@ weights was used instead (verified to match `nn.LSTM`'s actual output to
   `hidden_states.min()/.max()` check (used for Basic RNN's diagnosis)
   would flag, since that check only reports whether *any* unit hits the
   boundary, not how many.
-- **The real mechanism: roughly 10 hidden units move smoothly but in a
-  tightly coordinated way across an extremely narrow input window.**
-  Sweeping the ramp construction in 0.005 increments around the cliff
-  (log-moneyness 0.080 → 0.135) and comparing the top layer's full 64-unit
-  hidden vector at the last-good point (0.100, delta 0.998) against the
-  first-collapsed point (0.135, delta ~0): 10 units (of 64) each shift their
-  contribution to the output logit by roughly 1-3 units, and every one of
-  the 10 moves in the same direction — the raw pre-sigmoid logit falls from
-  **+6.3 to −12.0** over an input window just **0.035 log-moneyness wide**.
-  This is a real, steep, *learned* decision boundary — not a numerical dead
-  zone (mechanism (a)'s sigmoid saturation) and not a single stuck unit
-  (Basic RNN's tanh saturation) — a coordinated multi-unit transition with
-  essentially no margin between "confidently hedge" and "give up."
-- **Two competing hypotheses for why clipping doesn't fix this — both
-  tested, one still standing.** Tracing real paths through the hard-clip
-  wrapper directly: several real paths still collapse under
-  `clip=(-0.15, 0.10)` specifically at the *second* consecutive step the
-  clipped input sits at exactly `0.10` (e.g. idx=157719: first visit to
-  0.10 → delta 0.9998, immediate next step, still clipped to 0.10 → delta
-  0.34 → 0.0002), suggesting exact repetition of an identical clipped value
-  — itself a path shape no noisy real TimeGAN training data ever
-  produces — might be the trigger, not the level per se. **Tested and
-  ruled out**: a corrected soft-clip (identity inside `[lo, hi]`, a smooth
-  `tanh`-based approach to the boundary outside it, C¹-continuous, and
-  critically *never exactly repeating* the same value twice, verified by
-  construction) shows the exact same collapse — real-path rate 97.5% →
-  **97.4%**, statistically unchanged, and the ramp sweep still collapses at
-  the same 0.10-0.135 window despite every input in that region being
-  distinct. (An earlier, uncalibrated soft-clip attempt collapsed even
-  in-distribution ramps, e.g. delta 0.0001 at target 0.05 — a bug in that
-  formula, which compressed the *entire* input range through a single
-  `tanh`, not just the tail beyond `[lo, hi]`; reported here only to record
-  it was a formula bug, not evidence against soft-clipping in general, once
-  corrected to identity-inside/smooth-outside.) With repetition ruled out,
-  the standing explanation is the coordinated-transition finding above: the
-  window between "still correct" (≤0.10) and "fully collapsed" (≥0.135) is
-  narrow enough (0.035) that essentially any clip boundary placed to
+- **Correction to an earlier version of this section**: the original
+  writeup here characterized the transition as "+6.3 → −12.0 over a
+  0.035-wide window" by comparing the top layer's hidden vector between two
+  *different* ramp constructions (`linspace(0, 0.100, 30)` vs.
+  `linspace(0, 0.135, 30)`, step sizes 0.00345 vs. 0.00466) — this compares
+  two trajectories with different velocities, not one trajectory crossing a
+  threshold, the same step-count/level confound this document already
+  names elsewhere for the ramp diagnostic. Re-run as a single continuous
+  ramp (one trajectory, `linspace(0, 0.30, 30)`, printing delta at every
+  step) to isolate it properly: the collapse still happens over a narrow
+  band **within the one trajectory** — delta 0.96 at log-moneyness 0.052,
+  falling to 0.00001 by 0.093, roughly a 0.04-wide window, matching the
+  original claim's order of magnitude despite the flawed original
+  methodology — but the exact endpoints shift and shouldn't be quoted to
+  three significant figures the way the original version did.
+- **A second correction: the "repetition ruled out" claim doesn't survive
+  scrutiny either, and the real picture is more intricate than either
+  original hypothesis.** The soft-clip test that was reported as "ruling
+  out" exact-repetition wasn't actually testing it: at `k=8`,
+  `tanh(k·(x−hi))/k` saturates so hard beyond roughly `hi+0.5` that
+  consecutive inputs from real paths in that range differ by ~1e-5 to
+  1e-7 — distinct in floating point, not distinguishable to the network.
+  The soft-clip reproduced the repetition condition instead of removing
+  it, which the writeup should have caught before calling it "verified by
+  construction." **Redone properly**: a clean synthetic probe that ramps to
+  a fixed level, then *holds exactly that level* for 40 further steps
+  (varying only whether the level is reached gradually or approached
+  correctly, with no clipping involved at all) gives a genuinely
+  surprising and more complicated result. Ramping smoothly to log-moneyness
+  0.09 over 10 steps (delta collapses to ~0.0002 by the time the ramp
+  reaches 0.09, a *transient* dip) and then holding at exactly 0.09:
+  **delta recovers on its own**, climbing back from 0.0002 through 0.008,
+  0.54, 0.94, to 0.99998 by step 26 of the hold, and stays there — a
+  genuine, unforced recovery at a constant input, with no clip and no
+  change in level. But this recovery is fragile, not a general "holding
+  fixes it" rule: the identical experiment landing at 0.10 instead of 0.09
+  (one hundredth higher, still gradual approach) does **not** recover —
+  delta stays at 0.00000-0.00009 for the entire 40-step hold. Neither does
+  an *abrupt* single-step jump straight to 0.09 or to 0.10 with no ramp at
+  all (both stay at 0.00000 throughout). So recovery depends on both the
+  landing level *and* the approach velocity in a way this document hasn't
+  fully characterized — not a clean function of level alone (0.09 vs. 0.10
+  differ by only 0.01 yet behave oppositely), not a clean function of
+  repetition alone (the 0.09 slow-ramp case relies on exactly the
+  repeated-value pattern the original "ruled out" claim dismissed), and not
+  explained by approach speed alone either (only the *gradual* 0.09 case
+  recovers, not the abrupt one at the same level). **This is reported as an
+  open, only-partially-characterized finding, not a resolved mechanism** —
+  correcting the earlier overclaim rather than replacing it with a new one.
+  What *is* clear from this and the real-path evidence already on record
+  (43.4%/96.8%/97.4% collapse rates persisting across every clip variant
+  tried): whatever narrow, trajectory-dependent recovery basin exists near
+  0.09 is not one real market paths reliably land in, so it doesn't rescue
+  the aggregate numbers regardless of how it's ultimately explained.
+- **The standing explanation for why clipping doesn't help, net of both
+  corrections above**: the window between "still correct" (≤0.09, and only
+  reliably so if approached gradually) and "fully collapsed" (≥0.10-0.13,
+  or even 0.09 itself if approached abruptly) is narrow enough, and
+  trajectory-dependent enough, that essentially any clip boundary placed to
   preserve full in-distribution accuracy sits right at the edge of the
   transition, with no safe margin to retreat into if training-time noise or
   evaluation jitter nudges the boundary at all — unlike GRU's broader,
@@ -2147,29 +2169,34 @@ Roughly in priority order:
      for the full numbers and the worst-path inspection.
      GRU is now a substantially narrower, better-characterized (and now
      partially fixed) problem than LSTM within mechanism (b). **LSTM's
-     failure mechanism is now also precisely characterized, though still
-     unfixed**: a manual step-by-step unroll of the trained LSTM (verified
-     to match `nn.LSTM`'s real output to 1e-6) shows only 1-2 of 64 hidden
-     units are ever individually saturated — the earlier "not saturated"
-     finding was real but incomplete — while roughly 10 units move smoothly
-     but in tight lockstep across an input window just 0.035 log-moneyness
-     wide (pre-sigmoid logit +6.3 → −12.0 between log-moneyness 0.100 and
-     0.135), a genuine steep learned decision boundary, not a numerical dead
-     zone. A corrected, exactly-non-repeating soft-clip variant (identity
-     inside the clip range, smooth `tanh` approach outside it — ruling out
-     "exact repeated input value" as the trigger, the leading alternative
-     hypothesis from tracing real collapsed paths) shows the identical
-     collapse rate (97.5% → 97.4%), confirming the transition itself, not
-     the shape of any clipping function, is the obstacle: the margin between
-     "still correct" and "fully collapsed" is too narrow for any clip
-     boundary to have room to work with, unlike GRU's broader, gentler
-     degradation. See the [full
-     diagnosis](#follow-up-lstm-timegans-failure-is-a-razor-thin-coordinated-hidden-unit-transition-not-a-saturation-or-repetition-artifact).
-     Clipping — every fix idea tested against LSTM so far — doesn't touch
-     it; the untried candidates that follow from this more precise
-     characterization (a steepness/Lipschitz penalty on the transition
-     itself, or training-time exposure to paths that cross this boundary
-     slowly) are different in kind from anything tried for GRU.
+     failure mechanism is better characterized than before, though still
+     unfixed and not fully resolved**: a manual step-by-step unroll of the
+     trained LSTM (verified to match `nn.LSTM`'s real output to 1e-6) shows
+     only 1-2 of 64 hidden units are ever individually saturated — the
+     earlier "not saturated" finding was real but incomplete — while a
+     narrow band of log-moneyness (roughly 0.04 wide within a single ramp
+     trajectory) separates confident hedging from collapse, a real, steep,
+     learned transition rather than a numerical dead zone. Whether clipping
+     could work in principle was tested carefully, including a follow-up
+     correction after an initial soft-clip experiment turned out to
+     inadvertently reproduce the same near-identical-input pattern it was
+     meant to rule out: a clean hold-at-fixed-level probe (no clipping
+     involved) found recovery is *possible* but fragile and
+     trajectory-dependent — a slow ramp landing at exactly 0.09 recovers
+     after ~15 steps, but landing at 0.10 instead, or reaching 0.09 via an
+     abrupt jump instead of a gradual ramp, does not. This narrow, fragile
+     recovery basin isn't one real market paths reliably land in (collapse
+     rate stays 96-97% across every clip variant tried), so it doesn't
+     explain a usable fix, but it does mean this document doesn't have a
+     single clean rule (pure level, pure repetition, or pure velocity) for
+     LSTM's transition the way it does for GRU's. See the [full
+     diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
+     for the corrected numbers and the probes that overturned the first
+     draft of this finding. Clipping — every fix idea tested against LSTM
+     so far — doesn't touch it; a steepness/Lipschitz penalty on the
+     transition during training, or training-time exposure to paths that
+     cross this boundary slowly, are untried candidates different in kind
+     from anything tried for GRU.
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -2396,16 +2423,23 @@ Roughly in priority order:
     (b) rather than eliminating it for GRU. Remaining unexplored ideas: a
     systematic clip-bound sweep (only `(-0.15, 0.10)` has been tried);
     multi-seed validation (single seed throughout, same caveat as
-    everywhere else in this document). **LSTM's failure is now precisely
-    characterized** (a manual gate-level unroll found a coordinated,
-    ~10-hidden-unit transition compressed into a 0.035-log-moneyness-wide
-    window, not a saturation or exact-input-repetition artifact — both
-    alternative explanations were directly tested and ruled out; see the
-    [full diagnosis](#follow-up-lstm-timegans-failure-is-a-razor-thin-coordinated-hidden-unit-transition-not-a-saturation-or-repetition-artifact)),
-    but still not fixed — a steepness/Lipschitz penalty on the transition
-    during training, or training-time exposure to paths that cross this
-    specific boundary slowly and repeatedly, are the two candidates this
-    characterization suggests, both untried. An adversarial/extreme-scenario
+    everywhere else in this document). **LSTM's failure is better
+    characterized than before, though not fully resolved** (a manual
+    gate-level unroll found only 1-2 of 64 hidden units are individually
+    saturated, not the broad saturation an aggregate check would suggest,
+    with a narrow ~0.04-wide transition band instead; a clean hold-at-fixed-
+    level probe found recovery is possible but fragile and
+    trajectory-dependent — level and approach-velocity both matter, and
+    neither a pure-level nor a pure-repetition story fits every case tested;
+    see the [full diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
+    including the corrections made to the first draft of this finding after
+    a flawed probe overclaimed a cleaner result), but still not fixed — a
+    steepness/Lipschitz penalty on the transition during training, or
+    training-time exposure to paths that cross this specific boundary
+    slowly and repeatedly, are two candidates this characterization
+    suggests, both untried, and a fuller characterization of the
+    velocity/level/duration interaction remains open too. An
+    adversarial/extreme-scenario
     data augmentation step targeted at GRU's remaining single-path failure
     (rather than the input transform) remains untried. **Basic RNN (TimeGAN)
     specifically is a narrower, better-characterized sub-problem**: its
