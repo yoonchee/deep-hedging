@@ -2460,7 +2460,14 @@ Roughly in priority order:
     vanilla RNN's hidden state is saturated at tanh's ±1.0 boundary
     regardless of input — confirmed via direct inspection, and confirmed
     *not* fixed by `grad_clip_norm`, `orthogonal_init` (now both wired to
-    the CLI), or the combination. The final checkpoint's recurrent weight
+    the CLI), or the combination — **and, checked once `moneyness_clip`
+    existed as an option, not fixed by that either (identical numbers to
+    the 4th decimal place, worst_loss/below_-50/CVaR95/CVaR99 all exactly
+    unchanged)**, as expected once the hidden state was directly confirmed
+    saturated (100% of units at `|h|>0.999`) even at log-moneyness exactly
+    0 — a completely in-distribution input clipping has no reason to touch,
+    since the problem was never about extreme inputs in the first place.
+    The final checkpoint's recurrent weight
     norms are large (`weight_ih_l1` ≈ 14.6) and saturation was already
     present by epoch 100 in the reduced-scale probes — consistent with,
     but not confirmed as, runaway growth during training (the weight
