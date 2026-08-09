@@ -2725,3 +2725,27 @@ Roughly in priority order:
   `grad_clip_norm=1.0` treatment as its two neighbors is now direct
   evidence, not speculation, and should be the first thing whoever revisits
   this does.
+- **Attempt LSTM (TimeGAN)'s velocity-hysteresis fix — deferred, not
+  attempted, this session.** A 12-hour autonomous work session budgeted
+  ~4-5 hours for this as its third and last priority, behind the Basic RNN
+  Part I fix and the α=0.995 dip sweep above. The first item alone consumed
+  ~8 of the 12 hours (estimated at 2.5h; the full-scale canonical-table
+  regeneration run took ~4.2h against a ~1h estimate), leaving too little
+  budget to start a multi-hour fix attempt properly rather than abandon it
+  partway with an inconclusive result. Documented here explicitly as a
+  scheduling deferral, not a forgotten item: the diagnosis above (see
+  [mechanism (b)](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
+  and Known Limitations item 5(b)) already identifies the two untried
+  candidates and rules out clipping in principle, since clipping controls
+  input *level* and this is a *velocity*-triggered transition. The more
+  concrete of the two — **training-time exposure to slow, gradual passes
+  through the critical log-moneyness zone (~0.08-0.14, where the
+  0.0129-vs-0.0180 step-size recovery boundary was measured)**, e.g. by
+  augmenting TimeGAN's training batches with synthetic slow-ramp paths
+  through this exact region, or reweighting real-path training batches
+  toward paths that linger there — is the recommended next attempt over
+  the Lipschitz-penalty alternative, since it directly targets the
+  variable the diagnosis identified (approach speed) rather than trying to
+  suppress transition steepness indirectly. Time-box any future attempt at
+  ~4-5h with a real negative result written up if it doesn't converge,
+  matching how every other fix attempt in this document was closed out.
