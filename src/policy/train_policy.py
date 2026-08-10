@@ -21,6 +21,7 @@ if str(_SRC_DIR) not in sys.path:
 
 from common.black_scholes import BlackScholesDeltaPolicy  # noqa: E402
 from common.checkpoints import checkpoint_filename  # noqa: E402
+from common.device import select_device  # noqa: E402
 from environment.market_env import MarketEnvironment, estimate_premium_monte_carlo  # noqa: E402
 from generator.market_gan import Generator  # noqa: E402
 from generator.train_timegan import load_timegan_price_generator  # noqa: E402
@@ -123,7 +124,15 @@ class PolicyTrainer:
             "RecurrentHedgingAgent policy.",
         ] = 0.0,
     ) -> None:
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or select_device()
+        if smoothness_penalty_weight > 0.0 and self.device.type == "mps":
+            raise ValueError(
+                "smoothness_penalty_weight's double-backward through an nn.LSTM "
+                "(torch.autograd.grad(..., create_graph=True)) is not supported on "
+                "MPS as of torch 2.8 ('derivative for lstm_mps_backward is not "
+                "implemented') -- pass device=torch.device('cpu') (or --device cpu "
+                "on the CLI) when using this flag."
+            )
         self.policy = policy.to(self.device)
         self.generator = generator.to(self.device)
         self.environment = environment
@@ -471,6 +480,16 @@ def main() -> None:
         "disabled -- see RESULTS.md's mechanism (a) writeup for why this matters even "
         "for the feed-forward MLP, not just recurrent architectures.",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="force a specific device ('cpu', 'cuda', 'mps'). Default (None) "
+        "auto-detects the fastest available (cuda > mps > cpu) -- see "
+        "common/device.py for the benchmarked rationale. Force 'cpu' when "
+        "using --smoothness-penalty-weight, whose double-backward through an "
+        "nn.LSTM is unsupported on MPS.",
+    )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -491,7 +510,8 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device(args.device)
+    print(f"Using device: {device}")
 
     if args.generator_type == "timegan":
         generator = load_timegan_price_generator(
@@ -511,6 +531,15 @@ def main() -> None:
             num_layers=args.gen_num_layers,
         )
         suffix = ""
+
+    # Move the (frozen, pretrained) generator to the target device now, not
+    # just inside PolicyTrainer.__init__ -- _train_and_save's premium
+    # estimation runs the generator before PolicyTrainer is ever
+    # constructed, and would otherwise crash with a device mismatch on any
+    # non-CPU device (surfaced by MPS; the same latent bug applied to CUDA,
+    # just never exercised since every run before this used --device cpu
+    # implicitly).
+    generator = generator.to(device)
 
     if args.alpha_sweep is not None:
         alphas = [float(a) for a in args.alpha_sweep.split(",")]

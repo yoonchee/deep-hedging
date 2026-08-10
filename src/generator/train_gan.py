@@ -26,6 +26,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from common.device import select_device  # noqa: E402
 from common.stats import excess_kurtosis, excess_kurtosis_tensor, skewness, skewness_tensor, terminal_log_return  # noqa: E402
 from generator.data import HistoricalPriceLoader, sample_real_prices  # noqa: E402
 from generator.market_gan import Discriminator, Generator  # noqa: E402
@@ -88,7 +89,7 @@ class WGANGPTrainer:
         ] = None,
         device: Optional[torch.device] = None,
     ) -> None:
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or select_device()
         self.generator = generator.to(self.device)
         self.discriminator = discriminator.to(self.device)
         self.lambda_gp = lambda_gp
@@ -229,10 +230,19 @@ def main() -> None:
         default="checkpoints/market_gan.pt",
         help="path to save trained generator/discriminator weights",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="force a specific device ('cpu', 'cuda', 'mps'). Default (None) "
+        "auto-detects the fastest available (cuda > mps > cpu) -- see "
+        "common/device.py.",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device(args.device)
+    print(f"Using device: {device}")
 
     generator = Generator(
         noise_dim=args.noise_dim,

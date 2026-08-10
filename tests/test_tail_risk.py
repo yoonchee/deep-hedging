@@ -62,8 +62,20 @@ _SCAN_SEED = 42
 # extra flags reproduces the *pre-fix* checkpoint (preserved as
 # checkpoints/hedging_agent_gru_timegan.pt.bak-pre-moneyness-clip-fix), not
 # the promoted one -- pass `--moneyness-clip -0.15 0.10` explicitly.
+#
+# LSTM (TimeGAN) joined this list once mechanism (b)'s velocity-hysteresis
+# fix was found and promoted (RESULTS.md's "Fix attempt continued" writeup):
+# `--slow-ramp-fraction 0.05` (5-seed validated, plus a dose sweep showing
+# 0.05 -- not the naively-better-looking-at-one-seed 0.10 -- is the robust
+# choice). `--architecture lstm --generator-type timegan` with no extra
+# flags reproduces the *pre-fix* checkpoint, not the promoted one -- pass
+# `--slow-ramp-fraction 0.05` explicitly. Note this checkpoint was trained
+# against a freshly-retrained TimeGAN generator (checkpoints/timegan.pt),
+# not the exact one the other rows in RESULTS.md's attempt-4 table used
+# (that one wasn't preserved) -- see the promoted-checkpoint caveat there.
 _KNOWN_GOOD_CHECKPOINTS = [
     "MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)", "MLP (alpha=0.99)",
+    "LSTM (TimeGAN)",
 ]
 
 # Same table's checkpoints with a confirmed, not-yet-fixed catastrophic tail.
@@ -72,16 +84,16 @@ _KNOWN_GOOD_CHECKPOINTS = [
 # below this file's 50,000-path scan's sensitivity: verified directly, a
 # seed=42 scan at that scale reads 0/50,000 below -50 for the current
 # checkpoint, which would make this list's below_-50_count > 0 assertion
-# fail. Basic RNN/LSTM/GRU (TimeGAN): mechanism (b) (TimeGAN-trained
-# recurrent policies generalizing badly to price extremes) for LSTM/GRU
-# (checked: healthy delta span, not saturated). Basic RNN (TimeGAN)
-# specifically was further diagnosed and turned out to be a third, distinct
-# mechanism: its vanilla-RNN hidden state is saturated to tanh's +-1.0 bound
-# regardless of input (constant delta output) -- confirmed not fixed by
-# grad_clip_norm, orthogonal_init, or both together (all tested; see
-# RESULTS.md). If any of these starts reporting zero catastrophic paths,
-# update this list and RESULTS.md's Known Limitations item 5 together.
-_KNOWN_BAD_CHECKPOINTS = ["Basic RNN (TimeGAN)", "LSTM (TimeGAN)", "GRU (TimeGAN)"]
+# fail. Basic RNN/GRU (TimeGAN): mechanism (b) (TimeGAN-trained recurrent
+# policies generalizing badly to price extremes) for GRU (checked: healthy
+# delta span, not saturated). Basic RNN (TimeGAN) specifically was further
+# diagnosed and turned out to be a third, distinct mechanism: its
+# vanilla-RNN hidden state is saturated to tanh's +-1.0 bound regardless of
+# input (constant delta output) -- confirmed not fixed by grad_clip_norm,
+# orthogonal_init, or both together (all tested; see RESULTS.md). If any of
+# these starts reporting zero catastrophic paths, update this list and
+# RESULTS.md's Known Limitations item 5 together.
+_KNOWN_BAD_CHECKPOINTS = ["Basic RNN (TimeGAN)", "GRU (TimeGAN)"]
 
 _checkpoints_available = pytest.mark.skipif(
     not CHECKPOINT_DIR.exists() or not any(CHECKPOINT_DIR.glob("hedging_agent*.pt")),

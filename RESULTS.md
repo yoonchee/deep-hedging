@@ -1227,6 +1227,64 @@ moved to the known-good list, since 4/500,000 is not actually clean.
   confirmed cause (recurrent hidden-state saturation) with two plausible,
   purpose-built fixes both empirically ruled out — genuinely open, not
   merely unattempted. `Basic RNN (TimeGAN)` stays in the known-bad list.
+- **Follow-up (a much later session, MPS-accelerated, against a
+  from-scratch faithful TimeGAN generator): the untried "lower learning
+  rate for the recurrent weights" candidate genuinely fixes the diagnosed
+  saturation mechanism — but doesn't fix the actual tail risk.** Trained
+  two Basic RNN (TimeGAN) policies against the same `timegan_paper2.pt`
+  generator used throughout this document's later LSTM (TimeGAN)
+  investigation, both with `--use-bs-baseline` (matching every Basic RNN
+  checkpoint's established convention): the default `--lr 1e-2` baseline,
+  and `--lr 1e-3` (10x lower, the same value that fixed an analogous
+  vanilla-RNN weight-norm blowup in Part I — see
+  [above](#basic-rnns-part-i-gap-root-caused-and-fixed-a-learning-rate-specific-weight-blowup);
+  `train_policy.py` has no per-parameter-group `--rnn-lr` the way
+  `replicate_part1.py` does, so this applies the same idea as a blanket
+  `--lr` override for the whole policy). Direct hidden-state inspection
+  (mirroring the saturation-percentage methodology above, now on real
+  TimeGAN-generated paths rather than a spot grid):
+
+  | Checkpoint | Fraction \|h\|>0.999 | Delta span | `weight_hh_l0` norm | `weight_hh_l1` norm |
+  |---|---|---|---|---|
+  | baseline (lr=1e-2) | **1.0000** | 0.173 | 19.19 | 17.91 |
+  | lr=1e-3 | **0.2427** | 1.000 | 5.78 | 11.72 |
+
+  **The saturation mechanism is decisively fixed** — 100% of hidden units
+  pinned at the boundary drops to 24%, delta span goes from ≈0 (constant
+  0.7055 regardless of input, matching the original spot-grid diagnosis
+  almost exactly) to the full [0,1] range, and recurrent weight norms drop
+  3-4x, directly confirming the weight-norm-blowup hypothesis this
+  document's item 2 above already established for Basic RNN's Part I gap.
+  **But the actual regime-switching stress test barely moves, and if
+  anything gets slightly worse**:
+
+  | Checkpoint | CVaR₉₅ | CVaR₉₉ | Skew | Excess kurtosis |
+  |---|---|---|---|---|
+  | baseline (lr=1e-2) | 4.70 | 17.73 | -75.1 | 10,027.2 |
+  | lr=1e-3 | 4.77 | 17.26 | -83.6 | **11,413.1** |
+
+  CVaR₉₉ improves by only 2.6%; kurtosis is 14% *worse*. **This means
+  hidden-state saturation, despite being a real, confirmed, now-fixable
+  mechanism, was not the (or not the only) thing driving Basic RNN
+  (TimeGAN)'s catastrophic tail risk under the stress test.** A newly
+  input-sensitive policy (delta now varies path-to-path: 0.75, 0.89, 0.30,
+  0.43, 0.65 at t=0 across five different training paths, vs. the
+  saturated baseline's near-identical 0.7055 everywhere) is not
+  automatically a *well-calibrated* one — the most likely explanation,
+  consistent with this document's mechanism (b) for LSTM/GRU, is that once
+  saturation stops masking the network's actual behavior, Basic RNN
+  (TimeGAN) runs into the same "generalizes badly to price extremes
+  outside TimeGAN's own training distribution" problem LSTM/GRU already
+  have, just previously hidden behind a simpler, more obviously-diagnosable
+  failure. **Not promoted** — this is a genuine partial advance in
+  understanding (the saturation mechanism specifically is now fixable, a
+  real result worth recording) but not a fix for the behavior RESULTS.md's
+  "Catastrophic tail risk" section actually cares about. `Basic RNN
+  (TimeGAN)` stays in the known-bad list. Untried next step motivated
+  directly by this finding: apply `--slow-ramp-fraction` (LSTM's own
+  promoted fix, targeting exactly this "generalizes badly outside the
+  training distribution" failure mode) on top of the lr=1e-3 fix, now that
+  saturation is no longer masking whatever the RNN's real behavior is.
 - **A production-scale retrain of Basic RNN (TimeGAN) was started and
   killed after 50 minutes at only 14,000/25,000 steps** — far slower than
   the ~27 minutes MLP retrains take at the same step count, apparently
@@ -2133,6 +2191,115 @@ repeatedly found seed-sensitivity to matter for exactly this class of
 result — see the α=0.995 dip finding elsewhere in this document), and
 promoting the checkpoint into `checkpoints/` proper once those hold up.
 
+#### Follow-up: multi-seed check confirms the fix, and reveals it's suppressing something worse than the single-seed table showed
+
+A later session, with MPS acceleration available (see `common/device.py` —
+~5.5x faster than CPU for this exact workload, turning a 78-minute
+paper-scale run into ~11 minutes), ran seeds 1-4 for both baseline and
+`--slow-ramp-fraction 0.05` against the same `timegan_paper2.pt` generator
+(seed 0 already existed from the attempt above). Full 500,000-path
+stress-test results, all five seeds:
+
+| Seed | Baseline CVaR₉₉ | Baseline ExKurt | Slow-ramp CVaR₉₉ | Slow-ramp ExKurt |
+|---|---|---|---|---|
+| 0 | 4.23 | 44.6 | 3.27 | 28.2 |
+| 1 | 4.47 | 49.0 | 3.37 | 29.7 |
+| 2 | 4.48 | 142.7 | 2.78 | 841.9 |
+| 3 | 3.92 | **179,437.9** | 3.97 | 38.4 |
+| 4 | 3.32 | 21.1 | 2.61 | 11.6 |
+
+**CVaR₉₉ improves in 4 of 5 seeds** (mean 4.08 → 3.20, a 21.6% reduction,
+consistent with the original single-seed 23% finding); seed 3 is the one
+exception, a small regression (3.92 → 3.97). But **excess kurtosis is where
+this multi-seed run earns its keep**: seed 3's *baseline* checkpoint has a
+kurtosis of 179,438 — the same order of magnitude as the original
+documented paper-scale LSTM (TimeGAN) catastrophe (~81,035) that motivated
+this entire investigation — while every other baseline seed looks merely
+elevated (21-143). **This is exactly the seed-sensitivity this project has
+repeatedly found elsewhere** (Basic RNN's bimodal seeds, the α=0.995 dip):
+the single-seed table above was not simply "the" LSTM (TimeGAN) baseline,
+it was one roll of a die that occasionally lands on a catastrophic
+outlier. The corresponding slow-ramp checkpoint at that *same* seed drops
+kurtosis to 38.4 — a >4,600x reduction — even though its CVaR₉₉ is
+marginally worse than baseline there (kurtosis is far more sensitive to a
+single extreme path than CVaR₉₉'s 99th-percentile averaging, so a CVaR₉₉
+that looks unremarkable can still hide a catastrophic single-path tail,
+which is exactly what happened at seed 3). Across all 5 seeds: mean
+kurtosis including each condition's own worst outlier is 35,939 for
+baseline vs. **190 for slow-ramp** (189x better); the worst single seed's
+kurtosis is 213x smaller under slow-ramp (841.9 vs. 179,437.9).
+
+**Revised net assessment: the fix is stronger than the single-seed result
+suggested, not weaker.** It doesn't just shave CVaR₉₉/kurtosis in the
+typical case — it substantially suppresses baseline's occasional
+catastrophic-outlier failure mode, the specific pathology (rare paths with
+extreme, seed-dependent tail losses) that RESULTS.md's "Catastrophic tail
+risk" section names as this project's headline paper-scale finding. This
+is now a confirmed, multi-seed-validated result, not a single lucky draw.
+
+#### Follow-up: dose sweep — 0.05 wasn't the optimum, and the dose-response is sharply non-monotonic
+
+Same seed (0), same generator, `--slow-ramp-fraction` at 0.02, 0.10, 0.15,
+0.20, read with the full 500,000-path stress test:
+
+| Dose | CVaR₉₉ | Excess kurtosis |
+|---|---|---|
+| 0.00 (baseline) | 4.23 | 44.6 |
+| 0.02 | 2.69 | 24.5 |
+| 0.05 (multi-seed validated above) | 3.27 | 28.2 |
+| **0.10** | **2.75** | **9.7** |
+| 0.15 | **21.94** | **26,180.9** |
+| 0.20 | 4.38 | 246.7 |
+
+**Both 0.02 and 0.10 beat the already-validated 0.05** — this isn't a
+monotone "more augmentation is better" relationship. **0.15 is
+catastrophic**, not merely worse: CVaR₉₉ and kurtosis both blow up by
+1-3 orders of magnitude, consistent with the very first (never-properly-
+validated) attempt in this document, which also found 0.15 destabilizing,
+on a completely different, non-representative baseline — two independent
+signals now point at instability specifically in this dose region, not
+just one. **0.20 partially recovers** but is still worse than baseline on
+every metric (CVaR₉₉ 4.38 vs. 4.23, kurtosis 246.7 vs. 44.6) — the
+training dynamics don't monotonically improve as the dose keeps rising
+past the unstable region either.
+
+**Caveat, learned directly from the multi-seed check just above**: this
+sweep is single-seed (seed 0 only). Given seed 3's baseline just showed a
+179,438 kurtosis where every other baseline seed showed 21-143, a
+single-seed dose comparison risks exactly the same trap the original 0.05
+finding was in before it got multi-seeded — 0.15's catastrophic reading in
+particular could in principle be partly an unlucky seed-0 draw at that
+specific dose rather than a property of the dose itself, though the
+independent cross-validation against attempt 1's finding (0.15
+destabilizing a *different* baseline entirely) makes that less likely than
+it would be for an isolated data point. Dose 0.10 (lowest kurtosis, second-
+lowest CVaR₉₉) was carried forward to its own 4-seed multi-seed check
+before being treated as a promotion candidate — see the follow-up below.
+
+#### Follow-up: dose=0.10's single-seed edge over 0.05 doesn't survive multi-seeding — 0.05 is the one to promote
+
+Dose 0.10 at seeds 1-4 (seed 0 already existed from the sweep above),
+read the same way as the earlier multi-seed check:
+
+| Dose | Mean CVaR₉₉ (5 seeds) | Mean excess kurtosis (5 seeds) | Catastrophic seeds (kurtosis > 500) |
+|---|---|---|---|
+| baseline | 4.08 | 35,939.1 | 1/5 |
+| **0.05** | **3.20** | **190.0** | **1/5** |
+| 0.10 | 8.08 | 3,806.1 | 2/5 |
+
+**This is exactly the trap the dose-sweep section above warned about, now
+confirmed rather than merely hypothesized.** Dose 0.10 looked like the
+clear winner at seed 0 alone (CVaR₉₉ 2.75, kurtosis 9.7 — better than
+0.05's seed-0 numbers on both metrics). Read across 5 seeds, it's worse
+than *baseline* on mean CVaR₉₉ (8.08 vs. 4.08) and has *more* catastrophic
+seeds than dose 0.05 (2/5 vs. 1/5) — two of its five seeds (1 and 3) land
+on severe outliers (kurtosis 3,546 and 15,433) that seed 0 alone gave no
+hint of. **Dose 0.05 remains the best-supported choice of everything
+tested in this document** — the only dose validated at 5 seeds with a
+consistent, moderate improvement over baseline on every seed-aggregate
+metric, rather than a single favorable seed masking higher variance.
+**This is the dose to promote**, not 0.10 or any other point in the sweep.
+
 ## TimeGAN: the paper's actual Part II generator
 
 The WGAN-GP above is a reasonable placeholder, but Kim (2021)'s actual Part
@@ -2409,9 +2576,43 @@ for the full story. CVaR₉₅/₉₉ and the below_-50/-10 path counts all impr
 20-30%; mean wealth and the single worst-case loss are both slightly worse,
 so this is a genuine but partial fix, the same "improved, not fully
 closed" pattern already on record for GRU (WGAN-GP)'s `grad_clip_norm` fix
-above. LSTM (TimeGAN)'s row is unchanged — the same clipping approach was
-tested on it and found not to help (see the fix-attempt writeup); its
-failure mechanism remains open.
+above. LSTM (TimeGAN)'s row above is left unchanged, not struck through —
+clipping specifically was tested against it and found not to help (see the
+fix-attempt writeup), but a different fix (below) eventually did.
+
+**LSTM (TimeGAN) update, promoted**: `--slow-ramp-fraction 0.05` (data
+augmentation exposing the policy to synthetic slow log-moneyness ramps
+through the critical transition zone — see the [full
+diagnosis](#fix-attempt-continued-a-paper-scale-reproduction-that-actually-shows-the-bug-and-a-smoothness-penalty-candidate-that-trades-the-symptom-for-a-worse-disease)
+and its [multi-seed](#follow-up-multi-seed-check-confirms-the-fix-and-reveals-its-suppressing-something-worse-than-the-single-seed-table-showed)
+and [dose-sweep](#follow-up-dose05s-single-seed-edge-over-010-doesnt-survive-multi-seeding--005-is-the-one-to-promote)
+follow-ups) is now `checkpoints/hedging_agent_lstm_timegan.pt`. Unlike
+GRU's row above, this is **not** a like-for-like fix against the *same*
+generator checkpoint this table's other rows used — that original attempt-4
+TimeGAN checkpoint wasn't preserved, so a fresh one was retrained at
+identical scale/methodology (`--data-source yfinance`, batch=178,
+2000/2000/6000-epoch phases) for this fix's own baseline-vs-fixed
+comparison, which came out somewhat differently calibrated (diversity
+110.6% vs. this table's 87.3%). Read the numbers below as "this fix helps
+substantially, confirmed at 5 seeds, against an independently-retrained but
+equivalent-methodology generator" — not as a literal replacement for the
+42.13/-249.4/81,035 above, which remain the historical record for that
+specific (unpreserved) checkpoint. Official `backtester/evaluate.py`
+methodology (`run_backtest`, seed=42, 500,000 paths), against the
+promoted checkpoint:
+
+| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis | mean tx. cost |
+|---|---|---|---|---|---|---|
+| Black-Scholes | -0.033 | 1.20 | 1.85 | -2.24 | 7.6 | 0.0065 |
+| LSTM (TimeGAN), `slow_ramp_fraction=0.05` | -0.040 | 1.75 | **3.24** | **-2.21** | **24.5** | 0.0128 |
+
+CVaR₉₉ 3.24 and kurtosis 24.5 here are both close to Black-Scholes' own
+7.6/1.85 — a dramatically smaller gap than the original 42.13/81,035, and
+consistent with (not just a rerun of) the 5-seed validation above (mean
+CVaR₉₉ 3.20, mean kurtosis 190 across seeds 0-4 on the scratch-methodology
+comparison). This is the first LSTM (TimeGAN) checkpoint promoted into
+`checkpoints/` since the catastrophic-tail-risk finding was first
+documented.
 
 **The best-fidelity generator to date produced the worst-behaved policies
 to date, and the "attractor" framing from attempts 1-3 is superseded by a
@@ -2665,11 +2866,24 @@ Roughly in priority order:
      explains the mechanism without offering a usable fix. See the [full
      diagnosis](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
      for the corrected numbers and the two rounds of self-correction.
-     Clipping — every fix idea tested against LSTM
-     so far — doesn't touch it; a steepness/Lipschitz penalty on the
-     transition during training, or training-time exposure to paths that
-     cross this boundary slowly, are untried candidates different in kind
-     from anything tried for GRU.
+     Clipping doesn't touch it (it controls level, not velocity). **Since
+     resolved and promoted**: a later, much larger investigation (a
+     from-scratch paper-scale reproduction confirming this exact
+     recovers-when-slow/stuck-when-fast signature independently, a
+     Lipschitz-style smoothness penalty tried and decisively ruled out —
+     eliminates the symptom but makes real stress-test tail risk 2-3
+     orders of magnitude worse — and `--slow-ramp-fraction 0.05`, training-
+     time exposure to synthetic slow ramps through the critical zone,
+     validated at 5 seeds and a dose sweep) found and promoted a genuine
+     fix: CVaR₉₉ 42.13 → 3.24, excess kurtosis 81,035 → 24.5 against a
+     freshly-trained but equivalent-methodology TimeGAN generator (the
+     original checkpoint wasn't preserved, so this isn't a strict
+     same-checkpoint comparison — see the caveat where the numbers are
+     reported). See the [attempt-4 promoted-checkpoint
+     update](#attempt-4-paper-scale-batch178-10000-iterations-and-the-papers-own-temporal-traintest-split)
+     above and the [full fix-attempt
+     writeup](#fix-attempt-continued-a-paper-scale-reproduction-that-actually-shows-the-bug-and-a-smoothness-penalty-candidate-that-trades-the-symptom-for-a-worse-disease)
+     for the complete story.
    - **(c) GRU (WGAN-GP): a GRU-specific hidden-state recovery lag after a
      rare downward shock** — since diagnosed (not just ruled out as
      saturation) and since ~~no fix attempted~~ **substantially, though not
@@ -3083,8 +3297,27 @@ Roughly in priority order:
   rather than clean (slow ramps now stuck, fast ramps now recovering) —
   the stress test is what actually settles it, a methodological lesson
   paired with the smoothness-penalty result: neither instrument alone
-  tells the whole story. **Not yet promoted to `checkpoints/`** — remaining
-  before promotion: a dose sweep around 0.05 (chosen only for being lower
-  than 0.15, not for being optimal), and a multi-seed check (this project
-  has repeatedly found seed-sensitivity to matter for exactly this class
-  of result — see the α=0.995 dip finding elsewhere in this document).
+  tells the whole story.
+  **Multi-seed check (5 seeds, MPS-accelerated) confirms and strengthens
+  the finding**: CVaR₉₉ improves in 4/5 seeds (mean 21.6% reduction); more
+  importantly, one baseline seed shows a kurtosis of 179,438 — the same
+  order of magnitude as the original paper-scale catastrophe this whole
+  investigation started from — while the matching slow-ramp checkpoint at
+  that seed shows 38.4, a >4,600x reduction. Across all 5 seeds, mean
+  kurtosis (including each condition's own worst outlier) is 189x better
+  under slow-ramp (35,939 → 190). This isn't a single lucky seed 0 draw —
+  it's suppressing baseline's occasional catastrophic-outlier failure mode,
+  the specific pathology this document's "Catastrophic tail risk" section
+  names as the headline paper-scale finding. See the
+  [full multi-seed writeup](#follow-up-multi-seed-check-confirms-the-fix-and-reveals-its-suppressing-something-worse-than-the-single-seed-table-showed).
+  **Dose sweep run** (0.02/0.10/0.15/0.20, single seed): non-monotonic —
+  0.10 looked *better* than 0.05 at seed 0 (CVaR₉₉ 2.75, kurtosis 9.7), 0.15
+  catastrophically destabilized (CVaR₉₉ 21.94, kurtosis 26,181, consistent
+  with the first attempt's destabilization at the same dose on a different
+  baseline), 0.20 still underperformed baseline. **Multi-seeding dose 0.10
+  reversed its apparent single-seed win**: across 5 seeds its mean CVaR₉₉
+  (8.08) is worse than baseline (4.08), with 2/5 seeds landing on severe
+  outliers vs. dose 0.05's 1/5 — a direct demonstration of the exact trap
+  the dose-sweep section warns about. **`--slow-ramp-fraction 0.05` is the
+  dose to promote** — the only one validated at 5 seeds with a consistent
+  improvement, not a favorable single draw.

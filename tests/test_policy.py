@@ -716,6 +716,28 @@ def test_smoothness_penalty_ignored_for_non_recurrent_policy() -> None:
     assert torch.isfinite(torch.tensor(stats["loss"]))
 
 
+def test_smoothness_penalty_on_mps_raises_a_clear_error_at_construction() -> None:
+    # torch.autograd.grad(..., create_graph=True) through an nn.LSTM isn't
+    # supported on MPS as of torch 2.8 (a mid-training RuntimeError from deep
+    # inside autograd otherwise) -- this must fail fast and clearly instead.
+    # Constructing torch.device("mps") doesn't require real MPS hardware, so
+    # this test runs the same on any machine.
+    torch.manual_seed(0)
+    policy = RecurrentHedgingAgent(
+        cell_type="lstm", hidden_dim=16, num_layers=1,
+        strike=1.0, implied_vol=0.2, time_to_maturity=1.0,
+    )
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    cvar_loss = CVaRLoss(alpha=0.95)
+    with pytest.raises(ValueError, match="mps"):
+        PolicyTrainer(
+            policy, environment, generator, cvar_loss,
+            implied_vol=0.2, lr=1e-2, device=torch.device("mps"),
+            sequence_policy=True, smoothness_penalty_weight=0.01,
+        )
+
+
 def test_smoothness_penalty_train_step_runs_end_to_end_and_affects_gradients() -> None:
     torch.manual_seed(7)
     prices_seed = 5

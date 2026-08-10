@@ -36,6 +36,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from common.device import select_device  # noqa: E402
 from common.stats import excess_kurtosis, excess_kurtosis_tensor, skewness, skewness_tensor, terminal_log_return  # noqa: E402
 from generator.data import HistoricalPriceLoader, MinMaxScaler, sample_real_prices  # noqa: E402
 from generator.timegan import TimeGAN  # noqa: E402
@@ -83,7 +84,7 @@ class TimeGANTrainer:
         if discriminator_loss not in ("bce", "wgan-gp"):
             raise ValueError(f"discriminator_loss must be 'bce' or 'wgan-gp', got {discriminator_loss!r}")
 
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or select_device()
         self.timegan = timegan.to(self.device)
         self.discriminator_loss = discriminator_loss
         self.lambda_gp = lambda_gp
@@ -471,10 +472,23 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="checkpoints/timegan.pt")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="force a specific device ('cpu', 'cuda', 'mps'). Default (None) "
+        "auto-detects the fastest available (cuda > mps > cpu) -- see "
+        "common/device.py. Note: at this script's own batch_size=178 default, "
+        "MPS benchmarks slightly *slower* than CPU here (dispatch overhead "
+        "dominates at that batch size, unlike train_policy.py's batch=1000) "
+        "-- pass --device cpu to avoid the small regression if TimeGAN "
+        "training time matters more than policy training time for your run.",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device(args.device)
+    print(f"Using device: {device}")
 
     feature_columns = args.feature_columns.split(",")
     feature_dim = len(feature_columns)

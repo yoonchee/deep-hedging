@@ -86,6 +86,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Every training CLI (`train_gan.py`, `train_timegan.py`, `train_policy.py`)
+auto-detects the fastest available device (CUDA > MPS > CPU) via
+`common/device.py`, or force one with `--device cpu|cuda|mps`. Benchmarked
+directly on Apple Silicon (M5 Pro): MPS is ~5.5x faster than CPU for policy
+training (the dominant cost in this project's own training runs -- a
+paper-scale LSTM policy run drops from ~78 minutes to ~14), though TimeGAN's
+own training loop (much smaller batch size) benchmarks slightly *slower* on
+MPS than CPU. `--smoothness-penalty-weight`'s double-backward through an
+`nn.LSTM` isn't supported on MPS as of torch 2.8 and fails fast with a clear
+error if combined with an MPS device -- pass `--device cpu` for that flag.
+
 ## Quickstart
 
 Each stage writes a checkpoint (to `checkpoints/`, gitignored) that the next
@@ -243,8 +254,15 @@ trail:
   all incur extreme losses on a small fraction of paths (0.05-0.16%) that
   only the paper's own 500,000-path test scale is large enough to surface.
   Root-caused (sparse CVaR gradients at extreme α; poor generalization to
-  price extremes for TimeGAN-trained recurrent policies) but not yet fixed
-  — see `RESULTS.md`.
+  price extremes for TimeGAN-trained recurrent policies). ~~LSTM
+  (TimeGAN)~~ **fixed and promoted** — `train_policy.py
+  --slow-ramp-fraction 0.05` (training-time exposure to synthetic slow
+  log-moneyness ramps through the failure zone), validated at 5 seeds and
+  a dose sweep: CVaR₉₉ 42.13 → 3.24, excess kurtosis 81,035 → 24.5. GRU
+  (WGAN-GP) and the α=0.997 checkpoint were fixed earlier (`grad_clip_norm`).
+  GRU (TimeGAN) has a partial fix promoted (`moneyness_clip`, improves but
+  doesn't fully close the gap); Basic RNN (TimeGAN) remains open — see
+  `RESULTS.md`.
 - TimeGAN's diversity is improved but still off-target (31% → 214-224% →
   130.2% → 87.3% across four calibration attempts, now undershooting
   instead of overshooting) — its fidelity checker has an upper-bound
