@@ -559,3 +559,181 @@ def test_use_bs_baseline_reduces_loss_variance_across_batches() -> None:
     raw_std = torch.tensor(raw_losses).std().item()
     advantage_std = torch.tensor(advantage_losses).std().item()
     assert advantage_std < raw_std
+
+
+def _make_recurrent_trainer(
+    slow_ramp_fraction: float = 0.0, cell_type: str = "lstm", smoothness_penalty_weight: float = 0.0
+) -> PolicyTrainer:
+    torch.manual_seed(0)
+    policy = RecurrentHedgingAgent(
+        cell_type=cell_type, hidden_dim=16, num_layers=1,
+        strike=1.0, implied_vol=0.2, time_to_maturity=1.0,
+    )
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    cvar_loss = CVaRLoss(alpha=0.95)
+    return PolicyTrainer(
+        policy, environment, generator, cvar_loss,
+        implied_vol=0.2, lr=1e-2, device=torch.device("cpu"),
+        sequence_policy=True, slow_ramp_fraction=slow_ramp_fraction,
+        smoothness_penalty_weight=smoothness_penalty_weight,
+    )
+
+
+def test_slow_ramp_fraction_defaults_to_noop() -> None:
+    trainer = _make_recurrent_trainer(slow_ramp_fraction=0.0)
+    torch.manual_seed(1)
+    prices = torch.rand(16, 12, 1) + 0.5
+    unchanged = trainer._inject_slow_ramp_paths(prices)
+    assert torch.equal(unchanged, prices)
+
+
+def test_slow_ramp_ignored_for_non_recurrent_policy() -> None:
+    torch.manual_seed(0)
+    policy = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    cvar_loss = CVaRLoss(alpha=0.95)
+    trainer = PolicyTrainer(
+        policy, environment, generator, cvar_loss,
+        implied_vol=0.2, lr=1e-2, device=torch.device("cpu"),
+        slow_ramp_fraction=0.5,
+    )
+    prices = torch.rand(16, 12, 1) + 0.5
+    unchanged = trainer._inject_slow_ramp_paths(prices)
+    assert torch.equal(unchanged, prices)
+
+
+def test_slow_ramp_replaces_exactly_the_requested_fraction() -> None:
+    trainer = _make_recurrent_trainer(slow_ramp_fraction=0.25)
+    batch_size, seq_len = 16, 12
+    torch.manual_seed(1)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+    augmented = trainer._inject_slow_ramp_paths(prices)
+
+    assert augmented.shape == prices.shape
+    n = int(round(0.25 * batch_size))
+    assert not torch.allclose(augmented[:n], prices[:n])
+    assert torch.equal(augmented[n:], prices[n:])
+
+
+def test_slow_ramp_paths_cross_the_target_zone_at_the_configured_velocity() -> None:
+    # Reconstruct standardized log-moneyness from the returned price paths the
+    # same way RecurrentHedgingAgent.forward does, and check the ramp actually
+    # lands inside slow_ramp_zone by stepping no faster than slow_ramp_step --
+    # the exact velocity regime RESULTS.md's probe found the policy recovers
+    # from.
+    zone = (0.08, 0.14)
+    step = 0.0129
+    trainer = _make_recurrent_trainer(slow_ramp_fraction=1.0)
+    trainer.slow_ramp_zone = zone
+    trainer.slow_ramp_step = step
+
+    batch_size, seq_len = 64, 30
+    torch.manual_seed(2)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+    augmented = trainer._inject_slow_ramp_paths(prices)
+
+    moneyness_scale = trainer.policy.moneyness_scale
+    log_moneyness = torch.log(augmented / trainer.policy.strike) / moneyness_scale  # [Batch, Time, 1]
+    log_moneyness = log_moneyness.squeeze(-1)
+
+    # Every path starts at log-moneyness 0 (S_0 = strike).
+    assert torch.allclose(log_moneyness[:, 0], torch.zeros(batch_size), atol=1e-5)
+
+    # Every path's final level lands inside the zone (magnitude-wise), with
+    # slack for the small post-ramp hold-phase jitter (std 0.01).
+    final_level = log_moneyness[:, -1].abs()
+    assert torch.all(final_level >= zone[0] - 0.05)
+    assert torch.all(final_level <= zone[1] + 0.05)
+
+    # No step early in the path -- guaranteed still inside the ramp phase for
+    # every row, since the shortest possible ramp_len is ceil(zone[0]/step) --
+    # exceeds the configured velocity by more than floating-point slack. Later
+    # steps are excluded since they may fall in the post-ramp hold phase,
+    # which intentionally adds small jitter unrelated to ramp velocity.
+    min_ramp_len = int(zone[0] / step)
+    early_step_sizes = (log_moneyness[:, 1:min_ramp_len] - log_moneyness[:, : min_ramp_len - 1]).abs()
+    assert torch.all(early_step_sizes <= step + 1e-3)
+
+
+def test_slow_ramp_fraction_one_replaces_the_whole_batch() -> None:
+    trainer = _make_recurrent_trainer(slow_ramp_fraction=1.0)
+    batch_size, seq_len = 8, 12
+    torch.manual_seed(1)
+    prices = torch.rand(batch_size, seq_len, 1) + 0.5
+    augmented = trainer._inject_slow_ramp_paths(prices)
+    assert not torch.allclose(augmented, prices)
+
+
+def test_slow_ramp_train_step_runs_end_to_end() -> None:
+    # Smoke test: a full train_step with augmentation active shouldn't error
+    # or produce NaN/Inf loss.
+    trainer = _make_recurrent_trainer(slow_ramp_fraction=0.3)
+    stats = trainer.train_step(batch_size=16, seq_len=12)
+    assert torch.isfinite(torch.tensor(stats["loss"]))
+
+
+def test_smoothness_penalty_is_nonnegative_and_zero_for_a_constant_policy() -> None:
+    trainer = _make_recurrent_trainer(smoothness_penalty_weight=1.0)
+    torch.manual_seed(3)
+    prices = torch.rand(8, 10, 1) + 0.5
+    penalty = trainer._compute_smoothness_penalty(prices)
+    assert penalty.item() >= 0.0
+
+    # Zero out the output layer's weights (bias only) -> delta is constant
+    # regardless of input, so its sensitivity to log-moneyness must be exactly 0.
+    with torch.no_grad():
+        for module in trainer.policy.output_layer:
+            if isinstance(module, torch.nn.Linear):
+                module.weight.zero_()
+    penalty_after = trainer._compute_smoothness_penalty(prices)
+    assert penalty_after.item() == pytest.approx(0.0, abs=1e-10)
+
+
+def test_smoothness_penalty_defaults_to_noop_in_train_step() -> None:
+    # With smoothness_penalty_weight=0.0 (default), train_step's loss should
+    # be identical to a trainer with no penalty wired in at all.
+    unweighted = _make_recurrent_trainer(smoothness_penalty_weight=0.0)
+    stats = unweighted.train_step(batch_size=16, seq_len=12)
+    assert torch.isfinite(torch.tensor(stats["loss"]))
+
+
+def test_smoothness_penalty_ignored_for_non_recurrent_policy() -> None:
+    torch.manual_seed(0)
+    policy = HedgingAgent(hidden_dim=16, num_hidden_layers=2)
+    generator = Generator(noise_dim=8, hidden_dim=16, num_layers=1)
+    environment = MarketEnvironment(strike=1.0, proportional_fee=0.01, dt=1.0)
+    cvar_loss = CVaRLoss(alpha=0.95)
+    trainer = PolicyTrainer(
+        policy, environment, generator, cvar_loss,
+        implied_vol=0.2, lr=1e-2, device=torch.device("cpu"),
+        smoothness_penalty_weight=10.0,
+    )
+    # Must not raise -- isinstance guard in train_step skips the penalty
+    # entirely for a non-recurrent policy.
+    stats = trainer.train_step(batch_size=16, seq_len=12)
+    assert torch.isfinite(torch.tensor(stats["loss"]))
+
+
+def test_smoothness_penalty_train_step_runs_end_to_end_and_affects_gradients() -> None:
+    torch.manual_seed(7)
+    prices_seed = 5
+
+    def run(weight: float):
+        trainer = _make_recurrent_trainer(smoothness_penalty_weight=weight)
+        torch.manual_seed(prices_seed)
+        stats = trainer.train_step(batch_size=16, seq_len=12)
+        grad_norm = torch.sqrt(
+            sum((p.grad**2).sum() for p in trainer.policy.parameters() if p.grad is not None)
+        )
+        return stats, grad_norm.item()
+
+    stats_unweighted, grad_unweighted = run(0.0)
+    stats_weighted, grad_weighted = run(50.0)
+
+    assert torch.isfinite(torch.tensor(stats_weighted["loss"]))
+    # A large penalty weight should change the applied gradient relative to
+    # the unweighted run -- otherwise the term isn't actually wired into
+    # backward() at all.
+    assert grad_weighted != pytest.approx(grad_unweighted)

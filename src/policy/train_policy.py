@@ -9,7 +9,7 @@ Run directly as a training CLI:
 
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Dict, Optional, Protocol, Union
+from typing import Annotated, Any, Dict, Optional, Protocol, Tuple, Union
 
 import torch
 
@@ -79,6 +79,49 @@ class PolicyTrainer:
             "batch -- see RESULTS.md. mean_wealth in train_step's return is always "
             "the RAW policy wealth regardless of this flag, for comparability.",
         ] = False,
+        slow_ramp_fraction: Annotated[
+            float,
+            "fraction of each training batch to replace with synthetic price paths "
+            "whose standardized log-moneyness ramps slowly through slow_ramp_zone, "
+            "instead of being sampled from the generator. Targets RESULTS.md's LSTM "
+            "(TimeGAN) velocity-hysteresis finding: the recurrent policy's hidden "
+            "state gets stuck in a degenerate state when log-moneyness crosses this "
+            "zone faster than ~slow_ramp_step per step, and real TimeGAN-generated "
+            "paths essentially never cross it slowly, so the policy never sees a "
+            "well-behaved example to learn correct behavior from there. 0.0 "
+            "(default) is a no-op. Only applied for a RecurrentHedgingAgent policy "
+            "(silently ignored for HedgingAgent, which has no log-moneyness input).",
+        ] = 0.0,
+        slow_ramp_zone: Annotated[
+            Tuple[float, float],
+            "(lo, hi) standardized log-moneyness range the synthetic ramp paths "
+            "cross, per the transition boundary measured in RESULTS.md's mechanism "
+            "(b) follow-up (a single continuous ramp collapsed delta from 0.96 to "
+            "0.00001 between log-moneyness 0.052 and 0.093).",
+        ] = (0.08, 0.14),
+        slow_ramp_step: Annotated[
+            float,
+            "per-step change in standardized log-moneyness for the synthetic ramp. "
+            "0.0129 is the largest step size RESULTS.md's velocity-isolated probe "
+            "found the policy recovers from within a 40-step hold (0.0180 does "
+            "not), so this default stays inside the empirically-verified 'safe' "
+            "regime.",
+        ] = 0.0129,
+        smoothness_penalty_weight: Annotated[
+            float,
+            "weight on an auxiliary loss term penalizing the recurrent policy's "
+            "output sensitivity d(delta)/d(log-moneyness), computed directly on "
+            "each training batch's own sampled paths (not a synthetic probe, so "
+            "it isn't subject to the trajectory-shape confound slow-ramp "
+            "augmentation is). Targets RESULTS.md's untried Lipschitz-penalty "
+            "candidate for LSTM (TimeGAN)'s velocity-hysteresis failure -- unlike "
+            "the zone-restricted framing in that writeup, this is a global "
+            "penalty (every time step, not just a hand-picked input range), since "
+            "a fixed numeric zone was found not to transfer across differently- "
+            "calibrated TimeGAN checkpoints (each one's own natural log-moneyness "
+            "range differs). 0.0 (default) is a no-op. Only applied for a "
+            "RecurrentHedgingAgent policy.",
+        ] = 0.0,
     ) -> None:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy = policy.to(self.device)
@@ -90,6 +133,10 @@ class PolicyTrainer:
         self.grad_clip_norm = grad_clip_norm
         self.use_bs_baseline = use_bs_baseline
         self._bs_policy = BlackScholesDeltaPolicy(strike=environment.strike) if use_bs_baseline else None
+        self.slow_ramp_fraction = slow_ramp_fraction
+        self.slow_ramp_zone = slow_ramp_zone
+        self.slow_ramp_step = slow_ramp_step
+        self.smoothness_penalty_weight = smoothness_penalty_weight
 
         params = list(self.policy.parameters()) + list(self.cvar_loss.parameters())
         self.optimizer = torch.optim.Adam(params, lr=lr)
@@ -107,6 +154,8 @@ class PolicyTrainer:
         with torch.no_grad():
             z = self.generator.sample_noise(batch_size, seq_len, device=self.device)
             prices = self.generator(z)  # [Batch, seq_len, 1]
+            if self.slow_ramp_fraction > 0.0:
+                prices = self._inject_slow_ramp_paths(prices)
 
         wealth = self.environment.simulate(
             self.policy, prices, self.implied_vol, sequence_policy=self.sequence_policy
@@ -122,6 +171,9 @@ class PolicyTrainer:
             loss = self.cvar_loss(wealth - bs_wealth)
         else:
             loss = self.cvar_loss(wealth)
+
+        if self.smoothness_penalty_weight > 0.0 and isinstance(self.policy, RecurrentHedgingAgent):
+            loss = loss + self.smoothness_penalty_weight * self._compute_smoothness_penalty(prices)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -139,6 +191,89 @@ class PolicyTrainer:
             "mean_wealth": wealth.mean().item(),
             "grad_norm": grad_norm.item(),
         }
+
+    def _inject_slow_ramp_paths(
+        self,
+        prices: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] generator-sampled price paths"],
+    ) -> Annotated[
+        torch.Tensor,
+        "[Batch, Time_Steps, 1] -- the first round(slow_ramp_fraction * Batch) rows "
+        "replaced with synthetic slow log-moneyness ramps, the rest untouched",
+    ]:
+        """Builds synthetic price paths whose standardized log-moneyness ramps
+        from 0 to a random target inside slow_ramp_zone at slow_ramp_step per
+        step, then holds near that target (with small jitter) for the rest of
+        the path -- see RESULTS.md's velocity-isolated hold-at-fixed-level
+        probe, which this construction directly mirrors.
+        """
+        if not isinstance(self.policy, RecurrentHedgingAgent):
+            return prices
+
+        batch_size, seq_len, _ = prices.shape
+        n = int(round(self.slow_ramp_fraction * batch_size))
+        if n == 0:
+            return prices
+
+        lo, hi = self.slow_ramp_zone
+        # [n] target landing log-moneyness inside the zone, random sign (only the
+        # positive zone was empirically diagnosed; mirroring to the negative side
+        # is an untested extrapolation, flagged in RESULTS.md).
+        magnitude = lo + (hi - lo) * torch.rand(n, device=self.device)
+        sign = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
+        target = magnitude * sign  # [n]
+
+        # [n] -> [n, 1] (ramp length in steps, at least 1, capped to the path length)
+        ramp_len = (target.abs() / self.slow_ramp_step).ceil().clamp(min=1, max=seq_len - 1)
+        ramp_len = ramp_len.unsqueeze(1)
+        step_frac = target.unsqueeze(1) / ramp_len  # [n, 1]
+
+        # [1, Time] -> [n, Time] (linear ramp 0 -> target over ramp_len steps, then
+        # held constant at target for every later step)
+        steps = torch.arange(seq_len, device=self.device, dtype=prices.dtype).unsqueeze(0)
+        ramp_values = steps * step_frac
+        log_moneyness = torch.where(steps <= ramp_len, ramp_values, target.unsqueeze(1).expand(n, seq_len))
+
+        # small jitter once holding, so the network doesn't just memorize an
+        # exactly flat post-ramp signal
+        hold_mask = (steps > ramp_len).to(prices.dtype)
+        log_moneyness = log_moneyness + hold_mask * 0.01 * torch.randn(n, seq_len, device=self.device)
+
+        # [n, Time] -> [n, Time, 1] (invert RecurrentHedgingAgent.forward's
+        # log(S_t/K)/moneyness_scale transform back into a raw price path)
+        moneyness_scale = self.policy.moneyness_scale
+        strike = self.policy.strike
+        ramp_prices = (strike * torch.exp(log_moneyness * moneyness_scale)).unsqueeze(-1)
+
+        prices = prices.clone()
+        prices[:n] = ramp_prices.to(prices.dtype)
+        return prices
+
+    def _compute_smoothness_penalty(
+        self,
+        prices: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] this step's sampled price paths"],
+    ) -> Annotated[torch.Tensor, "scalar: mean squared d(delta)/d(log-moneyness) over the whole batch"]:
+        """Penalizes the recurrent policy's output sensitivity to its own
+        standardized log-moneyness input, directly on this step's real
+        training batch -- a differentiable proxy for the transition
+        steepness RESULTS.md's mechanism (b) diagnosis identified as LSTM
+        (TimeGAN)'s failure. Computed via the chain rule from
+        d(delta)/d(price) (autograd) rather than by threading a second input
+        path through RecurrentHedgingAgent.forward, so the policy's forward
+        pass itself needs no changes.
+        """
+        prices_for_grad = prices.detach().clone().requires_grad_(True)
+        delta_path = self.policy(prices_for_grad)  # [Batch, Time_Steps - 1, 1]
+        (grad_wrt_price,) = torch.autograd.grad(
+            delta_path.sum(), prices_for_grad, create_graph=True
+        )
+
+        # d(delta)/d(log_moneyness) = d(delta)/d(price) * price * moneyness_scale,
+        # since log_moneyness = log(price / strike) / moneyness_scale
+        # [Batch, Time_Steps - 1, 1] (only the prices RecurrentHedgingAgent.forward
+        # actually uses -- prices[:, :-1, :] -- carry nonzero gradient here)
+        used_prices = prices_for_grad[:, :-1, :]
+        sensitivity = grad_wrt_price[:, :-1, :] * used_prices * self.policy.moneyness_scale
+        return (sensitivity**2).mean()
 
 
 def _load_or_init_generator(
@@ -279,6 +414,47 @@ def main() -> None:
         "checkpoint's training distribution exactly.",
     )
     parser.add_argument(
+        "--slow-ramp-fraction",
+        type=float,
+        default=0.0,
+        help="(rnn/lstm/gru only) replace this fraction of each training batch with "
+        "synthetic price paths whose standardized log-moneyness ramps slowly through "
+        "--slow-ramp-zone (see PolicyTrainer's slow_ramp_fraction). Default 0.0 is a "
+        "no-op. Motivated by RESULTS.md's LSTM (TimeGAN) velocity-hysteresis finding: "
+        "real TimeGAN paths essentially never cross this zone slowly, so the policy "
+        "never sees a well-behaved example there to learn from -- "
+        "e.g. '--slow-ramp-fraction 0.1' for LSTM (TimeGAN).",
+    )
+    parser.add_argument(
+        "--slow-ramp-zone",
+        type=float,
+        nargs=2,
+        default=(0.08, 0.14),
+        metavar=("LO", "HI"),
+        help="standardized log-moneyness range the synthetic slow-ramp paths cross "
+        "(see --slow-ramp-fraction); default matches RESULTS.md's measured LSTM "
+        "(TimeGAN) transition boundary.",
+    )
+    parser.add_argument(
+        "--slow-ramp-step",
+        type=float,
+        default=0.0129,
+        help="per-step change in standardized log-moneyness for the synthetic ramp "
+        "(see --slow-ramp-fraction); default is the largest step size RESULTS.md's "
+        "velocity probe found LSTM (TimeGAN) recovers from.",
+    )
+    parser.add_argument(
+        "--smoothness-penalty-weight",
+        type=float,
+        default=0.0,
+        help="(rnn/lstm/gru only) weight on an auxiliary loss term penalizing the "
+        "policy's output sensitivity d(delta)/d(log-moneyness) on each training "
+        "batch's own sampled paths (see PolicyTrainer's smoothness_penalty_weight). "
+        "Default 0.0 is a no-op. A global alternative to --slow-ramp-fraction for "
+        "RESULTS.md's LSTM (TimeGAN) velocity-hysteresis finding, not tied to a "
+        "hand-picked input zone -- e.g. '--smoothness-penalty-weight 0.01'.",
+    )
+    parser.add_argument(
         "--use-bs-baseline",
         action="store_true",
         help="train on CVaR of (policy_wealth - black_scholes_wealth) instead of raw "
@@ -406,6 +582,10 @@ def _train_and_save(
         sequence_policy=sequence_policy,
         use_bs_baseline=args.use_bs_baseline,
         grad_clip_norm=args.grad_clip_norm,
+        slow_ramp_fraction=args.slow_ramp_fraction,
+        slow_ramp_zone=tuple(args.slow_ramp_zone),
+        slow_ramp_step=args.slow_ramp_step,
+        smoothness_penalty_weight=args.smoothness_penalty_weight,
     )
 
     print(

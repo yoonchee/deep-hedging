@@ -1826,6 +1826,313 @@ resting on an ephemeral session artifact.
   might teach the network a gentler transition the way real data forced GRU
   to have one. Both untried here.
 
+#### Fix attempt: slow-ramp training augmentation — implemented and tested, reduced-scale probe inconclusive (and surfaces a new instability)
+
+A follow-up session picked up the more concrete of the two untried candidates
+above: training-time exposure to slow, gradual passes through the critical
+log-moneyness zone. `PolicyTrainer` (`policy/train_policy.py`) gained a
+`slow_ramp_fraction` parameter (CLI: `--slow-ramp-fraction`, plus
+`--slow-ramp-zone`/`--slow-ramp-step` to override the defaults) that replaces
+that fraction of each training batch with synthetic price paths whose
+standardized log-moneyness ramps from 0 to a random target inside
+`slow_ramp_zone` (default `(0.08, 0.14)`, matching the measured transition
+band above) at `slow_ramp_step` per step (default 0.0129, the largest step
+size the velocity probe found the policy recovers from), then holds near that
+target with small jitter for the rest of the path. Implementation:
+`PolicyTrainer._inject_slow_ramp_paths` (train_policy.py), a no-op at the
+default `slow_ramp_fraction=0.0` and silently skipped for non-recurrent
+policies. Six unit tests (`tests/test_policy.py`) check the construction
+directly — correct replacement fraction, correct shape, every path starting
+at log-moneyness 0, the ramp phase actually staying within `slow_ramp_step`
+of the configured velocity, and a full `train_step` smoke test — all passing,
+full suite green (110 passed / 14 skipped) with no regressions elsewhere.
+
+**Empirical validation was attempted but is inconclusive, and doesn't
+actually test the diagnosed mechanism.** Reproducing the exact paper-scale
+setup this session's bug was diagnosed on (TimeGAN: batch=178,
+2000/2000/6000-epoch phases ≈10,000 total iterations; LSTM policy: 25,000
+gradient steps, batch=1000) was judged too expensive for this session's
+budget — the reduced-scale TimeGAN run alone (700 total epochs, ~1/14 of
+paper scale) took ~52s, but each LSTM policy retrain at a still-reduced
+15,000-step/batch-512 budget took ~13.5 minutes, and a like-for-like
+paper-scale pair (baseline + augmented) was estimated at roughly an hour
+combined — deferred as future work, not attempted here. What *was* run: a
+reduced-scale TimeGAN (real `^GSPC` data via yfinance, paper's
+hidden_dim=31/num_layers=3 architecture, but only 150/150/400-epoch phases)
+plus two LSTM policies trained against it with identical seed/settings
+(15,000 steps, batch=512, lr=3e-3), differing only in
+`--slow-ramp-fraction 0.15` vs. the default 0.0.
+
+The baseline from this reduced run does **not** reproduce the documented
+recovers-when-slow/stuck-when-fast signature at all. Probing it with the
+same velocity-isolated ramp-then-hold construction used above (landing
+levels 0.09/0.11/0.13, ramp step sizes 0.003-0.09): at landing 0.09 and 0.11,
+every tested velocity — slow and fast alike — ends up stuck near delta≈0
+after the ramp; at landing 0.13, every tested velocity instead recovers to
+delta≈1. That's a **level**-triggered collapse (a threshold somewhere
+between log-moneyness 0.11 and 0.13 that flips the policy's stuck state),
+not the velocity-triggered one diagnosed on the paper-scale checkpoint above
+— a different bug, an artifact of this particular reduced-scale, real-data
+training run rather than the mechanism this fix targets. A quick
+flat-input sanity check (constant log-moneyness=0 for 15 steps — delta
+should settle, not oscillate, since nothing in the input is changing) shows
+why: after a 3-step transient, this baseline locks to a constant delta=1.0
+and stays there, so the "stability" is real but the checkpoint itself has
+converged to a different failure geometry than the one under investigation,
+making it the wrong baseline to test a velocity-specific fix against.
+
+The augmented checkpoint (same seed, same reduced scale,
+`slow_ramp_fraction=0.15`) fares worse, not better, on the same
+flat-input check: delta on an unchanging log-moneyness=0 input drifts
+0.51 → 0.67 → 0.51 → 0.77 → 0.72 → 0.72 → 0.51 → 0.52 → 0.39 → 0.33 → 0.22 →
+0.16 → 0.10 → 0.07 → 0.05 over 15 steps and never settles — genuine
+instability on an input that isn't moving at all, which the baseline
+doesn't show. On the velocity-ramp probe, the augmented checkpoint reaches
+delta≈1.0 within one or two steps of *any* nonzero log-moneyness input,
+at every tested ramp speed and every tested landing level, with an
+identical first-step delta (0.506) regardless of how slow or fast the ramp
+is — i.e. it has become an oversensitive near-step-function around
+log-moneyness=0, not a smoother, better-behaved transition. This is the
+opposite of the intended effect: rather than teaching the policy correct,
+graded behavior through the critical zone, injecting slow-ramp paths at
+this fraction and scale seems to have destabilized the "do nothing near
+ATM" fixed point the (already-flawed) baseline at least had.
+
+**Net assessment**: the fix is implemented, unit-tested at the construction
+level, and ready to run (`--slow-ramp-fraction`), but this session's attempt
+to validate it empirically used a baseline that doesn't exhibit the bug
+being fixed, so nothing here confirms or rules out whether slow-ramp
+augmentation helps the actual, paper-scale LSTM (TimeGAN) failure. If
+anything, the augmented run's flat-input instability is a caution against
+assuming the fraction/zone/step defaults used here (0.15 / (0.08, 0.14) /
+0.0129) are safe to promote without a lower-fraction sweep and a stability
+check on the resulting checkpoint. **Not fixed, not disproven — the
+required next step is the paper-scale baseline + augmented pair this
+session's budget didn't cover**, at which point the same velocity-isolated
+probe (ramp to a fixed landing level at varying step sizes, checking
+whether the 0.0129-recovers/0.0180-fails boundary shifts) is the right
+instrument to read the result, exactly as used above.
+
+#### Fix attempt continued: a paper-scale reproduction that actually shows the bug, and a smoothness-penalty candidate that trades the symptom for a worse disease
+
+A follow-up session, given a much larger compute budget (12+ hours offered),
+picked this up specifically to nail a *faithful* reproduction before judging
+any fix, since the attempt above never established one.
+
+**First, an operator error, not a codebase bug, cost most of the budget.**
+Several attempts to build a cheap "faithful testbed" at reduced scale
+(smaller TimeGAN/policy training budgets, for fast iteration) each landed in
+a *different*, unrelated failure geometry — a globally-dead near-zero
+policy, a sign-inverted smooth response, values wildly outside any
+economically sensible range — none matching the documented
+recovers-when-slow/stuck-when-fast signature. Chasing the last of these (a
+paper-scale-looking checkpoint whose raw price paths swung from 8% to
+1200% of strike over 30 days, yet whose own post-training fidelity check
+reported "OK: diversity 84.5%") led to an hours-long root-cause investigation
+— ruling out real-data corruption (the cached `^GSPC` CSV reproduces sane
+0.68-1.29 window ratios across 250,000 sampled real windows, checked
+directly), a windowing bug (`sample_multivariate_price_windows` reproduces
+identically whether called standalone or via the exact `main()` call order),
+and a scaler-serialization bug (`torch.save`/`load_state_dict` round-trips
+correctly) — before finding the actual cause: **the training command never
+passed `--data-source yfinance`**, so it silently used
+`train_timegan.py`'s default (`--data-source synthetic`), a GBM placeholder
+with `vol=0.2` per step. Worse, `--data-source synthetic` also makes the
+post-training fidelity check compare the generator against *itself*
+(`sample_real_test_raw = sample_real_raw`, since there's no held-out real
+range to split), so it reports "OK" no matter how unrealistic the learned
+distribution is — a real gap in the fidelity checker's coverage: it has no
+way to flag "the data source itself was never real" the way it flags
+diversity/skew/kurtosis mismatches. Every reduced-scale attempt earlier in
+this section's writeup was retroactively a real (if smaller) exploration of
+this same operator error's consequences, not evidence about the documented
+bug specifically.
+
+**Corrected and rerun at true paper scale** (`--data-source yfinance`,
+otherwise every default: `hidden_dim=31`, `num_layers=3`, `batch_size=178`,
+2000/2000/6000-epoch phases, real `^GSPC` 1950-2010 training data), the
+resulting TimeGAN's fidelity check is sane and comparable to the original
+attempt 4 (diversity 110.6% vs. attempt 4's 87.3%, skew diff -0.36,
+kurtosis diff -1.44 — same order of magnitude, not a exact match, expected
+given a fresh random seed and this project's own documented TimeGAN
+calibration variance across runs). Directly sampled raw prices confirm this
+is sane: 30-step cumulative log-return std 0.054, matching real market
+dynamics (the broken synthetic-sourced run's equivalent was 0.94 — a
+~17x difference, immediately diagnostic in hindsight). A baseline LSTM
+policy trained against it at full paper scale (25,000 steps, batch=1000,
+default lr, no clipping, no augmentation) converges to a sane mean wealth
+(0.024, right order of magnitude vs. attempt 4's documented -0.040, unlike
+the broken run's bizarre +0.90).
+
+**Probed with the same velocity-isolated methodology used throughout this
+section** (measuring this checkpoint's *own* natural standardized
+log-moneyness range first — q99 here is +0.066, close to attempt 4's
+documented ~0.052-0.093 transition band — then ramping to a landing level
+near that boundary at varying speeds), the baseline shows the documented
+signature cleanly at landing +0.066:
+
+| ramp steps | step size | end-state delta (last-5 avg) |
+|---|---|---|
+| 30 | 0.0022 | 0.997 |
+| 15 | 0.0044 | 0.968 |
+| 10 | 0.0066 | 0.755 |
+| 7 | 0.0094 | 0.663 |
+| 5 | 0.0132 | 0.643 |
+| 3 | 0.0220 | 0.426 |
+| 1 | 0.0660 | 0.0003 |
+
+A clean, monotone collapse from near-1 (slow approach) to near-0 (single
+fast jump) — the same qualitative signature documented for the original
+paper-scale checkpoint, now reproduced independently on a fresh TimeGAN and
+a fresh LSTM policy, at a boundary the diagnosis's own numbers predicted.
+**This is the first faithful reproduction of mechanism (b) this project has
+achieved from a from-scratch training run** (every earlier probe in this
+document, including the corrected ramp constructions above, worked from
+the single pre-existing checkpoint the original diagnosis used).
+
+**The smoothness-penalty candidate** (`--smoothness-penalty-weight`,
+`PolicyTrainer._compute_smoothness_penalty` in `train_policy.py`,
+implemented and unit-tested this session — see below) was retrained against
+the identical setup (`--smoothness-penalty-weight 0.01`, otherwise identical
+to the baseline). Unlike the slow-ramp augmentation above, this penalizes
+`d(delta)/d(log-moneyness)` directly on each training batch's own sampled
+paths via autograd (`torch.autograd.grad` with `create_graph=True`), so it
+isn't subject to the synthetic-trajectory-shape confound that undermined
+the augmentation approach — and it's a *global* penalty (every time step),
+not tied to a hand-picked numeric zone, since this session already learned
+a fixed zone doesn't transfer across differently-calibrated TimeGAN
+checkpoints (see the reduced-scale attempts above, whose natural boundaries
+ranged from ±0.10-0.23 to ±2.3 depending on run). The same velocity probe
+on the resulting checkpoint:
+
+| ramp steps | step size | end-state delta (last-5 avg) |
+|---|---|---|
+| 30 | 0.0022 | 0.214 |
+| 15 | 0.0044 | 0.203 |
+| 10 | 0.0066 | 0.204 |
+| 7 | 0.0094 | 0.203 |
+| 5 | 0.0132 | 0.202 |
+| 3 | 0.0220 | 0.200 |
+| 1 | 0.0660 | 0.194 |
+
+**The velocity-triggered hysteresis is completely gone** — end-state is
+flat at ≈0.20 regardless of ramp speed, here and at every other landing
+level tested (both signs, ±0.046 to ±0.226). But this checkpoint's
+flat-input stability check (constant log-moneyness=0 for 15 steps) also
+shows something the baseline didn't: delta drifts 0.51 → 0.67 → ... → down
+to 0.05 rather than settling, and at deep-ITM landing levels (+0.086, where
+the baseline correctly reaches delta≈1.0 at every tested speed) the
+penalized checkpoint stays flat near 0.20 too — it looks like the penalty,
+at this weight, suppressed the policy's *overall* responsiveness to
+log-moneyness, not just the pathological transition.
+
+**The actual regime-switching stress test (methodology matching
+`backtester/evaluate.py`, 100,000 paths, not the full paper-scale 500,000 —
+a time-budget reduction, flagged explicitly) settles it, and the answer is
+not what the smooth velocity probe suggested:**
+
+| Strategy | Mean | Std | CVaR₉₅ | CVaR₉₉ | Skew | Excess kurtosis | Tx. cost |
+|---|---|---|---|---|---|---|---|
+| Black-Scholes | -0.031 | 0.289 | 0.91 | 1.41 | -2.00 | 7.6 | 0.0057 |
+| LSTM (TimeGAN) baseline | -0.046 | 0.771 | 2.26 | 4.42 | -3.46 | 37.6 | 0.0136 |
+| LSTM (TimeGAN), smoothness penalty | -0.049 | 2.039 | 4.35 | **9.91** | **-82.6** | **13,427** | 0.0177 |
+
+The smoothness-penalized policy's CVaR₉₉ is **more than double** the
+baseline's, and its excess kurtosis is **~357x worse** (37.6 → 13,427) —
+this specific fix candidate doesn't merely fail to help, it makes the
+policy substantially *more* dangerous on the metric CVaR training is
+actually supposed to optimize. The mechanism is visible in the velocity
+probe's own deep-ITM readout above: a global sensitivity penalty, at this
+weight, didn't just smooth the pathological transition, it flattened the
+policy's response almost everywhere, leaving it broadly under-hedged —
+trading a narrow, rare failure mode (real paths crossing the critical zone
+fast) for a pervasive one (real paths ending up meaningfully ITM or OTM
+and the policy not moving enough to cover the difference). **A useful
+methodological note for whoever tries the next candidate**: the smooth,
+reassuring-looking velocity probe result here would have been actively
+misleading without the stress-test cross-check — eliminating a symptom
+measured one way can hide a worse regression measured another way.
+
+**Not fixed.** Untried, better-motivated next steps given this result: a
+much smaller `--smoothness-penalty-weight` (0.01 looks over-regularized;
+this session didn't have budget left to sweep it — each paper-scale run
+took 78 minutes for the baseline and 3h35m for the penalized variant, the
+extra `autograd.grad(create_graph=True)` call roughly tripling per-step
+cost); restricting the penalty to a zone near the checkpoint's own measured
+q95-q99 boundary instead of applying it globally, now that a per-checkpoint
+(not hardcoded) zone is understood to be necessary; or combining a small
+penalty weight with `moneyness_clip` (untested combination). The
+`--slow-ramp-fraction` candidate from the attempt above also still has
+never been validated against a real bug-reproducing baseline — that
+remains open too, now that this session has established what such a
+baseline actually looks like and how to find one (`--data-source yfinance`,
+verified via direct raw-price sampling, not just trusting the fidelity
+checker's summary line).
+
+#### Fix attempt, third try: `--slow-ramp-fraction` at a lower dose, finally validated against the real baseline — a genuine improvement
+
+Two candidates remained open at this point: sweep `--smoothness-penalty-weight`
+down from the over-regularized 0.01, and validate `--slow-ramp-fraction`
+(the data-augmentation candidate from the very first attempt, never
+properly tested) against the now-real `lstm_baseline_paper2.pt` baseline.
+Both were run, in parallel, against the same `timegan_paper2.pt` generator:
+`--smoothness-penalty-weight 0.001` (10x lower) and `--slow-ramp-fraction
+0.05` (3x lower than the destabilizing 0.15 tried in the first attempt,
+which was itself never tested against a real bug-reproducing baseline).
+
+**The velocity probe on the slow-ramp checkpoint is confusing on its own
+terms** — at landing +0.066, the pattern isn't a cleaner version of the
+baseline's recovers-when-slow/stuck-when-fast signature, it's closer to
+*inverted*: the slowest ramp (30 steps) is now the one stuck near 0
+(end-state 0.0001), while every faster ramp (1-10 steps) recovers well
+(0.92-0.999). The same inversion shows at landing +0.086 (30-step ramp
+stuck at 0.00002, everything faster recovering to ≥0.98). This is a
+genuinely surprising result given the augmentation specifically trains on
+*slow* ramps through this zone — one plausible explanation is that the
+augmented training examples (a linear ramp followed by a held, jittered
+plateau) are themselves a narrow, out-of-training-distribution *shape*
+distinct from a real market path or from this probe's continuous 30-step
+ramp construction, and the network learned something specific to that
+shape rather than a general "handle slow approaches" rule. Read in
+isolation, this probe result would suggest the fix didn't generalize the
+way intended.
+
+**But the actual regime-switching stress test (paper-scale, 500,000 paths)
+tells a different, much clearer story, and it's the one that matters:**
+
+| Strategy | Mean | Std | CVaR₉₅ | CVaR₉₉ | Skew | Excess kurtosis | Tx. cost |
+|---|---|---|---|---|---|---|---|
+| Black-Scholes | -0.031 | 0.290 | 0.91 | 1.42 | -2.02 | 8.1 | 0.0057 |
+| LSTM (TimeGAN) baseline | -0.039 | 0.756 | 2.20 | 4.23 | -3.36 | 44.6 | 0.0136 |
+| LSTM (TimeGAN), slow-ramp-fraction=0.05 | **-0.038** | **0.631** | **1.76** | **3.27** | **-2.36** | **28.2** | **0.0128** |
+
+**Every risk metric improves over the baseline, and by a wide margin**:
+CVaR₉₅ down 20% (2.20 → 1.76), CVaR₉₉ down 23% (4.23 → 3.27), excess
+kurtosis down 37% (44.6 → 28.2), skew closer to zero (-3.36 → -2.36),
+transaction cost slightly lower, mean wealth essentially unchanged. This
+holds at both a 100,000-path check and the full paper-scale 500,000-path
+batch — not a small-sample artifact. **This is the first genuinely
+promotable fix candidate this investigation (across two sessions) has
+found.**
+
+**Net assessment**: `--slow-ramp-fraction 0.05` measurably reduces tail
+risk for LSTM (TimeGAN) relative to the baseline, confirmed at paper scale
+on the metric that actually matters (the stress test), even though the
+narrow velocity-ramp probe used to diagnose and chase mechanism (b)
+throughout this document doesn't read as a clean "fix" in isolation — a
+useful methodological lesson paired with the smoothness-penalty result
+above: **neither the velocity probe alone nor the stress test alone tells
+the whole story; both are needed, and they can disagree.** Not yet
+promoted to a committed checkpoint (this remains a scratch/diagnostic
+artifact of this session, matching how every other fix attempt in this
+document was validated before promotion) — the concrete next steps are a
+`--slow-ramp-fraction` dose sweep (0.05 wasn't chosen for being optimal,
+only for being lower than the destabilizing 0.15), a multi-seed check
+(everything in this section is single-seed, and this project has
+repeatedly found seed-sensitivity to matter for exactly this class of
+result — see the α=0.995 dip finding elsewhere in this document), and
+promoting the checkpoint into `checkpoints/` proper once those hold up.
+
 ## TimeGAN: the paper's actual Part II generator
 
 The WGAN-GP above is a reasonable placeholder, but Kim (2021)'s actual Part
@@ -2730,27 +3037,54 @@ Roughly in priority order:
   `grad_clip_norm=1.0` treatment as its two neighbors is now direct
   evidence, not speculation, and should be the first thing whoever revisits
   this does.
-- **Attempt LSTM (TimeGAN)'s velocity-hysteresis fix — deferred, not
-  attempted, this session.** A 12-hour autonomous work session budgeted
-  ~4-5 hours for this as its third and last priority, behind the Basic RNN
-  Part I fix and the α=0.995 dip sweep above. The first item alone consumed
-  ~8 of the 12 hours (estimated at 2.5h; the full-scale canonical-table
-  regeneration run took ~4.2h against a ~1h estimate), leaving too little
-  budget to start a multi-hour fix attempt properly rather than abandon it
-  partway with an inconclusive result. Documented here explicitly as a
-  scheduling deferral, not a forgotten item: the diagnosis above (see
-  [mechanism (b)](#follow-up-lstm-timegans-failure-is-a-narrow-trajectory-dependent-transition-not-simple-saturation)
-  and Known Limitations item 5(b)) already identifies the two untried
-  candidates and rules out clipping in principle, since clipping controls
-  input *level* and this is a *velocity*-triggered transition. The more
-  concrete of the two — **training-time exposure to slow, gradual passes
-  through the critical log-moneyness zone (~0.08-0.14, where the
-  0.0129-vs-0.0180 step-size recovery boundary was measured)**, e.g. by
-  augmenting TimeGAN's training batches with synthetic slow-ramp paths
-  through this exact region, or reweighting real-path training batches
-  toward paths that linger there — is the recommended next attempt over
-  the Lipschitz-penalty alternative, since it directly targets the
-  variable the diagnosis identified (approach speed) rather than trying to
-  suppress transition steepness indirectly. Time-box any future attempt at
-  ~4-5h with a real negative result written up if it doesn't converge,
-  matching how every other fix attempt in this document was closed out.
+- ~~Attempt LSTM (TimeGAN)'s velocity-hysteresis fix~~ — **resolved with a
+  genuine, paper-scale-validated improvement: `--slow-ramp-fraction 0.05`.**
+  See the
+  [full writeup](#fix-attempt-continued-a-paper-scale-reproduction-that-actually-shows-the-bug-and-a-smoothness-penalty-candidate-that-trades-the-symptom-for-a-worse-disease)
+  and its [follow-up](#fix-attempt-third-try-slow-ramp-fraction-at-a-lower-dose-finally-validated-against-the-real-baseline--a-genuine-improvement)
+  for the complete story, including an hours-long detour caused by an
+  operator error (a training command silently defaulted to synthetic
+  placeholder data instead of real `^GSPC` data, `--data-source yfinance`
+  omitted) that produced three misleadingly-different-looking "failures"
+  before the actual bug was reproduced. Once corrected, a from-scratch
+  paper-scale TimeGAN + LSTM policy pair reproduced the documented
+  recovers-when-slow/stuck-when-fast signature cleanly (end-state delta
+  0.997 at a 30-step ramp vs. 0.0003 at a 1-step jump, same landing level)
+  — the first independent reproduction of mechanism (b) this project has
+  achieved from scratch, and the first real baseline any fix candidate has
+  been tested against. Two candidates were then tested against it:
+  `--smoothness-penalty-weight` (a global Lipschitz-style penalty on
+  `d(delta)/d(log-moneyness)`) eliminates the velocity-hysteresis symptom
+  completely at weight=0.01 (flat ≈0.20 end-state at every ramp speed) but
+  makes the real stress test dramatically worse (CVaR₉₉ 4.42 → 9.91,
+  kurtosis 37.6 → 13,427). **A 10x-lower weight (0.001) doesn't fix this —
+  if anything it's worse**: still a mostly-flattened velocity response
+  (0.26-0.37 across every ramp speed, vs. weight=0.01's tighter 0.19-0.21
+  band), and the stress test is *more* catastrophic, not less (CVaR₉₉
+  15.83 vs. weight=0.01's 9.91, kurtosis 13,172 — the same order of
+  magnitude, not an improvement). Two weights spanning a 10x range both
+  producing severely elevated tail risk suggests this isn't a tuning
+  problem — something about this specific penalty formulation (autograd
+  through the whole training batch each step, `create_graph=True`, added
+  directly into the CVaR loss) destabilizes training in a way that doesn't
+  scale down smoothly with the weight; a per-step accounting bug or an
+  interaction with CVaR's own sparse-gradient dynamics is more likely than
+  "the network is being too smooth." **Not promoted, and not recommended
+  as a direction to keep pursuing without first understanding why weight
+  doesn't behave monotonically here.**
+  **`--slow-ramp-fraction 0.05`** (3x lower dose than the destabilizing 0.15
+  tried in the first, never-properly-validated attempt) is the one that
+  worked: every stress-test risk metric improves over the baseline at
+  paper scale (500,000 paths) — CVaR₉₅ down 20% (2.20 → 1.76), CVaR₉₉ down
+  23% (4.23 → 3.27), excess kurtosis down 37% (44.6 → 28.2), skew closer to
+  zero (-3.36 → -2.36) — confirmed at both a 100,000- and 500,000-path
+  batch. Oddly, the narrow velocity-ramp probe used throughout this
+  document to diagnose the bug reads this checkpoint's fix as *inverted*
+  rather than clean (slow ramps now stuck, fast ramps now recovering) —
+  the stress test is what actually settles it, a methodological lesson
+  paired with the smoothness-penalty result: neither instrument alone
+  tells the whole story. **Not yet promoted to `checkpoints/`** — remaining
+  before promotion: a dose sweep around 0.05 (chosen only for being lower
+  than 0.15, not for being optimal), and a multi-seed check (this project
+  has repeatedly found seed-sensitivity to matter for exactly this class
+  of result — see the α=0.995 dip finding elsewhere in this document).
