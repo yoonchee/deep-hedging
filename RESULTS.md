@@ -1285,6 +1285,52 @@ moved to the known-good list, since 4/500,000 is not actually clean.
   promoted fix, targeting exactly this "generalizes badly outside the
   training distribution" failure mode) on top of the lr=1e-3 fix, now that
   saturation is no longer masking whatever the RNN's real behavior is.
+- **Follow-up, same session: stacking `--slow-ramp-fraction` on the lr=1e-3
+  fix confirms the hypothesis, with a substantial improvement.** Trained
+  `--lr 1e-3 --slow-ramp-fraction 0.05` (LSTM's own validated dose)
+  together, same seed/generator as the two runs above:
+
+  | Checkpoint | \|h\|>0.999 | Delta span | CVaR₉₉ | Excess kurtosis |
+  |---|---|---|---|---|
+  | baseline (lr=1e-2) | 1.0000 | 0.173 | 17.73 | 10,027.2 |
+  | lr=1e-3 alone | 0.2427 | 1.000 | 17.26 | 11,413.1 |
+  | **lr=1e-3 + slow-ramp 0.05** | 0.2426 | 1.000 | **6.34** | **9,012.2** |
+
+  Saturation stays resolved (unsurprising — same lr), but CVaR₉₉ drops a
+  further 63% versus the lr-fix-alone checkpoint (17.26 → 6.34) and 64%
+  versus baseline, with kurtosis also improving past *both* (9,012 vs.
+  baseline's 10,027 and lr-alone's 11,413). Std also drops sharply (3.86 →
+  1.35), consistent with a genuinely more stable policy, not just a
+  different bad one. **This confirms the hypothesis directly**: once
+  saturation stopped masking the network's behavior, Basic RNN (TimeGAN)
+  did have the same training-distribution-generalization problem LSTM
+  (TimeGAN) had, and the same fix helps here too — a bigger relative win
+  here than LSTM's own 23% CVaR₉₉ reduction, though on a much worse
+  starting point (17.73 vs. LSTM's 4.23).
+
+  **The caution was warranted — multi-seeding reverses this finding too.**
+  Seeds 1-4 added for both conditions, same generator, read the same way:
+
+  | Condition | Mean CVaR₉₉ (5 seeds) | Std CVaR₉₉ | Mean excess kurtosis (5 seeds) |
+  |---|---|---|---|
+  | baseline (lr=1e-2) | 19.20 | 2.64 | 9,926.1 |
+  | lr=1e-3 + slow-ramp 0.05 | 18.47 | **7.82** | **10,671.4** |
+
+  The seed-0 result (CVaR₉₉ 17.73 → 6.34, a 64% improvement) does **not**
+  generalize: across 5 seeds, mean CVaR₉₉ improves by only 3.8% (not 63%),
+  mean kurtosis is 7.5% *worse*, and only 2 of 5 seeds show any improvement
+  at all. The combined fix's CVaR₉₉ standard deviation (7.82) is triple
+  baseline's (2.64) — it's less predictable, not more, across seeds. This
+  is the same trap LSTM's dose sweep fell into with dose 0.10 (apparent
+  single-seed win, reversed at 5 seeds), now confirmed a second time on a
+  different architecture. **Not promoted.** `Basic RNN (TimeGAN)` stays in
+  the known-bad list. Combined with the earlier lr-alone result, this
+  closes out both untried candidates this document had identified for
+  Basic RNN (TimeGAN) — the mechanism (recurrent hidden-state saturation)
+  is now well-understood and independently fixable, but neither of the two
+  natural follow-up fixes (lr alone, lr + LSTM's own slow-ramp augmentation)
+  translates into a reliable stress-test improvement. Genuinely open, with
+  no further untried candidate identified in this document.
 - **A production-scale retrain of Basic RNN (TimeGAN) was started and
   killed after 50 minutes at only 14,000/25,000 steps** — far slower than
   the ~27 minutes MLP retrains take at the same step count, apparently
