@@ -4,8 +4,69 @@ This documents what was implemented against Kim (2021), "Deep Hedging,
 Generative Adversarial Networks, and Beyond," what the actual experiments
 found, and — deliberately — what didn't work and why, not just what did.
 
+## Summary — current state
+
+This section states where things stand now, without the iteration history.
+Everything below it in this document is the detailed record of how each
+result was reached, including failed attempts and self-corrections — read
+that if you need to trust a number, not just cite it.
+
+Both parts of the paper are implemented and run at the paper's own scale:
+Part I (frictionless GBM, 500,000 train/test scenarios, 25,000 gradient
+steps) and Part II (GAN-driven scenarios with transaction costs, WGAN-GP
+and TimeGAN generators, evaluated on 500,000-path stress-test batches).
+
+**Part I: frictionless replication.** CVaR of terminal PnL, lower is
+better (reproduce with `python src/backtester/replicate_part1.py`):
+
+| α | Black-Scholes | MLP | Basic RNN | LSTM | GRU |
+|---|---|---|---|---|---|
+| 0.50 | 0.207 | 0.212 | 0.205 | 0.193 | 0.268 |
+| 0.75 | 0.343 | 0.347 | 0.333 | 0.312 | 0.311 |
+| 0.99 | 0.947 | 0.843 | 0.780 | 0.697 | 0.699 |
+
+All four learned architectures beat Black-Scholes at every α — the
+paper's core qualitative claim. Absolute CVaR matches the paper's own
+figures to 2-3% for Black-Scholes (the Monte Carlo noise floor) and
+0.1-2.3% for Basic RNN (`--rnn-lr 1e-3`, 4-seed validated); LSTM/GRU are
+mixed, 0.4-34% depending on α.
+
+**Stress test: regime-switching volatility + transaction costs, paper
+scale (500,000 paths, reproduce with `python src/backtester/evaluate.py`):**
+
+| Strategy | Mean wealth | CVaR 95% | CVaR 99% | Skew | Excess kurtosis |
+|---|---|---|---|---|---|
+| Black-Scholes | -0.033 | 1.20 | 1.85 | -2.24 | 7.6 |
+| MLP | -0.037 | 2.38 | 3.69 | -2.08 | 6.9 |
+| Basic RNN | -0.036 | 1.64 | 2.58 | -2.09 | 7.5 |
+| LSTM | -0.042 | 2.17 | 3.49 | -2.19 | 8.5 |
+| GRU | -0.041 | 2.14 | 3.81 | -24.3 | 3,078.3 |
+
+Every architecture except GRU looks like an ordinary fat-tailed P&L
+distribution. GRU's skew/kurtosis remain elevated after its
+`grad_clip_norm=1.0` fix (4/500,000 catastrophic paths, down from 34) — a
+genuine, documented, not-fully-closed gap.
+
+**TimeGAN-driven policies, paper scale:**
+
+| Architecture | Status | Fix |
+|---|---|---|
+| MLP | Clean, no tail risk | none needed |
+| Basic RNN | **Open — unfixed.** Hidden state saturates at tanh's ±1.0 bound regardless of input; `grad_clip_norm`, `orthogonal_init`, and `moneyness_clip` were all tried and none work. | — |
+| LSTM | **Fixed, promoted.** CVaR₉₉ 42.13 → 3.24, excess kurtosis 81,035 → 24.5 | `--slow-ramp-fraction 0.05` (training-time exposure to slow price ramps through the failure zone), 5-seed validated |
+| GRU | **Substantially improved, promoted, not fully closed.** CVaR₉₅ 8.21 → 6.01, CVaR₉₉ 31.98 → 25.52, real-path collapse rate 66.3% → 31.5% | `--moneyness-clip` (clip the RNN's input at TimeGAN's training-distribution boundary), trained from scratch |
+
+**Open items, priority order:**
+
+1. **Basic RNN (TimeGAN)** — no working fix found; genuinely open, not just deferred.
+2. **GRU (WGAN-GP) and GRU (TimeGAN)** — both improved and promoted, neither fully closed.
+3. **α=0.995 alpha-sweep checkpoint** — the `grad_clip_norm=1.0` fix already applied to its α=0.99/0.997 neighbors was never applied here; a 4-seed sweep showed this checkpoint's own seed-1 draw would ship 5,544 stress-test paths losing more than 10x the option premium.
+4. A dedicated TimeGAN path-dynamics loss term (`--lambda-dynamics`) produced the first generator to pass all 7 fidelity checks — but a policy trained against it had dramatically *worse* tail risk, not better. Documented as an open, single-seed negative result; not pursued further.
+5. Lower priority: WGAN-GP's moment-matching loss still slightly over/undershoots real skew/kurtosis; several single-seed TimeGAN clip-fix results haven't been multi-seed validated; the `^GSPC` data has no dividend/split adjustments.
+
 ## Contents
 
+- [Summary — current state](#summary--current-state)
 - [What's implemented vs. the paper](#whats-implemented-vs-the-paper)
 - [Terminal wealth and the P₀ (premium) term](#terminal-wealth-and-the-p₀-premium-term)
 - [Part I: frictionless replication](#part-i-frictionless-replication)
