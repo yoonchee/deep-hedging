@@ -7,6 +7,7 @@ from common.stats import (
     excess_kurtosis,
     excess_kurtosis_tensor,
     lag1_autocorrelation,
+    lag1_autocorrelation_tensor,
     skewness,
     skewness_tensor,
     step_log_returns,
@@ -83,3 +84,27 @@ def test_lag1_autocorrelation_detects_alternating_sign_as_negative() -> None:
 def test_lag1_autocorrelation_is_nan_for_a_fully_degenerate_batch() -> None:
     x = torch.ones(5, 10)  # every path constant -> zero variance everywhere
     assert lag1_autocorrelation(x) != lag1_autocorrelation(x)  # NaN != NaN
+
+
+def test_lag1_autocorrelation_tensor_matches_float_version() -> None:
+    torch.manual_seed(0)
+    x = torch.randn(500, 30)
+    assert abs(lag1_autocorrelation_tensor(x).item() - lag1_autocorrelation(x)) < 1e-5
+
+
+def test_lag1_autocorrelation_tensor_is_differentiable() -> None:
+    x = torch.randn(200, 30, requires_grad=True)
+    loss = lag1_autocorrelation_tensor(x) ** 2
+    loss.backward()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+
+
+def test_lag1_autocorrelation_tensor_is_zero_not_nan_for_a_fully_degenerate_batch() -> None:
+    # Deliberately diverges from lag1_autocorrelation's NaN: this version is
+    # meant to sit inside a training loss, where NaN would poison every
+    # other gradient in the same backward pass, not just this term.
+    x = torch.ones(5, 10)
+    result = lag1_autocorrelation_tensor(x)
+    assert torch.isfinite(result)
+    assert result.item() == pytest.approx(0.0)

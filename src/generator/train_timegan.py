@@ -37,7 +37,16 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from common.device import select_device  # noqa: E402
-from common.stats import excess_kurtosis, excess_kurtosis_tensor, skewness, skewness_tensor, terminal_log_return  # noqa: E402
+from common.stats import (  # noqa: E402
+    excess_kurtosis,
+    excess_kurtosis_tensor,
+    lag1_autocorrelation,
+    lag1_autocorrelation_tensor,
+    skewness,
+    skewness_tensor,
+    step_log_returns,
+    terminal_log_return,
+)
 from generator.data import HistoricalPriceLoader, MinMaxScaler, sample_real_prices  # noqa: E402
 from generator.timegan import TimeGAN  # noqa: E402
 from generator.train_gan import gradient_penalty  # noqa: E402
@@ -77,6 +86,27 @@ class TimeGANTrainer:
             "synthetic/real std *ratio* directly instead of relying on which bounded latent activation "
             "(sigmoid vs tanh) happens to land closest -- see RESULTS.md's TimeGAN diversity-calibration history.",
         ] = None,
+        lambda_dynamics: Annotated[
+            float, "weight on the path-dynamics-matching penalty (0 disables it)"
+        ] = 1.0,
+        target_step_std: Annotated[
+            Optional[float],
+            "real price-channel PER-STEP (not terminal) log-return std to match; None disables the dynamics "
+            "loss. Targets moment_loss/diversity_loss's blind spot directly: a generator can match every "
+            "terminal-distribution statistic while still taking a wildly unrealistic per-step route to get "
+            "there (see RESULTS.md's 'Investigating why the best-fidelity generator produced the worst "
+            "policies' writeup -- a terminal-'OK' checkpoint measured at 2x real per-step volatility).",
+        ] = None,
+        target_signed_autocorr: Annotated[
+            Optional[float],
+            "real per-step log-return lag-1 autocorrelation (momentum/mean-reversion) to match; None disables "
+            "this term of the dynamics loss.",
+        ] = None,
+        target_abs_autocorr: Annotated[
+            Optional[float],
+            "real |per-step log-return| lag-1 autocorrelation (volatility clustering, ARCH effects) to match; "
+            "None disables this term of the dynamics loss.",
+        ] = None,
         price_min: Annotated[Optional[float], "MinMaxScaler min for the price channel, needed to invert it"] = None,
         price_max: Annotated[Optional[float], "MinMaxScaler max for the price channel, needed to invert it"] = None,
         device: Optional[torch.device] = None,
@@ -96,6 +126,10 @@ class TimeGANTrainer:
         self.target_excess_kurtosis = target_excess_kurtosis
         self.lambda_diversity = lambda_diversity
         self.target_std = target_std
+        self.lambda_dynamics = lambda_dynamics
+        self.target_step_std = target_step_std
+        self.target_signed_autocorr = target_signed_autocorr
+        self.target_abs_autocorr = target_abs_autocorr
         self.price_min = price_min
         self.price_max = price_max
         self.price_index = timegan.price_index
@@ -181,7 +215,11 @@ class TimeGANTrainer:
         self,
         batch_size: Annotated[int, "number of paths to sample"],
         seq_len: Annotated[int, "number of time steps per path"],
-    ) -> Annotated[dict, "{'loss': float, 'loss_adv': float, 'loss_supervised': float, 'loss_moment': float, 'loss_diversity': float}"]:
+    ) -> Annotated[
+        dict,
+        "{'loss': float, 'loss_adv': float, 'loss_supervised': float, 'loss_moment': float, "
+        "'loss_diversity': float, 'loss_dynamics': float}",
+    ]:
         z = self.timegan.sample_noise(batch_size, seq_len, device=self.device)
         h_hat = self.timegan.generator(z)
         h_hat_supervised = self.timegan.supervisor(h_hat)
@@ -202,10 +240,16 @@ class TimeGANTrainer:
 
         needs_moment_loss = self.target_skewness is not None and self.target_excess_kurtosis is not None
         needs_diversity_loss = self.target_std is not None
+        needs_dynamics_loss = (
+            self.target_step_std is not None
+            or self.target_signed_autocorr is not None
+            or self.target_abs_autocorr is not None
+        )
 
         loss_moment = torch.zeros((), device=self.device)
         loss_diversity = torch.zeros((), device=self.device)
-        if needs_moment_loss or needs_diversity_loss:
+        loss_dynamics = torch.zeros((), device=self.device)
+        if needs_moment_loss or needs_diversity_loss or needs_dynamics_loss:
             x_hat = self.timegan.recovery(h_hat_supervised)
             price_scaled = x_hat[..., self.price_index : self.price_index + 1]
             price = self._invert_price_channel(price_scaled)
@@ -225,11 +269,31 @@ class TimeGANTrainer:
                 fake_std = fake_returns.std()
                 loss_diversity = (fake_std / self.target_std - 1.0) ** 2
 
+            if needs_dynamics_loss:
+                # moment_loss/diversity_loss above only ever look at the
+                # TERMINAL return; this is their blind spot -- a generator
+                # can match every terminal statistic while still taking a
+                # wildly unrealistic PER-STEP route to get there. See
+                # RESULTS.md's "Investigating why the best-fidelity
+                # generator produced the worst policies" writeup.
+                # [Batch, Time_Steps, 1] -> [Batch, Time_Steps - 1] (per-step, not terminal, log-returns)
+                fake_step_returns = step_log_returns(price)
+                if self.target_step_std is not None:
+                    fake_step_std = fake_step_returns.std()
+                    loss_dynamics = loss_dynamics + (fake_step_std / self.target_step_std - 1.0) ** 2
+                if self.target_signed_autocorr is not None:
+                    fake_signed_autocorr = lag1_autocorrelation_tensor(fake_step_returns)
+                    loss_dynamics = loss_dynamics + (fake_signed_autocorr - self.target_signed_autocorr) ** 2
+                if self.target_abs_autocorr is not None:
+                    fake_abs_autocorr = lag1_autocorrelation_tensor(fake_step_returns.abs())
+                    loss_dynamics = loss_dynamics + (fake_abs_autocorr - self.target_abs_autocorr) ** 2
+
         loss = (
             loss_adv
             + self.lambda_supervised * loss_supervised
             + self.lambda_moment * loss_moment
             + self.lambda_diversity * loss_diversity
+            + self.lambda_dynamics * loss_dynamics
         )
 
         self.optimizer_gs.zero_grad()
@@ -241,6 +305,7 @@ class TimeGANTrainer:
             "loss_supervised": loss_supervised.item(),
             "loss_moment": loss_moment.item(),
             "loss_diversity": loss_diversity.item(),
+            "loss_dynamics": loss_dynamics.item(),
         }
 
     def train_embedder_recovery_joint_step(
@@ -258,7 +323,11 @@ class TimeGANTrainer:
 
     def train_step_phase3(
         self, x_real: Annotated[torch.Tensor, "[Batch, Time_Steps, F] real path, features in [-1, 1]"]
-    ) -> Annotated[dict, "{'loss_d', 'loss_er', 'loss', 'loss_adv', 'loss_supervised', 'loss_moment', 'loss_diversity'}"]:
+    ) -> Annotated[
+        dict,
+        "{'loss_d', 'loss_er', 'loss', 'loss_adv', 'loss_supervised', 'loss_moment', "
+        "'loss_diversity', 'loss_dynamics'}",
+    ]:
         batch_size, seq_len, _ = x_real.shape
 
         loss_d = None
@@ -434,7 +503,18 @@ def main() -> None:
     parser.add_argument("--disable-moment-loss", action="store_true")
     parser.add_argument("--lambda-diversity", type=float, default=1.0, help="weight on the diversity-matching (synthetic/real std ratio) penalty")
     parser.add_argument("--disable-diversity-loss", action="store_true")
-    parser.add_argument("--moment-target-batch-size", type=int, default=5000, help="real-path sample size for moment- and diversity-loss targets")
+    parser.add_argument(
+        "--lambda-dynamics",
+        type=float,
+        default=1.0,
+        help="weight on the path-dynamics-matching penalty (per-step return std ratio + signed and |return| "
+        "lag-1 autocorrelation) -- targets moment/diversity's blind spot, PER-STEP path dynamics rather than "
+        "the terminal return, motivated by RESULTS.md's 'Investigating why the best-fidelity generator "
+        "produced the worst policies' finding (a terminal-'OK' generator with 2x real per-step volatility). "
+        "See validate.py's matching path-dynamics fidelity checks, which this loss targets directly.",
+    )
+    parser.add_argument("--disable-dynamics-loss", action="store_true")
+    parser.add_argument("--moment-target-batch-size", type=int, default=5000, help="real-path sample size for moment-, diversity-, and dynamics-loss targets")
     parser.add_argument("--s0", type=float, default=1.0, help="initial asset price of 'real' training data")
     parser.add_argument("--vol", type=float, default=0.2, help="volatility of 'real' training data (synthetic source)")
     parser.add_argument(
@@ -570,9 +650,12 @@ def main() -> None:
     target_skewness: Optional[float] = None
     target_excess_kurtosis: Optional[float] = None
     target_std: Optional[float] = None
+    target_step_std: Optional[float] = None
+    target_signed_autocorr: Optional[float] = None
+    target_abs_autocorr: Optional[float] = None
     price_min: Optional[float] = None
     price_max: Optional[float] = None
-    if not args.disable_moment_loss or not args.disable_diversity_loss:
+    if not (args.disable_moment_loss and args.disable_diversity_loss and args.disable_dynamics_loss):
         target_sample_raw = sample_real_raw(args.moment_target_batch_size, args.seq_len)
         target_sample_price = target_sample_raw[..., price_index : price_index + 1]
         target_sample_returns = terminal_log_return(target_sample_price)
@@ -598,8 +681,28 @@ def main() -> None:
             )
         else:
             print("Diversity-matching disabled (--disable-diversity-loss).")
+
+        if not args.disable_dynamics_loss:
+            # moment/diversity above only ever target the TERMINAL return;
+            # this targets PER-STEP path dynamics instead -- see RESULTS.md's
+            # "Investigating why the best-fidelity generator produced the
+            # worst policies" writeup, which found a generator matching
+            # every terminal statistic while still taking a wildly
+            # unrealistic per-step route to get there.
+            target_sample_step_returns = step_log_returns(target_sample_price)
+            target_step_std = target_sample_step_returns.std().item()
+            target_signed_autocorr = lag1_autocorrelation(target_sample_step_returns)
+            target_abs_autocorr = lag1_autocorrelation(target_sample_step_returns.abs())
+            print(
+                f"Path-dynamics matching enabled (lambda={args.lambda_dynamics}): target "
+                f"per-step log-return std {target_step_std:.5f}, target signed autocorr "
+                f"{target_signed_autocorr:+.3f}, target |return| autocorr {target_abs_autocorr:+.3f} "
+                f"(from {args.moment_target_batch_size} real paths)"
+            )
+        else:
+            print("Path-dynamics matching disabled (--disable-dynamics-loss).")
     else:
-        print("Moment-matching and diversity-matching both disabled.")
+        print("Moment-matching, diversity-matching, and path-dynamics-matching all disabled.")
 
     trainer = TimeGANTrainer(
         timegan,
@@ -614,6 +717,10 @@ def main() -> None:
         target_excess_kurtosis=target_excess_kurtosis,
         lambda_diversity=args.lambda_diversity,
         target_std=target_std,
+        lambda_dynamics=args.lambda_dynamics,
+        target_step_std=target_step_std,
+        target_signed_autocorr=target_signed_autocorr,
+        target_abs_autocorr=target_abs_autocorr,
         price_min=price_min,
         price_max=price_max,
         device=device,
@@ -642,7 +749,7 @@ def main() -> None:
                 f"  epoch {epoch:4d}/{args.phase3_epochs}  loss_d={stats['loss_d']:.4f}  "
                 f"loss_adv={stats['loss_adv']:.4f}  loss_supervised={stats['loss_supervised']:.4f}  "
                 f"loss_moment={stats['loss_moment']:.4f}  loss_diversity={stats['loss_diversity']:.4f}  "
-                f"loss_er={stats['loss_er']:.4f}"
+                f"loss_dynamics={stats['loss_dynamics']:.4f}  loss_er={stats['loss_er']:.4f}"
             )
 
     checkpoint_path = Path(args.checkpoint)

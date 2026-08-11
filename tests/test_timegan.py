@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from common.stats import excess_kurtosis, skewness, terminal_log_return
+from common.stats import excess_kurtosis, skewness, step_log_returns, terminal_log_return
 from generator.timegan import Embedder, LatentDiscriminator, Recovery, Supervisor, TimeGAN, TimeGANGenerator
 from generator.train_timegan import (
     MinMaxScaler,
@@ -241,6 +241,68 @@ def test_diversity_loss_pulls_synthetic_std_toward_target() -> None:
     for _ in range(250):
         trainer.train_generator_supervisor_step(batch_size=64, seq_len=seq)
     later_gap = std_gap()
+
+    assert later_gap < early_gap
+
+
+def test_dynamics_loss_is_zero_without_target() -> None:
+    batch, seq, feature_dim = 4, 15, 5
+    timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1)
+    trainer = TimeGANTrainer(timegan, n_critic=1, device=torch.device("cpu"))
+
+    stats = trainer.train_step_phase3(torch.rand(batch, seq, feature_dim))
+
+    assert stats["loss_dynamics"] == 0.0
+
+
+def test_dynamics_loss_is_nonzero_with_any_single_target() -> None:
+    batch, seq, feature_dim = 4, 15, 5
+    for kwargs in (
+        {"target_step_std": 0.01},
+        {"target_signed_autocorr": 0.0},
+        {"target_abs_autocorr": 0.0},
+    ):
+        timegan = TimeGAN(feature_dim=feature_dim, hidden_dim=12, noise_dim=8, num_layers=1, price_index=3)
+        trainer = TimeGANTrainer(
+            timegan, n_critic=1, price_min=0.5, price_max=1.5, device=torch.device("cpu"), **kwargs
+        )
+
+        stats = trainer.train_step_phase3(torch.rand(batch, seq, feature_dim))
+
+        assert stats["loss_dynamics"] > 0.0, f"expected nonzero loss_dynamics for {kwargs}"
+
+
+def test_dynamics_loss_pulls_synthetic_step_std_toward_target() -> None:
+    torch.manual_seed(0)
+    seq = 20
+    price_index = 3
+    target_step_std = 0.01
+
+    timegan = TimeGAN(feature_dim=5, hidden_dim=12, noise_dim=8, num_layers=1, price_index=price_index)
+    trainer = TimeGANTrainer(
+        timegan,
+        n_critic=1,
+        lr=3e-3,
+        lambda_dynamics=10.0,
+        target_step_std=target_step_std,
+        price_min=0.5,
+        price_max=1.5,
+        device=torch.device("cpu"),
+    )
+
+    def step_std_gap() -> float:
+        with torch.no_grad():
+            z = timegan.sample_noise(1000, seq)
+            synthetic_scaled = timegan.generate(z)
+            price_scaled = synthetic_scaled[..., price_index : price_index + 1]
+            price = trainer._invert_price_channel(price_scaled)
+            fake_step_returns = step_log_returns(price)
+            return abs(fake_step_returns.std().item() / target_step_std - 1.0)
+
+    early_gap = step_std_gap()
+    for _ in range(250):
+        trainer.train_generator_supervisor_step(batch_size=64, seq_len=seq)
+    later_gap = step_std_gap()
 
     assert later_gap < early_gap
 

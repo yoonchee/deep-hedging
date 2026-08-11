@@ -71,3 +71,25 @@ def lag1_autocorrelation(
     if valid.sum() == 0:
         return float("nan")
     return (num[valid] / den[valid]).mean().item()
+
+
+def lag1_autocorrelation_tensor(
+    x: Annotated[torch.Tensor, "[Batch, Time] per-path series, e.g. step_log_returns(...)"]
+) -> Annotated[
+    torch.Tensor,
+    "scalar, differentiable version of lag1_autocorrelation -- for use directly "
+    "inside a training loss (see train_timegan.py's path-dynamics-matching loss). "
+    "Not a thin wrapper around lag1_autocorrelation: falls back to 0.0 (not NaN) "
+    "for a fully degenerate batch, since NaN would poison every downstream "
+    "gradient rather than just leave this one term's contribution undefined -- "
+    "this divergence is intentional, not an inconsistency.",
+]:
+    a, b = x[:, :-1], x[:, 1:]
+    a_c = a - a.mean(dim=1, keepdim=True)
+    b_c = b - b.mean(dim=1, keepdim=True)
+    num = (a_c * b_c).sum(dim=1)
+    den = (a_c.pow(2).sum(dim=1)).sqrt() * (b_c.pow(2).sum(dim=1)).sqrt()
+    valid = den > 1e-8
+    if valid.sum() == 0:
+        return torch.zeros((), device=x.device, dtype=x.dtype)
+    return (num[valid] / den[valid]).mean()

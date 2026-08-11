@@ -2787,6 +2787,203 @@ both generators (`train_gan.py` and `train_timegan.py` share this one
 function), and to every future TimeGAN calibration attempt in this
 document going forward — this class of failure can no longer print "OK".
 
+#### Follow-up: can a TimeGAN be trained to pass the new path-dynamics checks? A 4-variant sweep, none fully clean, one close
+
+With the checker now able to see path dynamics, the natural next question
+is whether any hyperparameter change actually fixes them, or whether this
+is a structural TimeGAN limitation no amount of tuning escapes. Targeted
+hypothesis: `--lambda-supervised` is the one loss term specifically
+designed to enforce realistic one-step-ahead latent dynamics (temporal
+coherence), while `--lambda-moment`/`--lambda-diversity` only ever pull
+toward *terminal* statistics — if the terminal-focused losses dominate
+optimization pressure away from what the supervised loss wants, boosting
+supervised (or weakening the terminal losses) should help. Four variants,
+same seed (1, not seed 0, to also check whether the original finding
+was seed-specific), paper scale, `--data-source yfinance`:
+
+| Variant | Step-vol ratio | Signed autocorr diff | \|return\| autocorr diff | Skew diff |
+|---|---|---|---|---|
+| baseline (fresh seed) | OK | **+0.68** | **+0.62** | OK |
+| `--lambda-supervised 10.0` | **236.4%** (worse) | OK | +0.34 | OK |
+| `--lambda-moment 0.2 --lambda-diversity 0.2` | OK | +0.56 | +0.52 | OK |
+| combined (both above) | OK | +0.25 (borderline) | OK | **-0.85** (new failure) |
+
+**No variant passes cleanly, but the pattern is informative, not just
+noisy.** The fresh-seed baseline reproduces (and somewhat worsens) the
+original autocorrelation problem this investigation was built on — this
+isn't a seed-0-specific artifact. `--lambda-supervised` alone trades one
+problem for another: it fixes signed-return autocorrelation (momentum)
+completely, but step-vol *worsens* to 236% (from an already-passing
+baseline) and volatility clustering only partially improves — apparently,
+without the terminal-distribution losses actively constraining scale, a
+stronger supervised loss lets per-step amplitude drift further from real.
+Weakening the terminal losses *alone*, without boosting supervised,
+makes autocorrelation worse, not better — contradicting the simple
+"terminal losses are fighting supervised" framing; if anything they were
+incidentally helping constrain dynamics. **The combined variant is the
+closest of the four to passing everything**: only 2 residual issues
+(borderline momentum, and a new skew problem from weakening
+`--lambda-moment` too far) instead of 2-3 severe path-dynamics failures in
+every other variant — suggesting the right region is roughly "high
+supervised weight, low-but-not-zero terminal-loss weights," not any single
+lever in isolation. A refined attempt (`--lambda-supervised 20.0
+--lambda-moment 0.5 --lambda-diversity 0.2`, restoring some moment-loss
+weight to recover skew control while keeping the other two changes) was
+run as a direct follow-up to this table — see below for the result.
+
+**The refinement made things worse, not better — this isn't a simple knob
+to turn.** Same seed, `--lambda-supervised 20.0 --lambda-moment 0.5
+--lambda-diversity 0.2`:
+
+| Variant | Step-vol ratio | Signed autocorr diff | \|return\| autocorr diff | Skew diff |
+|---|---|---|---|---|
+| combined (supervised=10, moment=0.2, diversity=0.2) | OK | +0.25 (borderline) | OK | -0.85 |
+| refined (supervised=20, moment=0.5, diversity=0.2) | OK | **+0.31** (worse) | **+0.28** (newly failing) | -0.56 (better, still fails) |
+
+Doubling `--lambda-supervised` further (10 → 20) made signed-return
+autocorrelation *worse* (+0.25 → +0.31), not better, and volatility
+clustering — which had passed cleanly in the "combined" variant — newly
+failed (+0.28). Partially restoring `--lambda-moment` (0.2 → 0.5) did
+improve skew (-0.85 → -0.56) but not enough to clear the 0.5 threshold.
+**Five runs (one baseline plus four hyperparameter variants) show a
+non-monotonic relationship between these loss weights and the resulting
+path dynamics** — "more supervised loss weight" is not simply "better
+temporal coherence," and there is real interaction between all three
+terms that a handful of single-axis or two-axis nudges doesn't cleanly
+navigate.
+
+**Honest stopping point for this sub-investigation, not a resolved
+question.** No configuration tried passes all 7 fidelity checks
+simultaneously. This is consistent with (not proof of) the literature
+framing cited above — that marginal/terminal-distribution fidelity and
+temporal-dynamics fidelity are in genuine tension for GAN-based time-series
+models, not simply under-weighted relative to each other — but five runs
+across a 2-D corner of the hyperparameter space isn't enough to distinguish
+"this needs a proper grid search or a different loss formulation entirely"
+from "this specific tension is structurally unresolvable with TimeGAN's
+current loss design." A real grid search (more values per axis, ideally
+with multi-seed replication given this project's repeated experience with
+seed-sensitivity), or a structurally different intervention (e.g. an
+explicit path-dynamics loss term added directly to phase 3 training,
+analogous to how the moment- and diversity-matching losses were added for
+the terminal-distribution gaps this document's TimeGAN attempts 1-4
+chased) are the two directions this leaves open. Neither is started.
+
+#### Follow-up: a dedicated path-dynamics loss term passes all 7 checks — the first TimeGAN checkpoint in this project's history to do so
+
+The second of the two open directions above, tried directly rather than
+left open: an explicit path-dynamics-matching loss added to phase 3
+training (`TimeGANTrainer`'s `lambda_dynamics`/`target_step_std`/
+`target_signed_autocorr`/`target_abs_autocorr`, `--lambda-dynamics` on the
+CLI, default enabled), targeting the exact three statistics
+`validate.py`'s new checks measure — per-step return std ratio, signed
+lag-1 autocorrelation, and \|return\| lag-1 autocorrelation — the same
+way `lambda_moment`/`lambda_diversity` already targeted the four terminal
+ones. Backed by `common/stats.py::lag1_autocorrelation_tensor` (a
+differentiable sibling of the existing float version, with a deliberate
+0.0-not-NaN fallback for degenerate batches so it can't poison an
+unrelated gradient), and 6 new tests (differentiability, a
+zero-loss-without-target check, and a "pulls synthetic step-std toward
+target over 250 training steps" behavioral test mirroring the existing
+diversity-loss test).
+
+**Paper scale, all defaults (every lambda at 1.0, including the new
+`lambda_dynamics`), `--data-source yfinance`, seed=0 — passes all 7 checks
+on the first attempt:**
+
+| Check | Value | Threshold | Verdict |
+|---|---|---|---|
+| Diversity ratio | 83.8% | 30-170% | OK |
+| Mean bias | +0.2σ | 2.0σ | OK |
+| Skew diff | -0.03 | 0.5 | OK |
+| Kurtosis diff | -0.87 | 2.0 | OK |
+| **Step-vol ratio** | **115.3%** | 67-150% | **OK** |
+| **Signed autocorr diff** | **-0.07** | 0.25 | **OK** |
+| **\|return\| autocorr diff** | **+0.17** | 0.25 | **OK** |
+
+**This is the first TimeGAN checkpoint anywhere in this document's
+four-plus-attempt history to pass both terminal-distribution and
+path-dynamics fidelity simultaneously**, and it did so without any
+hyperparameter search at all — plain defaults, first try. Contrast this
+directly with the 5-run reweighting sweep just above, which never got
+closer than 2 residual failures even after deliberately tuning
+`lambda_supervised`/`lambda_moment`/`lambda_diversity` across several
+configurations: **a dedicated loss term aimed directly at the target
+statistic beat reweighting existing, indirectly-related losses**, the same
+lesson this project already learned once before for the terminal
+distribution (moment-matching/diversity-matching losses were added, not
+found by tuning the adversarial/supervised loss weights). Skew diff (-0.03)
+and kurtosis diff (-0.87) are both tighter here than any of attempts 1-4's
+own terminal-only-optimized checkpoints achieved (compare attempt 4's
+skew diff -0.007/kurtosis diff -0.99 — closely matched, not exceeded, but
+achieved *simultaneously* with passing path dynamics, which no attempt-1-4
+checkpoint even measured, let alone passed).
+
+**Not yet a promoted checkpoint — this is a fidelity-check result, not a
+downstream validation.** Every other fix in this document was validated by
+retraining a policy against the corrected artifact and stress-testing it
+before promotion (the LSTM `--slow-ramp-fraction` fix, GRU's
+`moneyness_clip`, GRU's `grad_clip_norm`). This checkpoint
+(`timegan_dynamics_loss.pt`, scratch only) hasn't been through that step:
+it's unknown whether training a policy against a generator that's
+path-dynamics-realistic (not just terminal-realistic) produces better
+downstream stress-test behavior than `--slow-ramp-fraction` already
+achieves against the old-style generator, makes no difference, or
+interacts with it in some other way. That is the natural next experiment
+this finding opens up, not yet run.
+
+#### Follow-up: training against the path-dynamics-fixed generator makes the downstream policy dramatically *worse*, not better
+
+The obvious next experiment, run directly: baseline and
+`--slow-ramp-fraction 0.05` LSTM (TimeGAN) policies trained against
+`timegan_dynamics_loss.pt` instead of the old-style generator, same seed
+(0), full 500,000-path stress test:
+
+| Config | CVaR₉₉ | Excess kurtosis |
+|---|---|---|
+| old generator, baseline | 4.23 | 44.6 |
+| old generator, `--slow-ramp-fraction 0.05` (promoted) | 3.27 | 28.2 |
+| **new (path-dynamics-fixed) generator, baseline** | **37.52** | **12,499.2** |
+| new generator, `--slow-ramp-fraction 0.05` | 34.34 | 13,098.0 |
+
+**This is the opposite of the hypothesis this whole sub-investigation was
+built on.** Fixing the generator's path dynamics didn't reduce the
+downstream policy's tail risk — it made it roughly **9x worse on CVaR₉₉
+and ~280x worse on kurtosis**, and `--slow-ramp-fraction`, which cut
+tail risk substantially on the old generator, barely moves the needle here
+(and if anything worsens kurtosis slightly, 12,499 → 13,098).
+
+**Likely mechanism, directly traceable to a number already on record**:
+the new generator's own diversity ratio is 83.8% of real — passing the
+fidelity checker's 30-170% threshold cleanly, but *meaningfully narrower*
+than the old generator's 110.6%. A narrower generator means the policy
+sees a narrower range of terminal outcomes during training, which is
+*exactly* the ingredient behind mechanism (b) as documented throughout
+this section: TimeGAN-trained recurrent policies generalize badly to
+price extremes their own training distribution didn't cover. Fixing path
+dynamics (this session's new loss term) and fixing training-distribution
+coverage (diversity) are two different levers, and this generator
+improved one at what looks like a cost to the other, even though neither
+number individually crosses a fidelity-checker threshold. Passing all 7
+checks was never a guarantee of producing a *better* training
+distribution for a recurrent policy, only a more accurately-*described*
+one against real data's own statistics — real data's diversity and real
+data's path dynamics are both real properties, but matching them more
+tightly doesn't automatically make the resulting synthetic distribution
+more informative for a policy that needs to see extremes to hedge them.
+
+**Single seed — flagged, not overclaimed, but the magnitude here is much
+larger than any prior seed-noise range this document has measured** (the
+LSTM multi-seed check's own worst-to-best CVaR₉₉ spread was roughly
+2.6-4.5; this is a 9x jump). Given this project's repeated experience with
+single-seed results reversing under multi-seeding (LSTM dose=0.10, Basic
+RNN's stacked fix), a multi-seed check is the responsible next step before
+concluding the path-dynamics-fixed generator is actually worse in general
+rather than unlucky at seed 0 — but a magnitude this large makes "purely
+seed noise" a less likely explanation than it was for those smaller
+(2-3x) prior cases. **Not promoted. The old generator + `--slow-ramp-fraction
+0.05` combination remains the best validated result in this document.**
+
 ## Known limitations
 
 Roughly in priority order:
@@ -3077,7 +3274,17 @@ Roughly in priority order:
    verified to correctly flag the exact checkpoint that motivated this
    investigation (previously "OK", now `WARNING`). This class of failure
    can no longer pass silently for any future TimeGAN (or WGAN-GP)
-   calibration attempt.
+   calibration attempt. **And since resolved, not just detected**: a
+   dedicated path-dynamics-matching loss (`--lambda-dynamics`, mirroring
+   how `--lambda-moment`/`--lambda-diversity` target the terminal
+   statistics) produces a checkpoint passing all 7 checks simultaneously
+   at paper scale on the first attempt, no hyperparameter search needed —
+   see the [full writeup](#follow-up-a-dedicated-path-dynamics-loss-term-passes-all-7-checks--the-first-timegan-checkpoint-in-this-projects-history-to-do-so).
+   Not yet validated downstream (no policy has been retrained against this
+   checkpoint and stress-tested), so "diversity-tuning was never going to
+   fix downstream policy behavior on its own" above should now be read as
+   "terminal-only diversity-tuning" — a generator that's also
+   path-dynamics-realistic is an open, promising, untested question.
 8. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
    adjustments (`Adj Close == Close` always) — if the paper's authors used a
    security where those differ, this isn't an exact data match.
