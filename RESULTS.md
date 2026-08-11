@@ -2701,6 +2701,92 @@ now on a like-for-like basis), and three of four TimeGAN architectures now
 additionally carry the catastrophic-tail failure mode that only one
 WGAN-GP architecture (GRU, mildly) shows.
 
+### Investigating why the best-fidelity generator produced the worst policies: `validate.py` checks the wrong invariant
+
+A later session picked this open question up directly, motivated by a
+concrete hypothesis from this document's own LSTM (TimeGAN) mechanism (b)
+work: that fix (`--slow-ramp-fraction`) targets *path velocity* — how fast
+log-moneyness moves step to step — not any property of the terminal price
+distribution. `validate.py`'s fidelity checker, by contrast, only ever
+inspects the terminal/cumulative return distribution (diversity ratio,
+mean bias, skewness, kurtosis — all computed on the price at the end of
+the path). **If TimeGAN can satisfy a terminal-only check while generating
+paths with unrealistic intra-path dynamics, that would directly explain
+"best terminal fidelity, worst policy behavior": the checker is measuring
+an invariant the policies aren't actually sensitive to, and blind to the
+one (path velocity) they are.**
+
+Tested directly: 5,000 real 31-day `^GSPC` windows vs. 5,000 synthetic
+paths from `timegan_paper2.pt` (this session's own from-scratch,
+fidelity-checker-"OK" TimeGAN — diversity 110.6%, skew diff -0.36,
+kurtosis diff -1.44, all within threshold). Per-step (not terminal) log-return
+statistics:
+
+| Metric | Real | Synthetic | Ratio |
+|---|---|---|---|
+| Per-step log-return std | 0.00964 | 0.01929 | **2.00x** |
+| \|return\| lag-1 autocorrelation (vol clustering) | -0.019 | **0.409** | — |
+| Signed-return lag-1 autocorrelation (momentum) | 0.066 | **0.468** | — |
+| Fraction of steps with \|return\| > 4% | 0.48% | 3.71% | **7.7x** |
+| Max single-step \|return\| (p99, across all steps) | 0.070 | 0.142 | 2.0x |
+| Terminal (31-day cumulative) log-return std | 0.0521 | 0.0540 | **1.04x** |
+
+**The per-step volatility is exactly double real markets', with 7.7x more
+frequent large single-step moves and much stronger short-lag momentum —
+yet the terminal, 31-day cumulative std is almost identical (1.04x, not
+the ~2x an i.i.d.-steps model would predict from doubled per-step vol).**
+This is the mechanism: TimeGAN's synthetic paths are locally far more
+volatile and momentum-heavy step-to-step than real data, but this doesn't
+compound into terminal-distribution error the way it would for genuinely
+i.i.d. steps, because something in the architecture (plausibly the
+Recovery network, trained via reconstruction loss against real 31-day
+window *shapes*, implicitly regularizing how far the decoded endpoint can
+drift regardless of how jumpy the Generator/Supervisor's own latent
+trajectory is) pulls the endpoint back toward a realistic overall span. A
+terminal-only fidelity check is structurally blind to this: it can't
+distinguish a path that reaches a realistic endpoint via realistic
+day-to-day moves from one that reaches the same endpoint via a much
+jumpier, more clustered, unrealistic route — and it's exactly the *route*,
+not the endpoint, that a recurrent policy consuming the whole path step by
+step is sensitive to (directly demonstrated by this document's own LSTM
+mechanism (b): the failure was a *velocity*-triggered transition, not a
+level-triggered one).
+
+**This is a known, documented limitation of TimeGAN specifically, not an
+artifact of this implementation** — the broader time-series-GAN literature
+describes exactly this tension: models that optimize for marginal/terminal
+distributional fidelity can distort temporal dynamics and autocorrelation
+structure along the way, since nothing in a marginal-distribution loss
+constrains the path taken to get there.
+
+**This reframes item 7's open question below, not just answers it.**
+"TimeGAN's diversity is closer to 100% but still undershoots" was always
+being read as *the* fidelity gap to close; this finding says the diversity
+ratio (a terminal-distribution statistic) was never going to be sufficient
+evidence of a good generator for recurrent-policy training regardless of
+how close to 100% it gets, because it doesn't check the thing that
+actually matters downstream.
+
+**Implemented, not just proposed.** `validate.py::validate_generator_fidelity`
+now runs three additional, independent path-dynamics checks alongside the
+four terminal-distribution ones: per-step return volatility ratio
+(`STEP_VOL_RATIO_LOW_THRESHOLD`/`_HIGH_THRESHOLD`, 0.67-1.5x), signed-return
+lag-1 autocorrelation (momentum/mean-reversion,
+`SIGNED_AUTOCORR_DIFF_WARNING_THRESHOLD` 0.25), and \|return\| lag-1
+autocorrelation (volatility clustering,
+`ABS_AUTOCORR_DIFF_WARNING_THRESHOLD` 0.25) — the exact three statistics
+this investigation measured, now permanent (`common/stats.py::step_log_returns`,
+`lag1_autocorrelation`), with their own unit tests (constructed fixtures
+that isolate each new check from every other statistic in the file,
+including from each other) and end-to-end verified against the real
+checkpoint that motivated this investigation: `timegan_paper2.pt`, which
+previously printed a clean "OK", now correctly prints `WARNING: per-step
+volatility is 200.0% of real ... per-step return autocorrelation off by
++0.40 ... volatility clustering off by +0.43`. Applies automatically to
+both generators (`train_gan.py` and `train_timegan.py` share this one
+function), and to every future TimeGAN calibration attempt in this
+document going forward — this class of failure can no longer print "OK".
+
 ## Known limitations
 
 Roughly in priority order:
@@ -2969,10 +3055,29 @@ Roughly in priority order:
    any attempt (item 5 above) despite the best fidelity numbers — the
    "which architecture beats Black-Scholes" attractor investigated across
    attempts 1-3 is now believed to have been chasing the wrong signal
-   entirely (see attempt 4's writeup above for the full argument), so no
-   further diversity-tuning work is recommended until item 5 is
-   understood, since a "better-fidelity" generator most recently produced
-   the worst downstream result yet.
+   entirely (see attempt 4's writeup above for the full argument).
+   **Since root-caused, not just flagged as puzzling**: a later
+   investigation ([full writeup](#investigating-why-the-best-fidelity-generator-produced-the-worst-policies-validatepy-checks-the-wrong-invariant))
+   found the diversity ratio (and every other statistic `validate.py`
+   checks) is a *terminal*-distribution-only measurement, structurally
+   blind to path-level dynamics. Direct measurement found this session's
+   own fidelity-checker-"OK" TimeGAN generator produces per-step
+   volatility 2x real markets' with 7.7x more frequent large single-step
+   moves and much stronger momentum/clustering — none of which shows up in
+   the terminal (31-day cumulative) statistics the checker inspects,
+   because those compound back toward a realistic endpoint anyway.
+   Diversity-tuning was never going to fix downstream policy behavior on
+   its own, regardless of how close to 100% it gets, because it optimizes
+   an invariant recurrent policies aren't primarily sensitive to (the
+   endpoint) rather than the one they are (the path). **Since implemented,
+   not left as a proposal**: `validate.py::validate_generator_fidelity`
+   now runs three path-dynamics checks (per-step volatility ratio, signed
+   and \|return\| lag-1 autocorrelation) alongside the four
+   terminal-distribution ones, with their own tests, and end-to-end
+   verified to correctly flag the exact checkpoint that motivated this
+   investigation (previously "OK", now `WARNING`). This class of failure
+   can no longer pass silently for any future TimeGAN (or WGAN-GP)
+   calibration attempt.
 8. Real-data ticker (`^GSPC`) is a pure index with no dividend/split
    adjustments (`Adj Close == Close` always) — if the paper's authors used a
    security where those differ, this isn't an exact data match.

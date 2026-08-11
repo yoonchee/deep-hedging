@@ -36,3 +36,38 @@ def terminal_log_return(
     s0 = prices[:, 0, 0]
     sT = prices[:, -1, 0]
     return torch.log(sT / s0)
+
+
+def step_log_returns(
+    prices: Annotated[torch.Tensor, "[Batch, Time_Steps, 1] price paths"]
+) -> Annotated[torch.Tensor, "[Batch, Time_Steps - 1] log(S_t / S_{t-1}) per step, differentiable"]:
+    return torch.log(prices[:, 1:, 0] / prices[:, :-1, 0])
+
+
+def lag1_autocorrelation(
+    x: Annotated[torch.Tensor, "[Batch, Time] per-path series, e.g. step_log_returns(...)"]
+) -> Annotated[
+    float,
+    "per-path Pearson correlation between x[:, :-1] and x[:, 1:], averaged "
+    "across the batch; NaN if every path is degenerate (zero variance)",
+]:
+    """Vectorized lag-1 autocorrelation -- no per-path Python loop, so this
+    stays fast at the batch sizes validate_generator_fidelity runs at
+    (thousands of paths). Used both on raw (signed) returns, where a
+    nonzero value flags momentum/mean-reversion structure a terminal-only
+    check can't see, and on |returns|, where it flags volatility clustering
+    (ARCH effects) -- see RESULTS.md's "Investigating why the best-fidelity
+    generator produced the worst policies" writeup, which found a
+    terminal-distribution-"OK" TimeGAN generator with per-step dynamics
+    (2x real volatility, much stronger momentum and clustering) invisible
+    to every check that only inspects the terminal/cumulative distribution.
+    """
+    a, b = x[:, :-1], x[:, 1:]
+    a_c = a - a.mean(dim=1, keepdim=True)
+    b_c = b - b.mean(dim=1, keepdim=True)
+    num = (a_c * b_c).sum(dim=1)
+    den = (a_c.pow(2).sum(dim=1)).sqrt() * (b_c.pow(2).sum(dim=1)).sqrt()
+    valid = den > 1e-8
+    if valid.sum() == 0:
+        return float("nan")
+    return (num[valid] / den[valid]).mean().item()
