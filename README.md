@@ -19,17 +19,12 @@ what matches the paper, what doesn't, and why is in
 - A **TimeGAN market generator** (Yoon et al. 2019, the paper's actual Part
   II architecture) -- embedder/recovery/generator/supervisor/discriminator
   over multi-variate OHLCV data, trained via the paper's 3-phase procedure,
-  now with the paper's own hyperparameters (31 hidden nodes, 3 layers),
-  its own binary cross-entropy discriminator loss as the default
-  (`--discriminator-loss wgan-gp` keeps this repo's earlier deviation
-  available), and the paper's own batch size/iteration count (178, ~10,000
-  iterations) plus its temporal train/test split. Its synthetic-data
-  diversity has been hard to calibrate correctly (31% too low, then
-  214-224% too high, then 130.2%, now **87.3%** at paper scale -- the
-  closest yet to 100%, but from the other side) -- and its best-fidelity
-  checkpoint yet produced the worst downstream hedging behavior of any
-  attempt (catastrophic tail risk in 3 of 4 architectures) -- see
-  `RESULTS.md` for the full four-attempt story.
+  now with the paper's own hyperparameters (31 hidden nodes, 3 layers, batch
+  178, ~10,000 iterations) and its own temporal train/test split. A
+  **fidelity checker** (`generator/validate.py`) checks both terminal-return
+  statistics (diversity, mean bias, skew, kurtosis) and path-level dynamics
+  (per-step volatility, return autocorrelation) -- see `RESULTS.md` for why
+  both matter and the calibration story behind each.
 - **Four hedging policy architectures** trained by direct policy search to
   minimize CVaR of terminal wealth: a feed-forward MLP (Buehler et al.'s
   `delta_k = f(I_k, delta_{k-1})` formulation) and three genuine recurrent
@@ -74,7 +69,7 @@ src/
     evaluate.py                Stress-test backtest vs. Black-Scholes (WGAN-GP- and TimeGAN-trained policies)
     replicate_part1.py         Frictionless Part I paper replication
     plotting.py                Shared chart library
-tests/                         88 tests
+tests/                         147 tests
 results/                       Generated plots + JSON summaries (gitignored inputs: data/, checkpoints/)
 ```
 
@@ -152,130 +147,74 @@ pytest tests/ -v
 
 ## Results, in brief
 
-See [`RESULTS.md`](RESULTS.md) for the full numbers, plots, and diagnostic
-trail:
+Full numbers, plots, and diagnostic trail are in
+[`RESULTS.md`](RESULTS.md#summary--current-state). Headline results, at the
+paper's own scale throughout:
 
-- **Frictionless replication (Part I)**: initially, MLP and GRU worked while
-  Basic RNN/LSTM converged to a near-constant, input-insensitive policy
-  despite five targeted interventions. The real root cause turned out to be
-  a DC-dominated RNN input (the raw price channel was 97% a constant offset,
-  3% signal) that a naive strike-normalization didn't fix. A standardized
-  log-moneyness transform closed the gap completely — **all four
-  architectures now replicate Black-Scholes-level CVaR at every
-  risk-aversion level**, some slightly beating it.
-- **GAN tail-shape fidelity**: the real-data generator originally captured
-  the right mean and spread but not real markets' fat-tail crash risk
-  (skew/kurtosis), caught by the built-in fidelity checker. Fixed with an
-  explicit moment-matching loss term (`generator/train_gan.py`) that pulls
-  the generator's terminal-return skew/kurtosis toward the real data's.
-- **Stress-test backtest**: after the RNN/LSTM input fix, LSTM's stress-test
-  tail risk also improved dramatically (CVaR₉₉ 18.4 → 5.0, now matching
-  GRU). Basic RNN looked architecturally stuck at first (single-seed
-  testing), but an 8-seed sweep revealed it's actually highly
-  seed-sensitive and bimodal, not deterministically broken — every prior
-  experiment in this project happened to use an unlucky default seed. A
-  CVaR control-variate baseline (`--use-bs-baseline`) cuts cross-seed CVaR₉₉
-  variance 5.7x and turns the canonical checkpoint's CVaR₉₉ from 19.3 to
-  6.6 (P₀-inclusive) — real progress, though still short of LSTM/GRU's ~4.4.
-- **TimeGAN vs. WGAN-GP**: TimeGAN's synthetic-data diversity was hard to
-  calibrate — first only ~31% of real data's standard deviation (sigmoid
-  latent space), then 214-224% after switching to tanh to fix it, then
-  130.2% after adding an explicit diversity-matching loss, then **87.3%**
-  once that same setup was retrained at the paper's own scale (batch=178,
-  ~10,000 iterations, paper's temporal train/test split) — the closest of
-  four attempts to 100%, approaching from the other side. The 214-224%
-  overshoot produced a "beats Black-Scholes" result for exactly one
-  architecture each time — but *which* architecture changed completely once
-  the RNN/LSTM input fix was applied, and at paper scale the entire framing
-  turned out to be investigating the wrong signal (see the next bullet):
-  three of four TimeGAN architectures instead show catastrophic tail risk
-  once evaluated at a large enough test scale to see it, and the
-  retrospective read is that "beats Black-Scholes" in the earlier, smaller
-  attempts was plausibly this same failure mode, just below the old test
-  set's detection threshold. Neither generator is straightforwardly
-  "better" for hedging; see `RESULTS.md` for the full four-attempt story.
-- **Catastrophic tail risk — a new finding surfaced only at paper scale**:
-  rerunning the stress test at the paper's own 500,000-path test scale
-  (previously 2,000) revealed several trained policies — GRU (WGAN-GP), the
-  most risk-averse alpha-sweep checkpoint (α=0.997), and Basic RNN/LSTM/GRU
-  under TimeGAN — incur catastrophic losses (excess kurtosis in the tens to
-  hundreds of thousands) on a small fraction of paths (0.05-0.16%) that the
-  old, smaller test batch was simply too small to ever sample. Verified
-  against a Black-Scholes control on the identical price paths (bounded
-  losses throughout) to rule out a test-set artifact — this is genuine
-  policy behavior, not noise. Two distinct, confirmed mechanisms: CVaR
-  training's gradient only touches the worst `(1-α)` fraction of each
-  batch, and at α=0.997/batch=1000 that's just 3 paths/step — sparse enough
-  that one checkpoint learned a fully degenerate never-hedge policy
-  (transaction cost exactly zero); separately, TimeGAN-trained recurrent
-  policies (not MLP) generalize badly to price extremes their training data
-  never produced. Not yet fixed — see `RESULTS.md` for the full
-  investigation and next steps.
-- **The option premium (P₀), and why mean wealth used to be negative
-  everywhere**: this project's wealth formula omitted the option premium
-  (P₀), verified directly against a closed-form Black-Scholes price in
-  Part I and a Monte Carlo estimate in the stress test. P₀ is now
-  implemented (`MarketEnvironment(premium=...)`) everywhere — Part I uses
-  the exact closed-form price, the stress test and GAN-driven training
-  estimate it via Monte Carlo through whatever simulator/generator is in
-  use. Mean wealth is now ≈0 throughout, matching the paper's convention,
-  and Part I's CVaR numbers match the paper's own absolute figures to
-  within 2-9% for three of four architectures. No retraining was needed
-  for existing checkpoints — a constant additive wealth shift doesn't
-  change the CVaR-minimizing optimal policy. See `RESULTS.md` for the full
-  derivation and both original checks.
+**Part I: frictionless replication** (500,000 train/test scenarios, 25,000
+gradient steps). CVaR of terminal PnL, lower is better:
+
+| α | Black-Scholes | MLP | Basic RNN | LSTM | GRU |
+|---|---|---|---|---|---|
+| 0.50 | 0.207 | 0.212 | 0.205 | 0.193 | 0.268 |
+| 0.75 | 0.343 | 0.347 | 0.333 | 0.312 | 0.311 |
+| 0.99 | 0.947 | 0.843 | 0.780 | 0.697 | 0.699 |
+
+All four architectures beat Black-Scholes at every α, matching the paper's
+own absolute CVaR figures closely (2-3% for Black-Scholes, 0.1-2.3% for
+Basic RNN, 0.4-34% for LSTM/GRU depending on α).
+
+**Stress test: regime-switching volatility + transaction costs** (500,000
+paths):
+
+| Strategy | CVaR 95% | CVaR 99% | Excess kurtosis |
+|---|---|---|---|
+| Black-Scholes | 1.20 | 1.85 | 7.6 |
+| MLP | 2.38 | 3.69 | 6.9 |
+| Basic RNN | 1.64 | 2.58 | 7.5 |
+| LSTM | 2.17 | 3.49 | 8.5 |
+| GRU | 2.14 | 3.81 | 3,078.3 |
+
+Every architecture except GRU behaves like an ordinary fat-tailed P&L
+distribution; GRU's elevated kurtosis is a known, partially-fixed gap
+(4/500,000 catastrophic paths remain after `--grad-clip-norm 1.0`).
+
+**TimeGAN-driven policies** (the paper's actual Part II generator, same
+scale):
+
+| Architecture | Status |
+|---|---|
+| MLP | Clean |
+| Basic RNN | Open — hidden-state saturation, no working fix found |
+| LSTM | Fixed and promoted (`--slow-ramp-fraction 0.05`): CVaR₉₉ 42.13 → 3.24 |
+| GRU | Improved and promoted (`--moneyness-clip`), not fully closed |
+
+The option premium (P₀) is now correctly included everywhere — Part I uses
+the exact closed-form Black-Scholes price, the stress test and GAN-driven
+settings estimate it via Monte Carlo — so mean wealth is ≈0 throughout,
+matching the paper's own convention.
 
 ## Known limitations
 
-- ~~No option premium (P₀)~~ — resolved everywhere (Part I: exact
-  closed-form; stress test / GAN-driven training: Monte Carlo estimate).
-  Mean wealth is now ≈0 throughout, tightening further at paper scale; see
-  `RESULTS.md`.
-- ~~Part I's training budget doesn't match the paper~~ — resolved: the
-  paper's "50 epochs" is 25,000 gradient steps over a fixed
-  500,000-scenario dataset at batch=1000, now this repo's default (train
-  and test scale both match Table 1 exactly). Black-Scholes matches the
-  paper's absolute CVaR to 2-3% at every α; LSTM/GRU are mixed (0.4% at
-  α=0.75, up to 34% at α=0.5). Basic RNN's mismatch initially got *worse*
-  at the corrected scale (58-59% at α=0.5/0.99) — since root-caused (a
-  learning-rate-specific weight-norm blowup unique to the vanilla RNN
-  cell, confirmed not fixed by gradient clipping or orthogonal
-  initialization) and fixed with a 10x lower learning rate specific to
-  that architecture (`--rnn-lr 1e-3`), now matching the paper to
-  0.1-2.3% at every α — tighter than LSTM/GRU. See `RESULTS.md` for the
-  full diagnosis.
-- Generator tail-shape fidelity is improved but not exact — synthetic skew
-  now overshoots real data's, kurtosis still runs a bit low; see `RESULTS.md`.
-- Basic RNN's stress-test convergence is seed-sensitive (bimodal: some
-  seeds converge well, others get stuck) — substantially improved by a
-  CVaR control-variate baseline, but not fully closed to LSTM/GRU's level.
-- **Catastrophic tail risk in several trained policies** — GRU (WGAN-GP),
-  the α=0.997 alpha-sweep checkpoint, and Basic RNN/LSTM/GRU under TimeGAN
-  all incur extreme losses on a small fraction of paths (0.05-0.16%) that
-  only the paper's own 500,000-path test scale is large enough to surface.
-  Root-caused (sparse CVaR gradients at extreme α; poor generalization to
-  price extremes for TimeGAN-trained recurrent policies). ~~LSTM
-  (TimeGAN)~~ **fixed and promoted** — `train_policy.py
-  --slow-ramp-fraction 0.05` (training-time exposure to synthetic slow
-  log-moneyness ramps through the failure zone), validated at 5 seeds and
-  a dose sweep: CVaR₉₉ 42.13 → 3.24, excess kurtosis 81,035 → 24.5. GRU
-  (WGAN-GP) and the α=0.997 checkpoint were fixed earlier (`grad_clip_norm`).
-  GRU (TimeGAN) has a partial fix promoted (`moneyness_clip`, improves but
-  doesn't fully close the gap); Basic RNN (TimeGAN) remains open — see
-  `RESULTS.md`.
-- TimeGAN's diversity is improved but still off-target (31% → 214-224% →
-  130.2% → 87.3% across four calibration attempts, now undershooting
-  instead of overshooting) — its fidelity checker has an upper-bound
-  diversity warning (`DIVERSITY_OVERSHOOT_WARNING_THRESHOLD`) that would
-  have caught the 214-224% overshoot, but neither 130.2% nor 87.3% trips
-  it; see `RESULTS.md`.
-- ~~Toy-scale networks and training budgets throughout, not the paper's
-  scale~~ — resolved: training and evaluation now run at the paper's own
-  scale throughout (Part I's 500,000 scenarios/25,000 steps, TimeGAN's
-  Table 2 batch/iteration count, and every stress-test/alpha-sweep
-  evaluation batch). This is also what surfaced the tail-risk finding
-  above — the smaller scale wasn't just less precise, it was blind to a
-  real failure mode.
+Roughly in priority order — see
+[`RESULTS.md`](RESULTS.md#summary--current-state) for the diagnostic trail
+behind each:
+
+1. **Basic RNN (TimeGAN)** — genuinely unfixed. Hidden state saturates at
+   tanh's ±1.0 bound regardless of input; gradient clipping, orthogonal
+   init, and input clipping were all tried and none work.
+2. **GRU (WGAN-GP) and GRU (TimeGAN)** — both improved and promoted,
+   neither fully closed (a handful of catastrophic paths remain in each).
+3. **α=0.995 alpha-sweep checkpoint** — the fix already applied to its
+   α=0.99/0.997 neighbors (`--grad-clip-norm 1.0`) hasn't been applied here
+   yet, despite direct evidence it's needed.
+4. A dedicated TimeGAN loss term that matches path-level dynamics (not just
+   terminal statistics) produced the first generator to pass every fidelity
+   check — but a policy trained against it had dramatically worse tail
+   risk. Open, single-seed, not pursued further.
+5. Minor: WGAN-GP's synthetic skew/kurtosis still slightly miss real
+   data's; several single-seed TimeGAN fixes haven't been multi-seed
+   validated; `^GSPC` has no dividend/split adjustments.
 
 ## References
 
