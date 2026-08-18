@@ -43,26 +43,33 @@ scale (500,000 paths, reproduce with `python src/backtester/evaluate.py`):**
 | GRU | -0.041 | 2.14 | 3.81 | -24.3 | 3,078.3 |
 
 Every architecture except GRU looks like an ordinary fat-tailed P&L
-distribution. GRU's skew/kurtosis remain elevated after its
-`grad_clip_norm=1.0` fix (4/500,000 catastrophic paths, down from 34) — a
-genuine, documented, not-fully-closed gap.
+distribution. **GRU's row is the least trustworthy number in this table.**
+It was measured on a single seed of a checkpoint that no longer exists, and a
+later 5-seed rerun found baseline GRU (WGAN-GP)'s CVaR₉₉ spans 5.37-13.11
+across seeds with no intervention at all — so this row reports one draw from
+a wide distribution, not a property of the architecture. Its
+`grad_clip_norm=1.0` fix (reported here as 4/500,000 catastrophic paths, down
+from 34) does not survive multi-seed validation: it improves 2/5 seeds and is
+inert at a third. See [the rebuild
+section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-that-shipped).
 
 **TimeGAN-driven policies, paper scale:**
 
 | Architecture | Status | Fix |
 |---|---|---|
-| MLP | Clean, no tail risk | none needed |
-| Basic RNN | **Open — unfixed.** Hidden state saturates at tanh's ±1.0 bound regardless of input; `grad_clip_norm`, `orthogonal_init`, and `moneyness_clip` were all tried and none work. | — |
+| MLP | **Not reproducible.** Documented as clean; rebuilt against the surviving generator it shows 0.88% of paths below -10 (known-good bound: <0.1%). Attempt 4's generator was never preserved, so the original row cannot be re-derived. | — |
+| Basic RNN | **Substantially fixed, promoted.** Mean CVaR₉₉ 20.65 → 3.77 and catastrophic paths 324.6 → 16.8 across 5 seeds (5/5 improved); 2/5 seeds fully clean. Not a full close — 3/5 seeds retain 15-50 catastrophic paths. | `--lr 1e-3 --moneyness-clip -0.15 0.10`. The clip was previously ruled out against the *saturated* checkpoint, where it could not have worked; `--lr 1e-3` de-saturates first. |
 | LSTM | **Fixed, promoted.** CVaR₉₉ 42.13 → 3.24, excess kurtosis 81,035 → 24.5 | `--slow-ramp-fraction 0.05` (training-time exposure to slow price ramps through the failure zone), 5-seed validated |
-| GRU | **Substantially improved, promoted, not fully closed.** CVaR₉₅ 8.21 → 6.01, CVaR₉₉ 31.98 → 25.52, real-path collapse rate 66.3% → 31.5% | `--moneyness-clip` (clip the RNN's input at TimeGAN's training-distribution boundary), trained from scratch |
+| GRU | **Fix retracted — it is harmful.** Across 5 paired seeds `--moneyness-clip` improves 1/5, doubles mean CVaR₉₉ (12.14 → 24.97) and nearly triples mean catastrophic paths (150 → 411.8). The untreated baseline mean is already better than the documented post-fix figure. | none — the promoted fix should not be used |
 
 **Open items, priority order:**
 
-1. **Basic RNN (TimeGAN)** — no working fix found; genuinely open, not just deferred.
-2. **GRU (WGAN-GP) and GRU (TimeGAN)** — both improved and promoted, neither fully closed.
-3. **α=0.995 alpha-sweep checkpoint** — the `grad_clip_norm=1.0` fix already applied to its α=0.99/0.997 neighbors was never applied here; a 4-seed sweep showed this checkpoint's own seed-1 draw would ship 5,544 stress-test paths losing more than 10x the option premium.
-4. A dedicated TimeGAN path-dynamics loss term (`--lambda-dynamics`) produced the first generator to pass all 7 fidelity checks — but a policy trained against it had dramatically *worse* tail risk, not better. Documented as an open, single-seed negative result; not pursued further.
-5. Lower priority: WGAN-GP's moment-matching loss still slightly over/undershoots real skew/kurtosis; several single-seed TimeGAN clip-fix results haven't been multi-seed validated; the `^GSPC` data has no dividend/split adjustments.
+1. **GRU, both generators, is dominated by seed variance rather than by any fix.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above). What GRU needs is not another fix attempt but an explanation of the variance itself.
+2. **The TimeGAN table rows cannot be reproduced from repo state.** Attempt 4's generator was not preserved; `checkpoints/timegan.pt` is a later retrain, and MLP (TimeGAN) is no longer clean against it. Re-measuring every TimeGAN row against the surviving generator would re-anchor them.
+3. **~~α=0.995 alpha-sweep checkpoint~~ — closed.** Retrained with `grad_clip_norm=1.0` and validated against the seed-1 draw that motivated it: 8,495 paths below -10 and 6 catastrophic → 0 and 0. The promoted checkpoint is now the clipped run.
+4. **Basic RNN (TimeGAN) is improved but not closed** — 3/5 seeds retain 15-50 catastrophic paths, the clip bound was inherited from GRU rather than tuned, and all of it is against one generator.
+5. A dedicated TimeGAN path-dynamics loss term (`--lambda-dynamics`) produced the first generator to pass all 7 fidelity checks — but a policy trained against it had dramatically *worse* tail risk, not better. Documented as an open, single-seed negative result; not pursued further.
+6. Lower priority: WGAN-GP's moment-matching loss still slightly over/undershoots real skew/kurtosis; the `^GSPC` data has no dividend/split adjustments. Note the standing "several single-seed results haven't been multi-seed validated" caveat is now partly discharged — the two promoted GRU fixes were the main outstanding cases, and both failed.
 
 ## Contents
 
@@ -73,6 +80,7 @@ genuine, documented, not-fully-closed gap.
 - [The GAN fidelity story](#the-gan-fidelity-story)
 - [Stress-test backtest](#stress-test-backtest)
 - [TimeGAN: the paper's actual Part II generator](#timegan-the-papers-actual-part-ii-generator)
+- [Rebuilding every checkpoint from scratch, and multi-seeding the fixes that shipped](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-that-shipped)
 - [Known limitations](#known-limitations)
 - [Ideas for future work](#ideas-for-future-work)
 
@@ -1392,6 +1400,16 @@ moved to the known-good list, since 4/500,000 is not actually clean.
   natural follow-up fixes (lr alone, lr + LSTM's own slow-ramp augmentation)
   translates into a reliable stress-test improvement. Genuinely open, with
   no further untried candidate identified in this document.
+- **Superseded: one untried candidate did exist, and it works.** The
+  reasoning above ruled `moneyness_clip` out for this architecture on the
+  strength of a test against the *saturated* checkpoint, where it changed
+  nothing to four decimal places. That is the expected outcome rather than
+  evidence — a hidden state pinned at ±1.0 regardless of input cannot
+  respond to its input being clipped — so the clip was never actually tested
+  on this architecture. Stacked on `--lr 1e-3`, which de-saturates first, it
+  improves 5/5 seeds and takes mean CVaR₉₉ from 20.65 to 3.77. See [the
+  rebuild
+  section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-that-shipped).
 - **A production-scale retrain of Basic RNN (TimeGAN) was started and
   killed after 50 minutes at only 14,000/25,000 steps** — far slower than
   the ~27 minutes MLP retrains take at the same step count, apparently
@@ -3045,6 +3063,241 @@ seed noise" a less likely explanation than it was for those smaller
 (2-3x) prior cases. **Not promoted. The old generator + `--slow-ramp-fraction
 0.05` combination remains the best validated result in this document.**
 
+## Rebuilding every checkpoint from scratch, and multi-seeding the fixes that shipped
+
+This section is a single session's work, run after every gitignored
+checkpoint except `timegan.pt` and `hedging_agent_lstm_timegan.pt` had been
+lost from disk — i.e. from the state a fresh clone starts in. That accident
+turned out to be the most informative experiment in this document: it forced
+every published row to be re-derived rather than cited, and four of them
+didn't survive. Everything below was run at this document's own scale
+(500,000-path regime-switching stress test, seed 42) on an M5 Pro with MPS.
+
+### Two bugs that made the repo unreproducible
+
+**`tests/test_tail_risk.py` failed rather than skipped.** Its
+`_checkpoints_available` guard globs `hedging_agent*.pt`, which the surviving
+TimeGAN LSTM checkpoint matches, so the scan ran with every WGAN-GP
+checkpoint absent. `_load_all_policies` then hit its demo-MLP fallback and
+returned that untrained policy under the `"MLP"` display name, and the
+known-good regression test graded it as a production checkpoint (66
+catastrophic paths against a required 0). `scan_checkpoint_tail_risk`
+compares against this document's per-checkpoint figures, so a demo policy
+there is worse than no policy: it reads as a catastrophically-regressed
+production checkpoint. `_load_all_policies` now takes `allow_demo_fallback`
+(default `True`, preserving the `evaluate.py` CLI's behaviour); the scan
+passes `False`.
+
+**`train_gan.py` crashed immediately on any Apple Silicon machine.**
+`select_device()` returns MPS there, but WGAN-GP's gradient penalty
+double-backwards through the LSTM discriminator, which MPS does not
+implement as of torch 2.8 — so this repo's own README quickstart
+(`python src/generator/train_gan.py --epochs 200`) died with `derivative for
+lstm_mps_backward is not implemented` before the first epoch. This is the
+limitation `common/device.py` already documents for
+`PolicyTrainer.smoothness_penalty_weight`, except unconditional rather than
+flag-gated: the penalty *is* the objective, so there is no MPS-compatible
+mode. Auto-detection now steps down to CPU with a printed note; an explicit
+`--device mps` raises with the reason.
+
+### What reproduced, and what didn't
+
+A fresh WGAN-GP generator (1500 epochs, lr 3e-4, `^GSPC`) plus fresh seed-0
+policies at promoted settings:
+
+| Strategy | CVaR₉₅ (published) | CVaR₉₉ (published) | Excess kurtosis (published) | `<-50` |
+|---|---|---|---|---|
+| MLP | 2.24 (2.38) | 3.48 (3.69) | 7.5 (6.9) | 0 |
+| Basic RNN | 1.59 (1.64) | 2.46 (2.58) | 7.4 (7.5) | 0 |
+| LSTM | 2.24 (2.17) | 3.58 (3.49) | 8.6 (8.5) | 0 |
+| GRU | **4.09** (2.14) | **12.28** (3.81) | **212,251** (3,078) | **126** (4) |
+
+The regenerated generator is over-dispersed at 352.7% of real terminal-return
+std — but so was the original (469%; its committed
+`results/gan_fidelity_summary.json` verdict predates the overshoot check and
+never flagged it). Less over-dispersed, not more, so generator quality does
+not explain GRU's regression.
+
+**Basic RNN (TimeGAN) reproduced to five significant figures** — saturated
+fraction 1.0000, delta span 0.17308 (documented 0.173), `weight_hh_l0` norm
+19.186 (19.19), `weight_hh_l1` 17.911 (17.91). That it matches across a
+*regenerated* generator is itself evidence for the diagnosis: a hidden state
+pinned at ±1.0 regardless of input produces an input-independent end state,
+so which generator supplied the inputs barely matters.
+
+**MLP (TimeGAN) did not.** It comes back with 0.88% of paths below -10
+against `tests/test_tail_risk.py`'s `< 0.1%` known-good bound — no
+catastrophic paths, but not clean either. The cause is provenance, not
+regression: this document already records that attempt 4's generator was not
+preserved and that `checkpoints/timegan.pt` is a later retrain. The TimeGAN
+table rows are anchored to a generator that no longer exists.
+
+### The "reproduction anchor" numbers identify a dead policy, not a checkpoint
+
+The α=0.995 sweep above uses a reproduction anchor: α=0.997 seed 0 matching
+`worst_loss` -6202.48, 814 paths `<-50`, and CVaR₉₅/CVaR₉₉/skew/kurtosis
+11.76 / 43.15 / -248.9 / 80,781. An explicit `delta ≡ 0` policy on the same
+scenario scores:
+
+| Metric | never-hedge | anchor |
+|---|---|---|
+| CVaR₉₅ | 11.756 | 11.76 |
+| CVaR₉₉ | 43.154 | 43.15 |
+| skew | -248.86 | -248.9 |
+| excess kurtosis | 80,780.7 | 80,781 |
+| `worst_loss` | -6202.4834 | -6202.48 |
+| `<-50` | 814 | 814 |
+
+Exact on all six. These are the constant *any* degenerate policy produces
+here. The anchor remains valid as a harness/scenario check — it does prove
+the scan and the original agree exactly — but the inference built on top of
+it does not: matching these numbers establishes "this policy is degenerate",
+not "this is that checkpoint". The dead-policy provenance claim rests on the
+logit inspection cited alongside it, not on the anchor. The upside is a free,
+instant dead-policy detector, which is how the GRU (TimeGAN) collapse below
+was caught.
+
+### α=0.995: closed, and validated against the failure that motivated it
+
+This document's highest-priority open item was that α=0.995 never received
+the `grad_clip_norm=1.0` its α=0.99/0.997 neighbours got, on the evidence
+that its own seed-1 draw would ship 5,544 stress-test paths losing more than
+10x the premium. Retrained both ways at seed 1:
+
+| α=0.995, seed 1 | CVaR₉₅ | CVaR₉₉ | `worst_loss` | `<-50` | `<-10` |
+|---|---|---|---|---|---|
+| unclipped | 9.61 | 17.84 | -56.4 | 6 | **8,495** |
+| `--grad-clip-norm 1.0` | 2.16 | 3.37 | -8.9 | **0** | **0** |
+
+The failure reproduces more severely than documented (8,495 rather than
+5,544 below -10, plus 6 catastrophic paths the original sweep did not report
+at this α), and clipping eliminates it completely. Seed 0 is clean too.
+**Closed on direct evidence at two seeds**, and the promoted
+`checkpoints/hedging_agent_mlp_alpha0_995.pt` is now the clipped run.
+
+### Both promoted GRU fixes fail multi-seed validation
+
+Five seeds each, paired (conditions share a seed, so the comparison is
+paired), 500,000-path stress test throughout.
+
+**GRU (WGAN-GP), `--grad-clip-norm 1.0` — inert.**
+
+| Condition (5 seeds) | CVaR₉₅ | CVaR₉₉ | `<-50` |
+|---|---|---|---|
+| baseline | 3.61 ± 0.99 | 9.46 ± 3.45 | 78.4 ± 51.6 |
+| `--grad-clip-norm 1.0` | 3.71 ± 0.82 | 9.84 ± 3.52 | 92.6 ± 65.6 |
+
+Improves 2/5 seeds on CVaR₉₉, 2/5 on CVaR₉₅, 2/5 on `<-50`; the mean is
+slightly *worse* on every headline metric. Seed 1 shows exactly 0.000% change
+on all six — its clipped and unclipped checkpoints have **bit-identical
+weights** (max absolute difference 0.0).
+
+That is the mechanism. Measured pre-clip gradient norms over 3,000 steps:
+median 0.022, p99 0.164, max 0.707 at seed 0; median 0.024, p99 0.213, max
+0.715 at seed 1 — **0.00% of steps exceed 1.0 in either**. The threshold sits
+~45x above the median gradient norm. It is not a regularizer on this
+workload; it is a rare-event trigger that fires only on occasional
+late-training spikes, and whether any spike crosses 1.0 at all is
+seed-dependent.
+
+**This resolves a puzzle this document explicitly left open.** The
+`grad_clip_norm` fix-attempt writeup records that the weight-growth
+hypothesis motivating it was falsified — "clipped and unclipped final weight
+norms are nearly identical" — and treats that as a loose end that also
+weakens the case for the untried LR-warmup variant. Measured per seed:
+
+| seed | weights identical? | max abs weight diff | final total norm (base → clipped) |
+|---|---|---|---|
+| 0 | no — fired | 12.37 | 239.7 → 245.5 (×1.024) |
+| 1 | **yes — never fired** | 0 | 243.7 → 243.7 (×1.000) |
+| 2 | no — fired | 9.48 | 242.0 → 232.1 (×0.959) |
+
+Clipping does not constrain weight magnitude (norms within 4%, exactly as
+observed) but does relocate the solution entirely (individual weights differ
+by up to 12.4) — same-radius sphere, different point. Falsified hypothesis
+and near-identical norms are the same fact, not two. Functionally the flag
+behaves as a **seed perturbation**, which predicts precisely the 2/5
+coin-flip above, and the documented 34 → 4 improvement was a favourable draw.
+
+**GRU (TimeGAN), `--moneyness-clip` — actively harmful.**
+
+| Condition (5 seeds) | CVaR₉₅ | CVaR₉₉ | `<-50` |
+|---|---|---|---|
+| baseline | 4.16 ± 3.94 | 12.14 ± 15.7 | 150 ± 320 |
+| `--moneyness-clip -0.15 0.10` | 6.67 ± 3.38 | 24.97 ± 12.3 | 411.8 ± 255 |
+
+Improves 1/5 seeds. Mean CVaR₉₉ doubles; mean catastrophic paths nearly
+triple. At seed 0 the clipped run is degenerate (delta mean 2.3e-06, caught
+by the never-hedge signature above); seeds 1-4 remain healthy policies that
+are simply much worse, so the collapse is seed-specific but the harm is
+systematic. The one seed it helps (3) is the one where the baseline was
+itself catastrophic. It behaves as a variance compressor toward a
+mediocre-bad middle — its std is *lower* than baseline's while its mean is
+twice as bad: **baseline reaches 0-3 catastrophic paths in 3 of 5 seeds; the
+clipped version's best seed is 185.** The clip removes the good outcomes. On
+the surviving generator the untreated baseline mean (CVaR₉₉ 12.14) is already
+better than the documented post-fix figure (25.52).
+
+**The common cause is what this document has been warning about throughout.**
+Baseline GRU is so seed-sensitive — CVaR₉₉ spanning 2.78-39.67 (TimeGAN) and
+5.37-13.11 (WGAN-GP) with no intervention at all — that between-seed spread
+dwarfs any between-condition difference (σ 3.45 vs. a 0.38 condition gap for
+WGAN-GP). A single-seed comparison on this architecture measures the seed.
+That is exactly how both fixes came to be promoted.
+
+### Basic RNN (TimeGAN): the open item, now substantially fixed
+
+This document closed out Basic RNN (TimeGAN) as "genuinely open, with no
+further untried candidate identified." One candidate was in fact untried.
+`--moneyness-clip` had been ruled out — but against the *saturated*
+checkpoint, where it changed nothing to four decimal places. That is the
+expected result rather than evidence: a hidden state pinned at ±1.0
+regardless of input cannot respond to its input being clipped. `--lr 1e-3`
+was later shown to de-saturate the network, and the conclusion drawn then was
+that the de-saturated RNN runs into mechanism (b) — which is what
+`--moneyness-clip` targets. The stack was never run.
+
+De-saturation first reproduced against the current generator (saturated
+fraction 1.0000 → 0.24297, documented 0.2427; delta span 0.173 → 0.99999,
+documented 1.000), so the clip is being tested on a network that can actually
+respond to its input. Then five seeds, paired:
+
+| Condition (5 seeds) | CVaR₉₅ | CVaR₉₉ | `worst_loss` | `<-50` | `<-10` |
+|---|---|---|---|---|---|
+| baseline (lr=1e-2) | 5.40 ± 0.86 | 20.65 ± 3.39 | -2,664 | 324.6 ± 63.9 | 2,310 |
+| `--lr 1e-3` alone | 3.24 ± 1.61 | 10.48 ± 7.20 | -1,392 | 122.4 ± 118 | 1,022 |
+| **`--lr 1e-3 --moneyness-clip -0.15 0.10`** | **1.62 ± 0.55** | **3.77 ± 1.90** | **-333** | **16.8 ± 20.5** | **185** |
+
+**5/5 seeds improve** on CVaR₉₅, CVaR₉₉, `worst_loss`, and both path counts;
+4/5 on kurtosis. Mean CVaR₉₉ down 82%, catastrophic paths down 95%. **Seeds 2
+and 4 are fully clean** — 0/500,000 below -50, worst losses -19.7 and -11.0,
+excess kurtosis 29.6 and 12.1 — the first clean checkpoints this architecture
+has produced here.
+
+The three-way ordering shows the clip does work beyond the learning rate:
+20.65 → 10.48 → 3.77, with CVaR₉₉ std collapsing 7.20 → 1.90. `--lr 1e-3`
+alone helps but erratically (4/5 seeds, huge variance); the clip improves both
+mean and consistency. Note also that lr-alone's *tail-risk* effect is
+seed-dependent — a no-op at seeds 0 and 1, a 90% CVaR₉₉ reduction at seed 2 —
+so this document's earlier single-seed "de-saturates but doesn't fix tail
+risk" conclusion sampled the no-op case. The de-saturation itself is
+perfectly reliable; its downstream effect is not.
+
+This is not the pattern that has fooled this project before: the lr+slow-ramp
+stack was 2/5 seeds and a 3.8% mean improvement, against 5/5 and 82% here.
+
+**Not a full close.** Three of five seeds still show 15-50 catastrophic paths
+and elevated kurtosis; the outcome is bimodal (either fully clean or
+substantially narrowed). The clip bound `(-0.15, 0.10)` was inherited from
+GRU and never tuned for this architecture, and everything here is against the
+single surviving generator. **Promoted** to
+`checkpoints/hedging_agent_rnn_timegan.pt` at seed 0 (the repo's
+production-checkpoint convention; the pre-fix checkpoint is preserved as
+`.bak-pre-lr-clip-fix`). Seed 0 rather than one of the clean seeds
+deliberately — promoting the best of five is the practice that produced the
+two failed GRU fixes above.
+
+
 ## Known limitations
 
 Roughly in priority order:
@@ -3165,8 +3418,14 @@ Roughly in priority order:
      at tanh's ±1.0 bound, not the sigmoid output layer) — confirmed via
      direct inspection, and confirmed **not fixed** by `grad_clip_norm`,
      `RecurrentHedgingAgent`'s own (also never-wired-up) `orthogonal_init`,
-     or both together, all tested at reduced scale. Genuinely open, not
-     merely unattempted.
+     or both together, all tested at reduced scale. **No longer open**:
+     `--lr 1e-3` de-saturates the hidden state (saturated fraction 1.0000 →
+     0.243, delta span 0.173 → 1.000) and, stacked with `--moneyness-clip`,
+     improves 5/5 seeds on every stress-test risk metric with 2/5 seeds
+     fully clean — see [the rebuild
+     section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-that-shipped).
+     Substantially fixed and promoted, though not a full close (3/5 seeds
+     retain 15-50 catastrophic paths).
    - **(b) TimeGAN-trained recurrent policies (not MLP) generalize badly
      to price extremes** outside their training distribution — since
      precisely characterized, not just confirmed distinct from (a) and
@@ -3287,10 +3546,21 @@ Roughly in priority order:
      clean at 0/500,000 catastrophic paths — recovers within a single step
      where GRU did not. `grad_clip_norm=1.0`, trained at full scale, cut the
      catastrophic-path rate from 34/500,000 to 4/500,000 (worst loss -417.5
-     → -137.5) and is now the production checkpoint — genuinely improved,
-     not genuinely clean. See [the full
-     diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation)
-     and [the fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it).
+     → -137.5) and was promoted — **but that result was a single seed and
+     has since been retracted.** At 5 paired seeds the flag improves 2/5 and
+     leaves the mean slightly worse, and at one seed it produces
+     bit-identical weights because the threshold sits ~45x above the median
+     pre-clip gradient norm: it is a rare-event trigger, not a regularizer,
+     and functionally acts as a seed perturbation. It also explains why this
+     document's weight-growth hypothesis appeared falsified — clipping
+     barely fires, so of course final weight norms match. The production
+     checkpoint is now a plain default run. The underlying recovery-lag
+     diagnosis below still stands; what does not stand is that anything here
+     fixed it. See [the full
+     diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation),
+     [the fix attempt](#fix-attempt-grad_clip_norm-substantially-improves-gru-wgan-gp-does-not-fully-close-it),
+     and [the multi-seed
+     retraction](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-that-shipped).
 6. **~~Scale~~ — resolved.** Training and evaluation now run at the
    paper's own scale throughout: Part I's 500,000 train/test scenarios and
    25,000 gradient steps (item 2 above), TimeGAN's Table 2 batch size (178)
@@ -3436,12 +3706,19 @@ Roughly in priority order:
   current incumbent — or an entropy bonus per the paper's own future-work
   section (untried; this project only adapted the actor-critic-baseline
   half of the paper's two suggestions).
-- Apply the same 8-seed-sweep methodology used to catch Basic RNN's
-  seed-sensitivity to every other single-seed claim in this document —
-  it's the third time in this project a single-seed conclusion turned out
-  to be wrong (see the moneyness-fix self-correction and the TimeGAN
-  GRU-attribution retraction), so other still-standing single-seed claims
-  should be treated as provisional, not just this one.
+- ~~Apply the same 8-seed-sweep methodology used to catch Basic RNN's
+  seed-sensitivity to every other single-seed claim in this document~~ —
+  **done for the two that mattered most, and both failed.** The two
+  single-seed fixes still shipping in the headline tables — GRU (WGAN-GP)'s
+  `--grad-clip-norm 1.0` and GRU (TimeGAN)'s `--moneyness-clip` — were rerun
+  at 5 paired seeds each. The first is inert (2/5 seeds, bit-identical
+  weights at a third because the threshold sits ~45x above the median
+  gradient norm); the second is actively harmful (1/5 seeds, mean CVaR₉₉ 2x
+  worse). Both are retracted; see [the rebuild
+  section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-that-shipped).
+  That makes it five single-seed conclusions overturned in this project, not
+  three. The remaining unvalidated one is the `--lambda-dynamics` negative
+  result below.
 - ~~Scale up: more Monte Carlo scenarios, larger networks, longer
   training, matching the paper's actual computational budget~~ — **done**:
   Part I (500k scenarios, 25k steps), TimeGAN (batch=178, ~10k iterations,

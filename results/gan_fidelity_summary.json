@@ -1,23 +1,31 @@
 {
   "real": {
-    "mean": 0.009671132080256939,
-    "std": 0.05126446485519409,
-    "skewness": -0.9436752796173096,
-    "excess_kurtosis": 4.682424068450928
+    "mean": 0.008727319538593292,
+    "std": 0.05053812637925148,
+    "skewness": -1.1434710025787354,
+    "excess_kurtosis": 4.8882341384887695
   },
   "synthetic": {
-    "mean": -0.049780186265707016,
-    "std": 0.2405843585729599,
-    "skewness": -1.650829792022705,
-    "excess_kurtosis": 3.181440830230713
+    "mean": -0.04659624770283699,
+    "std": 0.17822839319705963,
+    "skewness": -1.575191617012024,
+    "excess_kurtosis": 2.8210229873657227
   },
-  "diversity_ratio": 4.693004389152109,
+  "diversity_ratio": 3.526612598567398,
   "diversity_warning_threshold": 0.3,
-  "mean_bias_in_std": -1.159698409295701,
+  "diversity_overshoot_warning_threshold": 1.7,
+  "mean_bias_in_std": -1.0946897165571114,
   "mean_bias_warning_threshold_std": 2.0,
-  "skew_diff": -0.7071545124053955,
+  "skew_diff": -0.4317206144332886,
   "skew_warning_threshold": 0.5,
-  "kurtosis_diff": -1.5009832382202148,
+  "kurtosis_diff": -2.067211151123047,
   "kurtosis_warning_threshold": 2.0,
-  "verdict": "WARNING: skewness off by -0.71 (synthetic -1.65 vs. real -0.94) -- generator isn't capturing real tail asymmetry. Policies trained against this generator may fail badly out of sample."
+  "step_vol_ratio": 0.9400889938935335,
+  "step_vol_ratio_low_threshold": 0.67,
+  "step_vol_ratio_high_threshold": 1.5,
+  "signed_autocorr_diff": 0.7734451778233051,
+  "signed_autocorr_diff_warning_threshold": 0.25,
+  "abs_autocorr_diff": 0.6893838606774807,
+  "abs_autocorr_diff_warning_threshold": 0.25,
+  "verdict": "WARNING: diversity is 352.7% of real (threshold 170%) -- badly over-dispersed, a distinct failure mode from mode collapse but just as capable of producing a degenerate downstream policy; excess kurtosis off by -2.07 (synthetic +2.82 vs. real +4.89) -- generator isn't capturing real fat-tail risk; per-step return autocorrelation off by +0.77 (synthetic +0.81 vs. real +0.04) -- generator has unrealistic momentum/mean-reversion structure invisible to the terminal-distribution checks above; volatility clustering off by +0.69 (synthetic |return| autocorrelation +0.67 vs. real -0.02) -- generator doesn't capture real markets' ARCH-effect clustering of large moves. Policies trained against this generator may fail badly out of sample."
 }

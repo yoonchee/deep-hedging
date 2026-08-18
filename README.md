@@ -35,7 +35,10 @@ what matches the paper, what doesn't, and why is in
   is seed-sensitive, substantially improved by a CVaR control-variate
   baseline (`--use-bs-baseline`, an adaptation of the paper's suggested
   actor-critic variance reduction to this codebase's direct-backprop
-  training).
+  training). Seed sensitivity is the dominant effect for the recurrent
+  policies under stress — large enough that single-seed comparisons on GRU
+  measure the seed rather than the change, which is why two previously
+  promoted GRU fixes were retracted after 5-seed reruns.
 - A **differentiable CVaR loss** (Rockafellar-Uryasev) with a jointly-learned
   auxiliary threshold.
 - A **stress-test backtester** comparing all four architectures against
@@ -91,6 +94,10 @@ own training loop (much smaller batch size) benchmarks slightly *slower* on
 MPS than CPU. `--smoothness-penalty-weight`'s double-backward through an
 `nn.LSTM` isn't supported on MPS as of torch 2.8 and fails fast with a clear
 error if combined with an MPS device -- pass `--device cpu` for that flag.
+`train_gan.py` hits the same torch limitation unconditionally (WGAN-GP's
+gradient penalty *is* a double-backward through an LSTM discriminator), so it
+auto-detects down to CPU on Apple Silicon rather than crashing; an explicit
+`--device mps` there raises with the reason.
 
 ## Quickstart
 
@@ -136,6 +143,15 @@ python src/backtester/replicate_part1.py
 # expect this to take hours, not minutes -- see RESULTS.md for timing.
 python src/generator/train_timegan.py --data-source yfinance
 python src/policy/train_policy.py --architecture mlp --generator-type timegan
+# Basic RNN (TimeGAN) needs both halves of its promoted fix: --lr 1e-3
+# de-saturates the hidden state, and only then can --moneyness-clip help
+# (clipping an input a saturated state ignores is a no-op). 5-seed validated.
+python src/policy/train_policy.py --architecture rnn --generator-type timegan \
+    --use-bs-baseline --lr 1e-3 --moneyness-clip -0.15 0.10
+python src/policy/train_policy.py --architecture lstm --generator-type timegan --slow-ramp-fraction 0.05
+# GRU (TimeGAN) takes no extra flags: --moneyness-clip was promoted for it on
+# one seed and retracted after a 5-seed rerun found it harmful.
+python src/policy/train_policy.py --architecture gru --generator-type timegan
 python src/backtester/evaluate.py  # also runs the TimeGAN comparison if those checkpoints exist
 ```
 
@@ -170,24 +186,32 @@ paths):
 | Strategy | CVaR 95% | CVaR 99% | Excess kurtosis |
 |---|---|---|---|
 | Black-Scholes | 1.20 | 1.85 | 7.6 |
-| MLP | 2.38 | 3.69 | 6.9 |
-| Basic RNN | 1.64 | 2.58 | 7.5 |
-| LSTM | 2.17 | 3.49 | 8.5 |
-| GRU | 2.14 | 3.81 | 3,078.3 |
+| MLP | 2.24 | 3.48 | 7.5 |
+| Basic RNN | 1.59 | 2.46 | 7.4 |
+| LSTM | 2.24 | 3.58 | 8.6 |
+| GRU | 3.05 | 8.31 | 116,510.8 |
+
+These are freshly measured from checkpoints rebuilt from scratch, so the
+first four rows differ by a few percent from earlier published ones (the
+generator had to be regenerated too). Black-Scholes, which has no checkpoint,
+reproduces exactly — a control confirming the scenario is unchanged.
 
 Every architecture except GRU behaves like an ordinary fat-tailed P&L
-distribution; GRU's elevated kurtosis is a known, partially-fixed gap
-(4/500,000 catastrophic paths remain after `--grad-clip-norm 1.0`).
+distribution. **GRU's row is one draw from a wide distribution, not a
+property of the architecture**: rerun across 5 seeds, baseline GRU's CVaR₉₉
+spans 5.37-13.11 with no intervention at all. Its previously-advertised
+`--grad-clip-norm 1.0` fix has been retracted — at 5 paired seeds it improves
+2/5 and is bit-for-bit inert at a third.
 
 **TimeGAN-driven policies** (the paper's actual Part II generator, same
 scale):
 
 | Architecture | Status |
 |---|---|
-| MLP | Clean |
-| Basic RNN | Open — hidden-state saturation, no working fix found |
+| MLP | Not reproducible — the generator its "clean" row was measured against was never preserved |
+| Basic RNN | Substantially fixed and promoted (`--lr 1e-3 --moneyness-clip -0.15 0.10`): mean CVaR₉₉ 20.65 → 3.77 across 5 seeds, 5/5 improved, 2/5 fully clean |
 | LSTM | Fixed and promoted (`--slow-ramp-fraction 0.05`): CVaR₉₉ 42.13 → 3.24 |
-| GRU | Improved and promoted (`--moneyness-clip`), not fully closed |
+| GRU | Fix retracted — `--moneyness-clip` improves only 1/5 seeds and doubles mean CVaR₉₉ |
 
 The option premium (P₀) is now correctly included everywhere — Part I uses
 the exact closed-form Black-Scholes price, the stress test and GAN-driven
@@ -200,21 +224,25 @@ Roughly in priority order — see
 [`RESULTS.md`](RESULTS.md#summary--current-state) for the diagnostic trail
 behind each:
 
-1. **Basic RNN (TimeGAN)** — genuinely unfixed. Hidden state saturates at
-   tanh's ±1.0 bound regardless of input; gradient clipping, orthogonal
-   init, and input clipping were all tried and none work.
-2. **GRU (WGAN-GP) and GRU (TimeGAN)** — both improved and promoted,
-   neither fully closed (a handful of catastrophic paths remain in each).
-3. **α=0.995 alpha-sweep checkpoint** — the fix already applied to its
-   α=0.99/0.997 neighbors (`--grad-clip-norm 1.0`) hasn't been applied here
-   yet, despite direct evidence it's needed.
+1. **GRU, on both generators, is dominated by seed variance.** Baseline
+   CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) across seeds
+   with no intervention; that spread dwarfs every measured effect of every
+   fix tried on it. Both previously-promoted GRU fixes failed multi-seed
+   validation — one inert, one actively harmful — and are retracted. GRU
+   needs its variance explained, not another fix attempt.
+2. **The TimeGAN rows can't be reproduced from repo state** — attempt 4's
+   generator was never preserved, and MLP (TimeGAN) is no longer clean
+   against the one that survives.
+3. **Basic RNN (TimeGAN)** — substantially fixed (5/5 seeds improved), but
+   3/5 seeds still show 15-50 catastrophic paths per 500,000, the clip
+   bound was inherited from GRU rather than tuned, and it's one generator.
 4. A dedicated TimeGAN loss term that matches path-level dynamics (not just
    terminal statistics) produced the first generator to pass every fidelity
    check — but a policy trained against it had dramatically worse tail
-   risk. Open, single-seed, not pursued further.
+   risk. Open, single-seed, not pursued further — now the main outstanding
+   single-seed claim in the project.
 5. Minor: WGAN-GP's synthetic skew/kurtosis still slightly miss real
-   data's; several single-seed TimeGAN fixes haven't been multi-seed
-   validated; `^GSPC` has no dividend/split adjustments.
+   data's; `^GSPC` has no dividend/split adjustments.
 
 ## References
 

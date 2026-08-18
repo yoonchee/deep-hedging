@@ -73,8 +73,16 @@ _SCAN_SEED = 42
 # against a freshly-retrained TimeGAN generator (checkpoints/timegan.pt),
 # not the exact one the other rows in RESULTS.md's attempt-4 table used
 # (that one wasn't preserved) -- see the promoted-checkpoint caveat there.
+#
+# "MLP (TimeGAN)" was removed from this list after a from-scratch rebuild:
+# against the surviving checkpoints/timegan.pt it shows 0/50,000 below -50
+# (still not catastrophic) but 0.86% of paths below -10, ~9x this list's
+# below_-10_fraction bound. That is not a code regression -- RESULTS.md
+# records that attempt 4's generator, which the documented "clean, no tail
+# risk" row was measured against, was never preserved. See
+# test_mlp_timegan_is_no_longer_clean_against_the_surviving_generator below.
 _KNOWN_GOOD_CHECKPOINTS = [
-    "MLP", "Basic RNN", "LSTM", "MLP (TimeGAN)", "MLP (alpha=0.997)", "MLP (alpha=0.99)",
+    "MLP", "Basic RNN", "LSTM", "MLP (alpha=0.997)", "MLP (alpha=0.99)",
     "LSTM (TimeGAN)",
 ]
 
@@ -93,7 +101,10 @@ _KNOWN_GOOD_CHECKPOINTS = [
 # orthogonal_init, or both together (all tested; see RESULTS.md). If any of
 # these starts reporting zero catastrophic paths, update this list and
 # RESULTS.md's Known Limitations item 5 together.
-_KNOWN_BAD_CHECKPOINTS = ["Basic RNN (TimeGAN)", "GRU (TimeGAN)"]
+# "GRU" joined this list once its promoted --grad-clip-norm 1.0 fix was
+# retracted (see below): the production checkpoint is now a plain default
+# training run, which shows a catastrophic tail like the TimeGAN entries.
+_KNOWN_BAD_CHECKPOINTS = ["Basic RNN (TimeGAN)", "GRU", "GRU (TimeGAN)"]
 
 _checkpoints_available = pytest.mark.skipif(
     not CHECKPOINT_DIR.exists() or not any(CHECKPOINT_DIR.glob("hedging_agent*.pt")),
@@ -192,80 +203,64 @@ def test_alpha_0997_checkpoint_no_longer_shows_degenerate_never_hedge_policy(tai
 
 
 @_checkpoints_available
-def test_gru_checkpoint_substantially_improved_but_not_fully_clean(tail_risk_scan: dict) -> None:
-    name = "GRU"
+def test_mlp_timegan_is_no_longer_clean_against_the_surviving_generator(tail_risk_scan: dict) -> None:
+    name = "MLP (TimeGAN)"
     if name not in tail_risk_scan:
         pytest.skip(f"no checkpoint loaded for {name!r}")
 
     summary = tail_risk_scan[name]
 
-    # GRU (WGAN-GP)'s hidden-state recovery-lag mechanism (RESULTS.md's
-    # "Follow-up diagnosis" and "Fix attempt" subsections): grad_clip_norm=1.0,
-    # trained at full scale, cut the catastrophic-path rate from 34/500,000
-    # to 4/500,000 (worst loss -417.5 -> -137.5) and was promoted to
-    # checkpoints/hedging_agent_gru.pt. This checkpoint fits neither the
-    # known-good list above (below_-50_count == 0 -- it isn't, at full
-    # scale) nor the known-bad list (below_-50_count > 0 -- verified
-    # directly, a single seed=42 draw at this file's 50,000-path scale
-    # reads exactly 0/50,000 below -50, since the true rate of ~1-in-125,000
-    # is below this scan's sensitivity). worst_loss is the one statistic
-    # that stays informative at this reduced scale: -26.6 here, cleanly
-    # separated from the pre-fix checkpoint's -417.5 (at 500,000 paths --
-    # not directly comparable in scale, but a regression toward that regime
-    # would still show up as a much larger loss than -26.6). One-sided on
-    # purpose: -12.8 is the clean checkpoints' bound at 500,000 paths, not a
-    # valid separator at this file's 50,000-path scale, so this test makes
-    # no claim about "genuinely clean." If this starts reading well below
-    # -60, the fix likely regressed -- re-check against the pre-fix
-    # checkpoint's -417.5, preserved at
-    # hedging_agent_gru.pt.bak-pre-recovery-lag-fix.
-    assert summary["worst_loss"] > -60.0
-
-
-@_checkpoints_available
-def test_gru_timegan_checkpoint_substantially_improved_but_not_fully_clean(tail_risk_scan: dict) -> None:
-    name = "GRU (TimeGAN)"
-    if name not in tail_risk_scan:
-        pytest.skip(f"no checkpoint loaded for {name!r}")
-
-    summary = tail_risk_scan[name]
-
-    # Mechanism (b)'s RecurrentHedgingAgent.moneyness_clip fix (RESULTS.md's
-    # "Fix attempt: clipping the RNN's log-moneyness input at the training
-    # boundary" and its training-from-scratch follow-up): retrained with
-    # --moneyness-clip -0.15 0.10 active for the full 25,000-step training
-    # run, not just wrapped around inference. At full 500,000-path scale this
-    # cuts below_-50 578 -> 402, CVaR95 8.21 -> 6.01, CVaR99 31.98 -> 25.52,
-    # and the real-path collapse rate past the training boundary 66.3% ->
-    # 31.5% -- a genuine improvement, not a full close (below_-50_count is
-    # still > 0, so this checkpoint correctly stays off the known-good list
-    # above; worst_loss is actually slightly worse than pre-fix, -6033.3 ->
-    # -6199.8, traced to a single rare sustained-rally path, not a general
-    # regression -- see RESULTS.md for the worst-path inspection). This test
-    # doesn't re-derive those exact figures at this file's smaller
-    # 50,000-path scale; it pins a bound loose enough not to be flaky but
-    # tight enough to catch a regression back toward the pre-fix checkpoint's
-    # behavior (preserved as
-    # checkpoints/hedging_agent_gru_timegan.pt.bak-pre-moneyness-clip-fix).
-    # If this starts failing, re-check moneyness_clip is still wired through
-    # _load_policy_checkpoint and that the promoted checkpoint wasn't
-    # accidentally overwritten with a clip=None retrain.
-    assert summary["below_-50_count"] > 0
-    assert summary["below_-50_fraction"] < 0.003  # pre-fix was ~0.0016 at this scale; loose margin
+    # RESULTS.md documents this checkpoint as "clean, no tail risk", measured
+    # against TimeGAN attempt 4's generator -- which was never preserved.
+    # Rebuilt against the surviving checkpoints/timegan.pt it is neither
+    # clean nor catastrophic: no path loses more than 50x the premium, but
+    # ~0.9% of paths lose more than 10x, against the known-good list's
+    # <0.1% bound. This test pins that intermediate state so it is visible
+    # rather than silently absent, and so a genuine change in either
+    # direction fails loudly.
+    assert summary["below_-50_count"] == 0, (
+        "MLP (TimeGAN) has developed a catastrophic tail -- it previously had "
+        "none at any generator; move it to _KNOWN_BAD_CHECKPOINTS and update "
+        "RESULTS.md's TimeGAN table"
+    )
+    assert 0.001 < summary["below_-10_fraction"] < 0.02, (
+        "MLP (TimeGAN)'s below_-10 rate left the band measured against the "
+        "surviving generator -- if it dropped under 0.001 the checkpoint is "
+        "clean again and belongs back in _KNOWN_GOOD_CHECKPOINTS"
+    )
 
 
 @pytest.mark.skipif(
     not (CHECKPOINT_DIR / "hedging_agent_gru_timegan.pt").exists(),
     reason="checkpoints/hedging_agent_gru_timegan.pt not found (gitignored; train locally first)",
 )
-def test_gru_timegan_checkpoint_loads_with_moneyness_clip_active() -> None:
-    # The tail-risk bound above (below_-50_fraction < 0.003) can't tell a
-    # correctly-clipped checkpoint apart from one where moneyness_clip
-    # silently failed to round-trip through _load_policy_checkpoint's
-    # saved-args reconstruction -- both the pre-fix and promoted checkpoints
-    # pass that bound at this file's 50,000-path scan scale (fractions
-    # ~0.0012 vs ~0.0008, both well under 0.003). This test covers the one
-    # thing that bound can't: that the promoted checkpoint's args actually
-    # carry the clip through to the reconstructed RecurrentHedgingAgent.
+def test_promoted_gru_timegan_checkpoint_has_no_moneyness_clip() -> None:
+    # This assertion is deliberately the inverse of what it used to be.
+    # --moneyness-clip was promoted for GRU (TimeGAN) on a single seed; a
+    # 5-seed paired rerun found it improves 1/5 seeds, doubles mean CVaR99
+    # (12.14 -> 24.97) and nearly triples mean catastrophic paths (150 ->
+    # 411.8), and at seed 0 collapses the policy to never-hedge outright.
+    # The fix is retracted and the production checkpoint is a plain default
+    # run (the pre-retraction one is preserved as
+    # hedging_agent_gru_timegan.pt.bak-moneynessclip-promoted). This guards
+    # against it being silently re-promoted -- if you have evidence the clip
+    # helps, put the multi-seed numbers in RESULTS.md before flipping this.
     policy, _, _ = _load_policy_checkpoint(CHECKPOINT_DIR / "hedging_agent_gru_timegan.pt")
+    assert policy.moneyness_clip is None
+
+
+@pytest.mark.skipif(
+    not (CHECKPOINT_DIR / "hedging_agent_rnn_timegan.pt").exists(),
+    reason="checkpoints/hedging_agent_rnn_timegan.pt not found (gitignored; train locally first)",
+)
+def test_promoted_basic_rnn_timegan_checkpoint_carries_the_lr_and_clip_fix() -> None:
+    # Basic RNN (TimeGAN)'s promoted fix is the *stack*: --lr 1e-3 removes the
+    # tanh saturation that made the network input-insensitive, and only then
+    # can --moneyness-clip do anything at all (clipping an input the hidden
+    # state ignores is provably a no-op -- that is why the clip was
+    # incorrectly ruled out for this architecture the first time). 5/5 seeds
+    # improved on every risk metric; see RESULTS.md. Both halves must
+    # round-trip through _load_policy_checkpoint, so assert both.
+    policy, _, policy_args = _load_policy_checkpoint(CHECKPOINT_DIR / "hedging_agent_rnn_timegan.pt")
     assert policy.moneyness_clip == (-0.15, 0.10)
+    assert policy_args["lr"] == pytest.approx(1e-3)
