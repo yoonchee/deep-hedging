@@ -499,7 +499,9 @@ def scan_checkpoint_tail_risk(
 
     policy_groups: List[Tuple[str, Dict[str, Tuple[Any, bool]], float, float]] = []
     for suffix, label in [("", ""), ("_timegan", " (TimeGAN)")]:
-        policies, strike, implied_vol = _load_all_policies(checkpoint_dir, device, suffix=suffix)
+        policies, strike, implied_vol = _load_all_policies(
+            checkpoint_dir, device, suffix=suffix, allow_demo_fallback=False
+        )
         if policies and strike is not None:
             policy_groups.append((label, policies, strike, implied_vol))
 
@@ -631,6 +633,11 @@ def _load_all_policies(
     suffix: Annotated[
         str, "checkpoint filename suffix, e.g. '_timegan' for policies trained against TimeGAN"
     ] = "",
+    allow_demo_fallback: Annotated[
+        bool,
+        "train a short demo MLP when no checkpoint exists at all (empty suffix only). "
+        "False for callers that must only ever see genuinely trained checkpoints",
+    ] = True,
 ) -> Annotated[
     Tuple[Dict[str, Tuple[Any, bool]], float, float],
     "(policies, strike, implied_vol) -- policies maps display name -> (policy, sequence_policy)",
@@ -643,6 +650,15 @@ def _load_all_policies(
     looks for a distinct, parallel set of checkpoints instead and returns an
     empty dict with no fallback training if none are found, since that's an
     optional second comparison, not the primary one.
+
+    `allow_demo_fallback=False` suppresses that demo run entirely. Diagnostic
+    callers like `scan_checkpoint_tail_risk` compare against RESULTS.md's
+    per-checkpoint tail-loss figures, so a demo policy returned under the
+    "MLP" display name is worse than no policy at all: it reads as a
+    catastrophically-regressed production checkpoint. That misfire was real
+    -- tests/test_tail_risk.py failed this way once the WGAN-GP checkpoints
+    were absent but the TimeGAN ones were not, so the test's own
+    any-checkpoint-exists guard still let the scan run.
     """
     checkpoint_paths = {
         arch: checkpoint_dir / checkpoint_filename(arch, suffix=suffix)
@@ -664,7 +680,7 @@ def _load_all_policies(
         strike, implied_vol = policy_args["strike"], policy_args["implied_vol"]
         print(f"Loaded {display_name} from {path}")
 
-    if policies or suffix:
+    if policies or suffix or not allow_demo_fallback:
         return policies, strike, implied_vol
 
     strike, implied_vol = 1.0, 0.30

@@ -89,7 +89,37 @@ class WGANGPTrainer:
         ] = None,
         device: Optional[torch.device] = None,
     ) -> None:
-        self.device = device or select_device()
+        # WGAN-GP's gradient penalty differentiates through the LSTM
+        # discriminator's own gradient (`torch.autograd.grad(...,
+        # create_graph=True)`, see `gradient_penalty` above), which MPS does
+        # not implement as of torch 2.8 -- the same limitation
+        # `PolicyTrainer.smoothness_penalty_weight` documents, except here it
+        # is unconditional rather than flag-gated, since the penalty IS the
+        # objective. Auto-detection therefore steps down to CPU instead of
+        # handing back a device that crashes on the first backward pass
+        # (`select_device()` returns MPS on any Apple Silicon machine, which
+        # made README's own `train_gan.py` quickstart fail immediately there);
+        # an explicit request for MPS gets an error saying why.
+        if device is None:
+            device = select_device()
+            if device.type == "mps":
+                print(
+                    "Auto-detected MPS, but WGAN-GP's gradient penalty needs a "
+                    "double-backward through an nn.LSTM that MPS does not support "
+                    "as of torch 2.8 -- falling back to CPU."
+                )
+                device = torch.device("cpu")
+        elif device.type == "mps":
+            raise ValueError(
+                "WGAN-GP's gradient penalty requires a double-backward through "
+                "an nn.LSTM discriminator (torch.autograd.grad(..., "
+                "create_graph=True)), which is not supported on MPS as of torch "
+                "2.8 ('derivative for lstm_mps_backward is not implemented') -- "
+                "pass device=torch.device('cpu') (or --device cpu on the CLI). "
+                "Unlike policy training, there is no MPS-compatible mode for "
+                "this trainer: the penalty is part of the objective itself."
+            )
+        self.device = device
         self.generator = generator.to(self.device)
         self.discriminator = discriminator.to(self.device)
         self.lambda_gp = lambda_gp
