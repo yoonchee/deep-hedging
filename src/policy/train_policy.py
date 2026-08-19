@@ -493,6 +493,14 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--data-seed", type=int, default=None,
+        help="re-seed the RNG with this value immediately before the training loop, so "
+        "--seed governs only policy initialization (and the Monte Carlo premium estimate) "
+        "while this governs the training noise draws. Default (None) leaves the single-seed "
+        "behaviour untouched. Added to attribute GRU's cross-seed tail-risk severity to "
+        "initialization vs. data order -- see RESULTS.md.",
+    )
+    parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
@@ -621,6 +629,17 @@ def _train_and_save(
         f"Training Deep Hedging policy ({args.architecture}, alpha={alpha}) "
         f"for {args.epochs} epochs on {device}..."
     )
+
+    # Split the single seed into its two roles. Everything above -- policy
+    # initialization and the premium estimate -- has already consumed the
+    # --seed stream; re-seeding here makes every subsequent draw (the training
+    # scenarios) depend on --data-seed alone. Note this shifts the noise stream
+    # even when --data-seed equals --seed, so a run with both set is not
+    # bit-identical to the same run with neither.
+    if getattr(args, "data_seed", None) is not None:
+        torch.manual_seed(args.data_seed)
+        print(f"Re-seeded training noise with data_seed={args.data_seed}")
+
     for epoch in range(1, args.epochs + 1):
         stats = trainer.train_step(args.batch_size, args.seq_len)
 
