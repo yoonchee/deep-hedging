@@ -64,7 +64,7 @@ section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-t
 
 **Open items, priority order:**
 
-1. **GRU, both generators, is dominated by seed variance rather than by any fix.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above). What GRU needs is not another fix attempt but an explanation of the variance itself.
+1. **GRU, both generators, is dominated by seed variance rather than by any fix.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested, consistent with its recovery-lag diagnosis. What GRU needs is not another fix attempt but an explanation of the variance itself.
 2. **The TimeGAN table rows cannot be reproduced from repo state.** Attempt 4's generator was not preserved; `checkpoints/timegan.pt` is a later retrain, and MLP (TimeGAN) is no longer clean against it. Re-measuring every TimeGAN row against the surviving generator would re-anchor them.
 3. **~~α=0.995 alpha-sweep checkpoint~~ — closed.** Retrained with `grad_clip_norm=1.0` and validated against the seed-1 draw that motivated it: 8,495 paths below -10 and 6 catastrophic → 0 and 0. The promoted checkpoint is now the clipped run.
 4. **Basic RNN (TimeGAN) is improved but not closed** — 3/5 seeds retain 15-50 catastrophic paths, the clip bound was inherited from GRU rather than tuned, and all of it is against one generator.
@@ -3218,6 +3218,28 @@ by up to 12.4) — same-radius sphere, different point. Falsified hypothesis
 and near-identical norms are the same fact, not two. Functionally the flag
 behaves as a **seed perturbation**, which predicts precisely the 2/5
 coin-flip above, and the documented 34 → 4 improvement was a favourable draw.
+
+**Follow-up: clipping is the wrong intervention here, not merely
+mis-tuned.** Because the promoted threshold barely engages, it never tested
+the underlying idea. Rerun at thresholds picked from the measured gradient
+distribution — 0.05 clips roughly the top 10-25% of steps, 0.10 the top 5%:
+
+| Condition | CVaR₉₉ | `<-50` | seeds improved |
+|---|---|---|---|
+| baseline (5 seeds) | 9.46 ± 3.45 | 78.4 ± 51.6 | — |
+| `--grad-clip-norm 1.0` (5) | 9.84 ± 3.52 | 92.6 ± 65.6 | 2/5 (inert) |
+| `--grad-clip-norm 0.05` (5) | 13.29 ± 3.19 | 143.8 ± 55.7 | 1/5 |
+| `--grad-clip-norm 0.10` (3) | 13.30 ± 5.19 | 155 ± 91.5 | 1/3 |
+
+Inert where it doesn't engage, consistently harmful where it does (mean
+CVaR₉₉ +40%, catastrophic paths +83% at 0.05). That is what this document's
+own diagnosis predicts: GRU (WGAN-GP)'s failure is a hidden-state *recovery
+lag*, which gradient magnitude has no bearing on. The fix was borrowed from
+the MLP's sigmoid-saturation mechanism — a different failure that clipping
+genuinely does fix, as α=0.995 above re-confirms. It also closes the untried
+"lower peak LR / LR warmup for the recurrent weights" candidate by
+implication: that was motivated by the same weight-growth story shown above
+never to have been the mechanism.
 
 **GRU (TimeGAN), `--moneyness-clip` — actively harmful.**
 
