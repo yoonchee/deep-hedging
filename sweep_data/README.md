@@ -16,7 +16,12 @@ only from its filename.
 | `RESULT_gru_tg_5seed.json` | GRU (TimeGAN), 5 seeds x {baseline, `--moneyness-clip -0.15 0.10`} — the retracted fix |
 | `RESULT_rnn_tg_5seed.json` | Basic RNN (TimeGAN), 5 seeds x {baseline, `--lr 1e-3`, `--lr 1e-3` + clip} — the promoted fix |
 | `RESULT_gru_clip_threshold.json` | GRU (WGAN-GP) baselines vs. `--grad-clip-norm` 0.05 (5 seeds) and 0.10 (3 seeds) |
+| `RESULT_timegan_rows_5seed.json` | TimeGAN row re-anchoring: MLP (5 seeds), LSTM `--slow-ramp-fraction 0.05` vs. untreated LSTM (5 seeds each) |
 
 The checkpoints themselves are gitignored (`checkpoints/`), so these summaries
 are the durable record — regenerating them means retraining, which is the
 situation that prompted this whole exercise.
+
+All of it is produced by `../src/backtester/stress_eval.py`, which is now
+committed for the same reason these records are: it previously lived only in
+a scratch directory outside the repo and was lost with it.

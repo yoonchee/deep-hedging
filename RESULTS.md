@@ -57,15 +57,15 @@ section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-t
 
 | Architecture | Status | Fix |
 |---|---|---|
-| MLP | **Not reproducible.** Documented as clean; rebuilt against the surviving generator it shows 0.88% of paths below -10 (known-good bound: <0.1%). Attempt 4's generator was never preserved, so the original row cannot be re-derived. | — |
+| MLP | **Not reproducible, but not broken either.** Attempt 4's generator was never preserved, so the original row cannot be re-derived — only re-anchored. Across 5 seeds against the surviving generator: **0/500,000 catastrophic paths at every seed** (worst loss anywhere -46.3), while paths below -10 span 0.012%-0.877% around the <0.1% known-good bound. The single-seed rebuild that read 0.88% sampled the worst of the five. | — (seed-dependent, no fix identified or needed) |
 | Basic RNN | **Substantially fixed, promoted.** Mean CVaR₉₉ 20.65 → 3.77 and catastrophic paths 324.6 → 16.8 across 5 seeds (5/5 improved); 2/5 seeds fully clean. Not a full close — 3/5 seeds retain 15-50 catastrophic paths. | `--lr 1e-3 --moneyness-clip -0.15 0.10`. The clip was previously ruled out against the *saturated* checkpoint, where it could not have worked; `--lr 1e-3` de-saturates first. |
-| LSTM | **Fixed, promoted.** CVaR₉₉ 42.13 → 3.24, excess kurtosis 81,035 → 24.5 | `--slow-ramp-fraction 0.05` (training-time exposure to slow price ramps through the failure zone), 5-seed validated |
+| LSTM | **Fixed, promoted — but the improvement is smaller than documented.** Re-anchored 5-seed paired: CVaR₉₉ 3.94 → 3.27 (4/5 seeds), mean catastrophic paths 1.8 → 0.2. The documented 42.13 → 3.24 does not reproduce: the post-fix figure does (3.27 ± 0.51), but untreated LSTM's worst seed here is 4.47 — the collapsed pre-fix policy that 42.13 describes doesn't occur on the surviving generator. One ramp seed retains a single -799 path. | `--slow-ramp-fraction 0.05` (training-time exposure to slow price ramps through the failure zone), 5-seed validated |
 | GRU | **Fix retracted — it is harmful.** Across 5 paired seeds `--moneyness-clip` improves 1/5, doubles mean CVaR₉₉ (12.14 → 24.97) and nearly triples mean catastrophic paths (150 → 411.8). The untreated baseline mean is already better than the documented post-fix figure. | none — the promoted fix should not be used |
 
 **Open items, priority order:**
 
 1. **GRU, both generators, is dominated by seed variance rather than by any fix.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested, consistent with its recovery-lag diagnosis. What GRU needs is not another fix attempt but an explanation of the variance itself.
-2. **The TimeGAN table rows cannot be reproduced from repo state.** Attempt 4's generator was not preserved; `checkpoints/timegan.pt` is a later retrain, and MLP (TimeGAN) is no longer clean against it. Re-measuring every TimeGAN row against the surviving generator would re-anchor them.
+2. **~~The TimeGAN table rows cannot be reproduced from repo state~~ — re-anchored (they still cannot be *re-derived*).** All four rows are now measured at 5 seeds against the surviving generator, and two documented claims changed: MLP is seed-dependent around the known-good bound rather than "no longer clean" (0/500,000 catastrophic at every seed), and LSTM's `--slow-ramp-fraction` fix is worth ~17% on CVaR₉₉ here rather than the documented ~92%, because untreated LSTM does not collapse on this generator. Attempt 4's generator is still gone, so the original numbers remain permanently unverifiable. See [the re-anchoring](#re-anchoring-all-four-timegan-rows-to-the-surviving-generator).
 3. **~~α=0.995 alpha-sweep checkpoint~~ — closed.** Retrained with `grad_clip_norm=1.0` and validated against the seed-1 draw that motivated it: 8,495 paths below -10 and 6 catastrophic → 0 and 0. The promoted checkpoint is now the clipped run.
 4. **Basic RNN (TimeGAN) is improved but not closed** — 3/5 seeds retain 15-50 catastrophic paths, the clip bound was inherited from GRU rather than tuned, and all of it is against one generator.
 5. A dedicated TimeGAN path-dynamics loss term (`--lambda-dynamics`) produced the first generator to pass all 7 fidelity checks — but a policy trained against it had dramatically *worse* tail risk, not better. Documented as an open, single-seed negative result; not pursued further.
@@ -3127,7 +3127,9 @@ so which generator supplied the inputs barely matters.
 
 **MLP (TimeGAN) did not.** It comes back with 0.88% of paths below -10
 against `tests/test_tail_risk.py`'s `< 0.1%` known-good bound — no
-catastrophic paths, but not clean either. The cause is provenance, not
+catastrophic paths, but not clean either. (This single-seed figure is
+revisited [below](#re-anchoring-all-four-timegan-rows-to-the-surviving-generator): across 5 seeds the rate spans 0.012%-0.877%,
+and 0.877% is the worst of the five.) The cause is provenance, not
 regression: this document already records that attempt 4's generator was not
 preserved and that `checkpoints/timegan.pt` is a later retrain. The TimeGAN
 table rows are anchored to a generator that no longer exists.
@@ -3318,6 +3320,85 @@ production-checkpoint convention; the pre-fix checkpoint is preserved as
 `.bak-pre-lr-clip-fix`). Seed 0 rather than one of the clean seeds
 deliberately — promoting the best of five is the practice that produced the
 two failed GRU fixes above.
+
+### Re-anchoring all four TimeGAN rows to the surviving generator
+
+Every TimeGAN row in this document was measured against attempt 4's
+generator, which was never preserved. Those rows cannot be re-derived — only
+re-anchored to `checkpoints/timegan.pt`, the surviving retrain. That is what
+this section does, at 5 seeds per row rather than the single seed the
+originals used, since this same session retracted two promoted fixes that
+turned out to be single-seed artifacts.
+
+MLP and LSTM were trained here (15 runs: MLP ×5, `--slow-ramp-fraction 0.05`
+LSTM ×5, and — to make the LSTM fix a paired comparison rather than a
+before/after against a number from a different generator — untreated LSTM
+×5). Basic RNN and GRU already had 5-seed sets from the sweeps above, run
+against this same generator. All 20 checkpoints are evaluated on the one
+500,000-path seed-42 regime-switching scenario used throughout this document.
+
+Each architecture in its current production configuration:
+
+| Architecture (production config) | CVaR₉₅ | CVaR₉₉ | worst path | `<-50` | `<-10` |
+|---|---|---|---|---|---|
+| MLP (default) | 5.15 ± 1.66 | 8.53 ± 3.09 | -46.3 | **0.0 ± 0.0** | 1,368 |
+| Basic RNN (`--lr 1e-3 --moneyness-clip -0.15 0.10`) | 1.62 ± 0.55 | 3.77 ± 1.90 | -836.7 | 16.8 ± 20.5 | 185 |
+| LSTM (`--slow-ramp-fraction 0.05`) | 1.74 ± 0.24 | 3.27 ± 0.51 | -799.1 | 0.2 ± 0.4 | 20 |
+| GRU (default; fix retracted above) | 4.16 ± 3.94 | 12.14 ± 15.73 | -6,202 | 150.0 ± 320.5 | 1,341 |
+
+`worst path` is the single worst loss anywhere in the arm, not a per-seed
+mean; the `±` columns are cross-seed mean ± std.
+
+**MLP: the "not clean" verdict was a single-seed draw at the bad end.** The
+rebuild above reported 0.88% of paths below -10 against the `<0.1%`
+known-good bound. Across 5 seeds that figure spans **0.012% to 0.877%** — a
+72× range — and 0.877% is seed 0, the worst of the five. Seeds 2 and 3
+(0.012%, 0.054%) sit inside the bound. **No seed produces a single
+catastrophic path**: 0/500,000 below -50 at all five, worst loss anywhere
+-46.3. This is the same single-seed error as the two retracted GRU fixes,
+running in the pessimistic direction: the architecture is seed-dependent
+around the bound, not broken. It remains true that the original row cannot be
+reproduced — attempt 4's generator is gone — but "no longer clean" overstated
+what one seed could support.
+
+**LSTM: the fix holds, but its headline improvement does not reproduce,
+because the failure it fixed doesn't occur on this generator.** Paired across
+seeds:
+
+| seed | ramp CVaR₉₉ | baseline CVaR₉₉ | ramp `<-50` | baseline `<-50` |
+|---|---|---|---|---|
+| 0 | 3.60 | 3.91 | 0 | 0 |
+| 1 | 3.31 | 4.45 | 0 | 0 |
+| 2 | 2.91 | 4.47 | 1 | 3 |
+| 3 | 3.89 | 3.61 | 0 | 6 |
+| 4 | 2.62 | 3.24 | 0 | 0 |
+| **mean** | **3.27 ± 0.51** | **3.94 ± 0.53** | **0.2** | **1.8** |
+
+`--slow-ramp-fraction 0.05` improves CVaR₉₉ on 4/5 seeds and cuts mean
+catastrophic paths 1.8 → 0.2, so it is a real effect and stays promoted. But
+this document records it as "CVaR₉₉ 42.13 → 3.24". The post-fix half
+re-anchors almost exactly (3.27 ± 0.51 vs. 3.24). The pre-fix half does not
+come close: **untreated LSTM's worst seed here is 4.47**, and no seed exceeds
+it. The documented 42.13 — with excess kurtosis 81,035, both within a few
+percent of the degenerate never-hedge constants tabulated
+[above](#the-reproduction-anchor-numbers-identify-a-dead-policy-not-a-checkpoint) —
+describes a collapsed policy that the surviving generator simply does not
+produce. So the fix's measured value here is ~17% on CVaR₉₉, not ~92%. That
+is a smaller claim than the table made, and it is the claim the current
+generator supports.
+
+**LSTM's remaining tail is one path, and it survives the fix.** Ramp seed 2
+has a single -799 path out of 500,000. It barely moves CVaR₉₉ (2.91, the
+second-best of the arm) while driving excess kurtosis to 321,011 — the
+aggregate-moments-look-fine signature that motivated per-path counting in the
+first place. Baseline seed 2 shows 3 such paths and baseline seed 3 shows 6,
+so the fix reduces this without eliminating it. "Fixed, promoted" is right;
+"clean" would not be.
+
+Raw records: `sweep_data/RESULT_timegan_rows_5seed.json`. The harness that
+produced them (`src/backtester/stress_eval.py`) is now committed — it had
+previously existed only in a scratch directory outside the repo, which is the
+same way attempt 4's generator was lost.
 
 
 ## Known limitations

@@ -218,6 +218,14 @@ def test_mlp_timegan_is_no_longer_clean_against_the_surviving_generator(tail_ris
     # <0.1% bound. This test pins that intermediate state so it is visible
     # rather than silently absent, and so a genuine change in either
     # direction fails loudly.
+    #
+    # Scope note: the ~0.9% is this checkpoint's seed, not the architecture's
+    # behaviour. A later 5-seed re-anchoring (RESULTS.md, "Re-anchoring all
+    # four TimeGAN rows to the surviving generator") found the rate spans
+    # 0.012%-0.877% and that seed 0 is the worst of the five -- two seeds land
+    # inside the known-good bound. The catastrophic-path assertion below is
+    # the seed-independent claim (0/500,000 at every seed measured); the
+    # below_-10 band is a pin on this specific promoted checkpoint.
     assert summary["below_-50_count"] == 0, (
         "MLP (TimeGAN) has developed a catastrophic tail -- it previously had "
         "none at any generator; move it to _KNOWN_BAD_CHECKPOINTS and update "
