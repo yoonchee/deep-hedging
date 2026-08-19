@@ -25,6 +25,7 @@ their own.
 | `PROBE_seed_decomposition.json`, `RESULT_seed_decomposition.json` | GRU (TimeGAN) 3x3 `--seed` x `--data-seed` factorial: does severity come from initialization or the data draw? |
 | `PROBE_gru_tg_baserate.json`, `RESULT_gru_tg_baserate.json` | Five fresh GRU (TimeGAN) seeds on the original code path, the base-rate control for that factorial |
 | `PROBE_severity_trajectory.json`, `RESULT_severity_trajectory.json` | Two severe and two clean GRU (TimeGAN) runs checkpointed every 1,000 of 25,000 steps (100 checkpoints), locating when severity is decided |
+| `RESULT_transition_ablation.json` | Component-transplant hybrids across both severe runs' transitions, plus the clean-run controls, localising the damage to the readout vector |
 
 The checkpoints themselves are gitignored (`checkpoints/`), so these summaries
 are the durable record — regenerating them means retraining, which is the

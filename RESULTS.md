@@ -64,7 +64,7 @@ section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-t
 
 **Open items, priority order:**
 
-1. **GRU, both generators, is dominated by seed variance rather than by any fix — now explained, though not removed.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested. **The variance is one shared defect at seed-dependent severity, not seed-dependent luck**: every seed's catastrophic paths carry the same down-then-rally signature (100-160x enriched over its 0.53% population rate), the conditional failure-rate curve has the same shape for every seed and differs only in level (~5x), and the failing paths themselves barely overlap (2 shared across 5 seeds, of a 265-path union). Severity is measurable training-free in milliseconds by the recovery-lag probe, which detects the collapse mode reliably (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) while carrying no signal on architectures without the defect (+0.005 across 20 non-GRU checkpoints). It ranked seeds within every GRU arm at Spearman +0.70 to +1.00 on the arms it was measured on, but that does not hold out-of-sample — see the bound below. **Why a seed lands at a given severity is now answered, negatively**: a 3x3 initialization x data-draw factorial rules out both main effects by direct contradiction — the initialization behind the arm's worst checkpoint is clean under all three data draws, and an initialization that was clean turns severe under one — so severity is decided by the joint trajectory and no pre-training property predicts it. Multi-seed evaluation is therefore not optional for GRU. The probe screens for the collapse mode (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) but does not rank the runs that survive it. **When it is decided is now answered too**: at a run-specific step (18k-19k in one severe run, 5k-8k in another, never in two clean ones), invisible in the training loss at 1,000-step resolution, and not preceded by any usable warning — the probe trails the damage in one run and leads it by 6,000 steps in the other. Together these close off cheap fixes: nothing to tune, no step to stop at, no pre-training property to select on. Train several seeds, evaluate all at 500,000 paths, discard the broken ones. See [the forensics](#where-grus-seed-variance-comes-from), [the decomposition](#why-a-seed-lands-at-a-given-severity-neither-initialization-nor-data-draw), and [the trajectories](#when-severity-is-decided-at-a-run-specific-step-with-no-in-distribution-signal).
+1. **GRU, both generators, is dominated by seed variance rather than by any fix — now explained, though not removed.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested. **The variance is one shared defect at seed-dependent severity, not seed-dependent luck**: every seed's catastrophic paths carry the same down-then-rally signature (100-160x enriched over its 0.53% population rate), the conditional failure-rate curve has the same shape for every seed and differs only in level (~5x), and the failing paths themselves barely overlap (2 shared across 5 seeds, of a 265-path union). Severity is measurable training-free in milliseconds by the recovery-lag probe, which detects the collapse mode reliably (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) while carrying no signal on architectures without the defect (+0.005 across 20 non-GRU checkpoints). It ranked seeds within every GRU arm at Spearman +0.70 to +1.00 on the arms it was measured on, but that does not hold out-of-sample — see the bound below. **Why a seed lands at a given severity is now answered, negatively**: a 3x3 initialization x data-draw factorial rules out both main effects by direct contradiction — the initialization behind the arm's worst checkpoint is clean under all three data draws, and an initialization that was clean turns severe under one — so severity is decided by the joint trajectory and no pre-training property predicts it. Multi-seed evaluation is therefore not optional for GRU. The probe screens for the collapse mode (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) but does not rank the runs that survive it. **When it is decided is now answered too**: at a run-specific step (18k-19k in one severe run, 5k-8k in another, never in two clean ones), invisible in the training loss at 1,000-step resolution, and not preceded by any usable warning — the probe trails the damage in one run and leads it by 6,000 steps in the other. Together these close off cheap fixes: nothing to tune, no step to stop at, no pre-training property to select on. Train several seeds, evaluate all at 500,000 paths, discard the broken ones. **What breaks is the readout, not the gating**: transplanting a severe run's post-transition `output_layer.0.weight` onto its own pre-transition network carries 48-72% of the collapse, while its post-transition recurrent cell under the old readout is harmless (better than pre-transition in one run) — and the same swap on clean runs does nothing (their readout rotates by cosine 0.988 against the severe runs' 0.802). See [the forensics](#where-grus-seed-variance-comes-from), [the decomposition](#why-a-seed-lands-at-a-given-severity-neither-initialization-nor-data-draw), [the trajectories](#when-severity-is-decided-at-a-run-specific-step-with-no-in-distribution-signal), and [the ablation](#what-moves-at-the-transition-the-readout-vector-not-the-recurrent-cell).
 2. **~~The TimeGAN table rows cannot be reproduced from repo state~~ — re-anchored (they still cannot be *re-derived*).** All four rows are now measured at 5 seeds against the surviving generator, and two documented claims changed: MLP is seed-dependent around the known-good bound rather than "no longer clean" (0/500,000 catastrophic at every seed), and LSTM's `--slow-ramp-fraction` fix is worth ~17% on CVaR₉₉ here rather than the documented ~92%, because untreated LSTM does not collapse on this generator. Attempt 4's generator is still gone, so the original numbers remain permanently unverifiable. See [the re-anchoring](#re-anchoring-all-four-timegan-rows-to-the-surviving-generator).
 3. **~~α=0.995 alpha-sweep checkpoint~~ — closed.** Retrained with `grad_clip_norm=1.0` and validated against the seed-1 draw that motivated it: 8,495 paths below -10 and 6 catastrophic → 0 and 0. The promoted checkpoint is now the clipped run.
 4. **Basic RNN (TimeGAN) is improved but not closed** — 3/5 seeds retain 15-50 catastrophic paths, the clip bound was inherited from GRU rather than tuned, and all of it is against one generator.
@@ -3612,6 +3612,90 @@ the weight-space question — what moves between step 18,000 and 20,000 in
 
 Raw data: `sweep_data/{PROBE,RESULT}_severity_trajectory.json`, 100
 checkpoints across the four runs.
+
+
+#### What moves at the transition: the readout vector, not the recurrent cell
+
+The trajectories above locate *when* a run breaks but not *what* breaks. Both
+severe runs' checkpoints straddling their transitions are on disk, so this is
+answerable by direct comparison and component transplant, with no training.
+
+**Step 1: which parameters move anomalously.** Per-parameter relative motion
+during the transition window, as a ratio to the same run's own
+pre-transition mean, against the same windows measured on the two runs that
+never break:
+
+| parameter | `i4_d2` | `s6` | clean-run controls |
+|---|---|---|---|
+| `output_layer.0.weight` | **2.73** | **1.32** | 0.51-0.85 |
+| every recurrent weight slice (r/z/n, both layers) | 0.36-1.03 | 0.45-1.28 | 0.20-0.95 |
+
+Only the readout weight is elevated above the clean-run range in both severe
+runs. No gate slice is, in either — including the update gate that the
+original recovery-lag diagnosis focused on.
+
+**Step 2: transplant it.** `src/backtester/component_swap.py` builds hybrids
+taking some parameter groups from the post-transition checkpoint and the rest
+from the pre-transition one, evaluated on the usual 500,000-path scenario:
+
+| | pre | rnn**POST** + out**PRE** | rnn**PRE** + out**POST** | post |
+|---|---|---|---|---|
+| `i4_d2` CVaR₉₉ | 4.03 | **3.05** | **12.73** | 22.33 |
+| `s6` CVaR₉₉ | 5.23 | 10.07 | **16.61** | 20.95 |
+
+Carrying the post-transition readout onto the pre-transition recurrent cell
+transfers 48% of the collapse in `i4_d2` and 72% in `s6`. The reverse — the
+post-transition *recurrent cell* under the old readout — is **better than
+pre-transition** in `i4_d2` (3.05 vs 4.03), so that run's GRU cell is not
+damaged at all; in `s6` it carries 31%.
+
+Narrowing further, swapping only `output_layer.0.weight` reproduces nearly the
+whole readout effect (12.06 of 12.73; 16.53 of 16.61) while the bias
+contributes essentially nothing (4.42, 5.26 against pre-transition 4.03,
+5.23). **A single 64-dimensional vector carries most of the collapse.** It
+grows ~20% in norm and rotates: cosine to its pre-transition self is 0.802
+(`i4_d2`) and 0.913 (`s6`).
+
+**Step 3: the control that would have made this trivial.** If the readout were
+simply the high-leverage parameter late in training, the same swap would move
+the clean runs too. It does not: over identical step windows their readout
+barely changes (norm +2%, cosine **0.988** and 0.984) and transplanting it
+leaves CVaR₉₉ at 2.26-2.95, inside each run's own normal range. The readout
+motion is specific to the transition, not a property of training at that
+stage.
+
+**Is the readout the origin, or adapting to a shifted representation?**
+Hidden-state drift over the transition window is ordinary: mean-shift 0.585
+(`i4_d2`) against 0.515 for its clean partner over the same steps, and
+`|h|` moves 6.87 → 7.07 against 6.71 → 6.80. The representation moves at
+roughly the rate it moves in runs that stay healthy, while only the readout
+rotates anomalously. That favours the readout as the locus. It is not
+airtight: `s6` does show somewhat elevated hidden-state motion on the shock
+path (1.033 against a clean maximum of 0.734), so the separation is clean on
+one pair and partial on the other.
+
+**This refines the document's mechanism, and narrows rather than overturns
+it.** The [original diagnosis](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation)
+established the *symptom* — delta failing to recover after a downward shock —
+and showed LSTM does not share it. That stands. What the transplant adds is
+that at the moment a run acquires the symptom, the damage sits in the linear
+map from hidden state to delta, not in the gating dynamics that produce the
+hidden state. Since `delta = sigmoid(output_layer(h))`, a readout that has
+rotated can drive delta toward 0 across the region of hidden-state space a
+down-then-rally path visits, with the recurrent cell behaving exactly as
+before. Whether GRU's hidden-state geometry is what makes its readout
+vulnerable in a way LSTM's is not remains untested — that would need the same
+transplant on a broken LSTM run, and none has been produced here.
+
+**The probe fails again, and it is worth recording.** Run on the eight
+hybrids, the recovery-lag probe calls all four `i4_d2` variants clean
+(0.0-0.6), including `rnnPRE_outPOST` at CVaR₉₉ 12.73 with 141 catastrophic
+paths. Three independent failures now — under-detection out-of-sample, useless
+as a monitor, and wrong on hybrids — against one reliable use, detecting the
+collapse mode in fully-trained checkpoints.
+
+Raw data: `sweep_data/RESULT_transition_ablation.json` (16 hybrids and
+controls).
 
 
 ### Re-anchoring all four TimeGAN rows to the surviving generator
