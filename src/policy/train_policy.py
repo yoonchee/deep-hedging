@@ -493,6 +493,12 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--checkpoint-every", type=int, default=0,
+        help="also save an intermediate checkpoint every N gradient steps, alongside the "
+        "final one, as <checkpoint>.step<N>.pt. 0 (default) disables. Added to locate "
+        "*when* during training a run's tail-risk severity is decided -- see RESULTS.md.",
+    )
+    parser.add_argument(
         "--data-seed", type=int, default=None,
         help="re-seed the RNG with this value immediately before the training loop, so "
         "--seed governs only policy initialization (and the Monte Carlo premium estimate) "
@@ -562,6 +568,34 @@ def main() -> None:
         "checkpoints"
     ) / checkpoint_filename(args.architecture, suffix=suffix)
     _train_and_save(args, args.cvar_alpha, checkpoint_path, generator, device)
+
+
+def _save_checkpoint(
+    checkpoint_path: Path,
+    policy: Annotated[Any, "the policy being trained"],
+    cvar_loss: CVaRLoss,
+    args: Annotated[Any, "parsed argparse Namespace"],
+    alpha: Annotated[float, "the CVaR level this run actually used"],
+    premium: Annotated[float, "the Monte Carlo P0 estimate this run actually used"],
+) -> None:
+    """Writes the checkpoint payload every loader in this repo expects.
+
+    Shared by the final save and by --checkpoint-every's intermediate saves, so
+    an intermediate checkpoint is loadable by exactly the same code paths (the
+    stress harness, the recovery probe) as a finished one.
+    """
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    saved_args = dict(vars(args))
+    saved_args["cvar_alpha"] = alpha  # reflect the actual alpha used for this checkpoint
+    saved_args["premium"] = premium  # the actual Monte Carlo estimate used, not just the CLI request
+    torch.save(
+        {
+            "policy_state_dict": policy.state_dict(),
+            "cvar_h": cvar_loss.h.item(),
+            "args": saved_args,
+        },
+        checkpoint_path,
+    )
 
 
 def _train_and_save(
@@ -649,18 +683,12 @@ def _train_and_save(
                 f"cvar_loss={stats['loss']:.4f}  mean_wealth={stats['mean_wealth']:.4f}"
             )
 
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    saved_args = dict(vars(args))
-    saved_args["cvar_alpha"] = alpha  # reflect the actual alpha used for this checkpoint
-    saved_args["premium"] = premium  # the actual Monte Carlo estimate used, not just the CLI request
-    torch.save(
-        {
-            "policy_state_dict": policy.state_dict(),
-            "cvar_h": cvar_loss.h.item(),
-            "args": saved_args,
-        },
-        checkpoint_path,
-    )
+        if args.checkpoint_every and epoch % args.checkpoint_every == 0 and epoch != args.epochs:
+            _save_checkpoint(
+                checkpoint_path.with_suffix(f".step{epoch}.pt"), policy, cvar_loss, args, alpha, premium
+            )
+
+    _save_checkpoint(checkpoint_path, policy, cvar_loss, args, alpha, premium)
     print(f"Saved checkpoint to {checkpoint_path}")
 
 

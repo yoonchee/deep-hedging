@@ -64,7 +64,7 @@ section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-t
 
 **Open items, priority order:**
 
-1. **GRU, both generators, is dominated by seed variance rather than by any fix — now explained, though not removed.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested. **The variance is one shared defect at seed-dependent severity, not seed-dependent luck**: every seed's catastrophic paths carry the same down-then-rally signature (100-160x enriched over its 0.53% population rate), the conditional failure-rate curve has the same shape for every seed and differs only in level (~5x), and the failing paths themselves barely overlap (2 shared across 5 seeds, of a 265-path union). Severity is measurable training-free in milliseconds by the recovery-lag probe, which detects the collapse mode reliably (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) while carrying no signal on architectures without the defect (+0.005 across 20 non-GRU checkpoints). It ranked seeds within every GRU arm at Spearman +0.70 to +1.00 on the arms it was measured on, but that does not hold out-of-sample — see the bound below. **Why a seed lands at a given severity is now answered, negatively**: a 3x3 initialization x data-draw factorial rules out both main effects by direct contradiction — the initialization behind the arm's worst checkpoint is clean under all three data draws, and an initialization that was clean turns severe under one — so severity is decided by the joint trajectory and no pre-training property predicts it. Multi-seed evaluation is therefore not optional for GRU. The probe screens for the collapse mode (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) but does not rank the runs that survive it. What remains open is *when in training* severity is decided. See [the forensics](#where-grus-seed-variance-comes-from) and [the decomposition](#why-a-seed-lands-at-a-given-severity-neither-initialization-nor-data-draw).
+1. **GRU, both generators, is dominated by seed variance rather than by any fix — now explained, though not removed.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested. **The variance is one shared defect at seed-dependent severity, not seed-dependent luck**: every seed's catastrophic paths carry the same down-then-rally signature (100-160x enriched over its 0.53% population rate), the conditional failure-rate curve has the same shape for every seed and differs only in level (~5x), and the failing paths themselves barely overlap (2 shared across 5 seeds, of a 265-path union). Severity is measurable training-free in milliseconds by the recovery-lag probe, which detects the collapse mode reliably (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) while carrying no signal on architectures without the defect (+0.005 across 20 non-GRU checkpoints). It ranked seeds within every GRU arm at Spearman +0.70 to +1.00 on the arms it was measured on, but that does not hold out-of-sample — see the bound below. **Why a seed lands at a given severity is now answered, negatively**: a 3x3 initialization x data-draw factorial rules out both main effects by direct contradiction — the initialization behind the arm's worst checkpoint is clean under all three data draws, and an initialization that was clean turns severe under one — so severity is decided by the joint trajectory and no pre-training property predicts it. Multi-seed evaluation is therefore not optional for GRU. The probe screens for the collapse mode (lag > 5 ⇒ CVaR₉₉ 17-37, no overlap with the rest) but does not rank the runs that survive it. **When it is decided is now answered too**: at a run-specific step (18k-19k in one severe run, 5k-8k in another, never in two clean ones), invisible in the training loss at 1,000-step resolution, and not preceded by any usable warning — the probe trails the damage in one run and leads it by 6,000 steps in the other. Together these close off cheap fixes: nothing to tune, no step to stop at, no pre-training property to select on. Train several seeds, evaluate all at 500,000 paths, discard the broken ones. See [the forensics](#where-grus-seed-variance-comes-from), [the decomposition](#why-a-seed-lands-at-a-given-severity-neither-initialization-nor-data-draw), and [the trajectories](#when-severity-is-decided-at-a-run-specific-step-with-no-in-distribution-signal).
 2. **~~The TimeGAN table rows cannot be reproduced from repo state~~ — re-anchored (they still cannot be *re-derived*).** All four rows are now measured at 5 seeds against the surviving generator, and two documented claims changed: MLP is seed-dependent around the known-good bound rather than "no longer clean" (0/500,000 catastrophic at every seed), and LSTM's `--slow-ramp-fraction` fix is worth ~17% on CVaR₉₉ here rather than the documented ~92%, because untreated LSTM does not collapse on this generator. Attempt 4's generator is still gone, so the original numbers remain permanently unverifiable. See [the re-anchoring](#re-anchoring-all-four-timegan-rows-to-the-surviving-generator).
 3. **~~α=0.995 alpha-sweep checkpoint~~ — closed.** Retrained with `grad_clip_norm=1.0` and validated against the seed-1 draw that motivated it: 8,495 paths below -10 and 6 catastrophic → 0 and 0. The promoted checkpoint is now the clipped run.
 4. **Basic RNN (TimeGAN) is improved but not closed** — 3/5 seeds retain 15-50 catastrophic paths, the clip bound was inherited from GRU rather than tuned, and all of it is against one generator.
@@ -3531,6 +3531,87 @@ where they separate — and it is not attempted here.
 
 Raw data: `sweep_data/{PROBE,RESULT}_seed_decomposition.json` (the factorial)
 and `sweep_data/{PROBE,RESULT}_gru_tg_baserate.json` (the control).
+
+
+#### When severity is decided: at a run-specific step, with no in-distribution signal
+
+The decomposition above left this as the remaining question. Four runs
+checkpointed every 1,000 of 25,000 steps answer it — two severe and two clean,
+paired so that one pair (`i4_d2` vs `i4_d3`) shares an initialization and
+differs only in the noise stream, and the other (`s6` vs `s8`) uses the
+original single-seed code path as a check against instrument artifacts. All
+four reproduce their known endpoints exactly, so the trajectories are the real
+ones.
+
+CVaR₉₉ against the 500,000-path stress set, every other checkpoint:
+
+| step | 1k | 3k | 5k | 7k | 9k | 11k | 13k | 15k | 17k | 19k | 21k | 23k | 25k |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `i4_d2` **severe** | 2.96 | 4.63 | 4.95 | 4.62 | 5.75 | 3.17 | 5.33 | 3.87 | 4.27 | **11.89** | 27.59 | 30.49 | **36.93** |
+| `s6` **severe** | 5.52 | 4.15 | 5.23 | **13.69** | 20.70 | 20.60 | 15.36 | 34.12 | 25.72 | 24.65 | 26.00 | 22.20 | 17.06 |
+| `i4_d3` clean | 2.58 | 2.05 | 2.51 | 2.46 | 2.15 | 2.47 | 2.60 | 2.69 | 3.05 | 2.79 | 2.55 | 2.84 | 3.49 |
+| `s8` clean | 3.05 | 2.26 | 2.29 | 3.22 | 2.61 | 2.43 | 2.68 | 2.95 | 2.69 | 2.26 | 2.25 | 2.33 | 2.04 |
+
+**Both clean runs are flat for the entire schedule** — 2.02-3.53 and 2.04-3.22
+across 25 checkpoints each, `s8` ending at its own best value with 0
+catastrophic paths at 15 of its 25 checkpoints. Nothing accumulates in a run
+that does not break.
+
+**Both severe runs break, at unrelated steps and in unrelated ways.** `i4_d2`
+is indistinguishable from a clean run through step 18,000 (4.03, 17
+catastrophic paths) and then goes 11.89 → 22.33 → 27.59 over the next three
+checkpoints, climbing monotonically to 36.93 at the end. `s6` starts
+degrading at step 5,000 and rises through 7.08 → 13.69 → 20.95 by step 8,000,
+then plateaus in the teens-to-thirties for the remaining 17,000 steps,
+fluctuating without direction and ending at 17.06 — its best value after the
+break.
+
+So severity is decided at a **run-specific step**: between 18k and 19k in one
+case, between 5k and 8k in the other, and never in the two clean runs. There
+is no schedule position at which it happens.
+
+**This kills the early-stopping rule the first pair appeared to support.**
+Read alone, `i4_d2` vs `i4_d3` looks like a clean prescription: stop at 17,000
+steps and the severe run scores 4.27 instead of 36.93 while the clean run
+loses nothing (3.05 vs 3.49). `s6` refutes it — at step 17,000 it scores 25.72
+against a final 17.06, so the same rule makes that run *worse*. The
+prescription was an artifact of one pair having its transition late.
+
+**The collapse is invisible in-distribution at every granularity checked.**
+Across the steps where `i4_d2`'s stress CVaR₉₉ goes 4.27 → 11.89 → 36.93, its
+training CVaR loss reads -0.0054 → -0.0064 → -0.0064: flat, and marginally
+*better* at the end. The policy is not getting worse at what it is trained on.
+This is the same finding as the earlier training-loss control, now at
+1,000-step resolution within single runs rather than across checkpoints.
+
+**The recovery-lag probe is not a monitor either, in either direction.** In
+`i4_d2` it trails the damage — still reading 0.6 at step 19,000, where the
+stress test already shows CVaR₉₉ 11.89 and 118 catastrophic paths. In `s6` it
+runs ahead: 4.7 at step 1,000, elevated from the very first checkpoint, while
+that run's tail risk is still a healthy 5.52 with 0 catastrophic paths and
+stays healthy for another 4,000 steps. One run where the signal is late, one
+where it is early by 6,000 steps, is not a monitor. (That `s6` was
+distinguishable from the other three runs at step 1,000 by lag alone, and did
+go on to collapse, is worth recording as an observation. It is one run, and
+`i4_d2` collapsed with no such early elevation, so absence of the signal
+clearly does not indicate safety.)
+
+**What this settles.** Severity is not carried from initialization, not
+determined by the data draw, not accumulated steadily, and not scheduled. It
+is a run-specific transition that no in-distribution quantity announces and no
+fixed intervention can preempt. Combined with the factorial above, that closes
+off the class of cheap fixes — there is nothing to tune, no step to stop at,
+and no pre-training property to select on. What remains available is exactly
+what this document already practises: train several seeds, evaluate all of
+them at 500,000 paths, and discard the ones that broke.
+
+**Not attempted here:** what changes inside the network at the transition.
+Both severe runs' checkpoints straddling their break points are on disk, so
+the weight-space question — what moves between step 18,000 and 20,000 in
+`i4_d2` — is set up but unanswered.
+
+Raw data: `sweep_data/{PROBE,RESULT}_severity_trajectory.json`, 100
+checkpoints across the four runs.
 
 
 ### Re-anchoring all four TimeGAN rows to the surviving generator

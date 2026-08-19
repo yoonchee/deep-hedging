@@ -90,3 +90,34 @@ def test_probe_detects_the_collapse_mode_out_of_sample() -> None:
         "the probe's one surviving claim is that lag separates the collapse mode; "
         "if this fails, RESULTS.md's detection claim needs revising too"
     )
+
+
+def test_severity_transition_is_run_specific_not_scheduled() -> None:
+    """The trajectory result: severe runs break at unrelated steps and clean
+    runs never do. Pins the negative that rules out a fixed early-stopping
+    step, since one pair on its own appeared to support one.
+    """
+    records = json.loads((SWEEP_DATA_DIR / "RESULT_severity_trajectory.json").read_text())
+
+    runs: dict = {}
+    for name, record in records.items():
+        run, _, step = name.partition(".step")
+        runs.setdefault(run, {})[int(step) if step else 25_000] = record["cvar_99"]
+    assert len(runs) == 4, "two severe and two clean runs"
+
+    broken_at = {}
+    for run, by_step in runs.items():
+        steps = sorted(by_step)
+        # First step from which the run never returns to the clean band.
+        broken = [s for s in steps if all(by_step[later] > 8.0 for later in steps if later >= s)]
+        broken_at[run] = min(broken) if broken else None
+
+    clean = {run: step for run, step in broken_at.items() if step is None}
+    severe = {run: step for run, step in broken_at.items() if step is not None}
+    assert len(clean) == 2 and len(severe) == 2, f"expected 2 clean / 2 severe, got {broken_at}"
+    assert all("clean" in run for run in clean), f"a run labelled severe stayed clean: {broken_at}"
+
+    # The point of the finding: the two transitions are nowhere near each other,
+    # so no single step generalises across runs.
+    first, second = sorted(severe.values())
+    assert second - first >= 5_000, f"transitions would be schedulable: {severe}"
