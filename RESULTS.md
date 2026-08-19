@@ -64,7 +64,7 @@ section](#rebuilding-every-checkpoint-from-scratch-and-multi-seeding-the-fixes-t
 
 **Open items, priority order:**
 
-1. **GRU, both generators, is dominated by seed variance rather than by any fix.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested, consistent with its recovery-lag diagnosis. What GRU needs is not another fix attempt but an explanation of the variance itself.
+1. **GRU, both generators, is dominated by seed variance rather than by any fix — now explained, though not removed.** Baseline CVaR₉₉ spans 5.37-13.11 (WGAN-GP) and 2.78-39.67 (TimeGAN) with no intervention; between-seed spread dwarfs every between-condition difference measured here. Both previously-promoted GRU fixes failed multi-seed validation — one inert, one harmful (retracted above) — and a threshold sweep confirmed gradient clipping is the wrong intervention for GRU (WGAN-GP) at any threshold tested. **The variance is one shared defect at seed-dependent severity, not seed-dependent luck**: every seed's catastrophic paths carry the same down-then-rally signature (100-160x enriched over its 0.53% population rate), the conditional failure-rate curve has the same shape for every seed and differs only in level (~5x), and the failing paths themselves barely overlap (2 shared across 5 seeds, of a 265-path union). Severity is measurable training-free in milliseconds by the recovery-lag probe, which ranks seeds by measured tail risk within every GRU arm (Spearman +0.70 to +1.00) while carrying no signal on architectures without the defect (+0.005 across 20 non-GRU checkpoints). What remains open is *why* a seed lands at a given severity. See [the forensics](#where-grus-seed-variance-comes-from).
 2. **~~The TimeGAN table rows cannot be reproduced from repo state~~ — re-anchored (they still cannot be *re-derived*).** All four rows are now measured at 5 seeds against the surviving generator, and two documented claims changed: MLP is seed-dependent around the known-good bound rather than "no longer clean" (0/500,000 catastrophic at every seed), and LSTM's `--slow-ramp-fraction` fix is worth ~17% on CVaR₉₉ here rather than the documented ~92%, because untreated LSTM does not collapse on this generator. Attempt 4's generator is still gone, so the original numbers remain permanently unverifiable. See [the re-anchoring](#re-anchoring-all-four-timegan-rows-to-the-surviving-generator).
 3. **~~α=0.995 alpha-sweep checkpoint~~ — closed.** Retrained with `grad_clip_norm=1.0` and validated against the seed-1 draw that motivated it: 8,495 paths below -10 and 6 catastrophic → 0 and 0. The promoted checkpoint is now the clipped run.
 4. **Basic RNN (TimeGAN) is improved but not closed** — 3/5 seeds retain 15-50 catastrophic paths, the clip bound was inherited from GRU rather than tuned, and all of it is against one generator.
@@ -3320,6 +3320,117 @@ production-checkpoint convention; the pre-fix checkpoint is preserved as
 `.bak-pre-lr-clip-fix`). Seed 0 rather than one of the clean seeds
 deliberately — promoting the best of five is the practice that produced the
 two failed GRU fixes above.
+
+### Where GRU's seed variance comes from
+
+The open item above says GRU is "dominated by seed variance rather than by any
+fix" and that what it needs is an explanation of the variance itself. This is
+that explanation. Nothing here is a new fix attempt; it is forensics on the
+checkpoints already trained, plus one training-free probe.
+
+**Every seed fails on the same kind of path.** Pulling the catastrophic paths
+(`< -50`) out of the shared 500,000-path stress set for each of the 5 GRU
+(WGAN-GP) baseline seeds and characterising them by shape:
+
+| seed | catastrophic | median dip (first 10 steps) | median final log-moneyness | matches down-then-rally |
+|---|---|---|---|---|
+| s0 | 67 | -0.61 | +4.31 | 67% |
+| s1 | 22 | -1.04 | +4.18 | 86% |
+| s2 | 142 | -0.59 | +4.39 | 72% |
+| s3 | 40 | -0.69 | +4.04 | 68% |
+| s4 | 121 | -0.47 | +4.46 | 54% |
+
+Against a population rate of **0.53%** for the same down-then-rally signature
+(dip < -0.4 and final > +2), so every seed's failures are 100-160x enriched
+for it. This is the mechanism
+[already diagnosed](#follow-up-diagnosis-gru-wgan-gp-is-a-gru-specific-hidden-state-recovery-lag-not-saturation)
+on a single checkpoint; it is not seed-specific.
+
+**But the failing paths are almost disjoint.** Pairwise Jaccard overlap
+between seeds' catastrophic sets runs 0.07-0.22, and of a 265-path union
+exactly **2 paths fail for all five seeds**. So this is not a fixed set of
+paths that GRU cannot hedge — each seed fails on its own subset of a shared
+at-risk population.
+
+**What the seed changes is a severity level, not the shape.** Conditional
+failure rate among at-risk paths (final > +2), binned by shock depth:
+
+| dip depth | n | s0 | s1 | s2 | s3 | s4 |
+|---|---|---|---|---|---|---|
+| < -1.5 | 241 | 2.90% | 2.07% | 4.98% | 1.24% | 3.32% |
+| -1.5 to -1.0 | 448 | 1.79% | 1.56% | 4.24% | 1.34% | 1.79% |
+| -1.0 to -0.7 | 655 | 2.29% | 0.46% | 3.97% | 1.22% | 4.12% |
+| -0.7 to -0.4 | 1,312 | 1.14% | 0.30% | 3.43% | 0.76% | 1.68% |
+| -0.4 to -0.2 | 1,689 | 0.47% | 0.06% | 1.24% | 0.18% | 1.66% |
+| -0.2 to 0 | 4,783 | 0.27% | 0.04% | 0.29% | 0.06% | 0.44% |
+
+Monotonic in depth for every seed — same curve shape, different level, a ~5x
+spread between s1 (0.72% over all at-risk paths) and s2 (3.84%). The shift is
+not confined to the tail either: **median** wealth on at-risk paths runs -0.41
+(s1) to -6.67 (s2), so the whole conditional distribution moves, and the
+`<-50` count is just where it becomes visible.
+
+That combination — a shared deterministic defect, a seed-dependent severity,
+and an at-risk population of only ~0.5% of paths — is what makes the tail
+metrics so noisy. CVaR₉₉ is reading a small, severity-sensitive subsample.
+Between-condition effects have to clear that, and mostly cannot.
+
+**The severity is measurable without training, in milliseconds.**
+`src/backtester/recovery_probe.py` runs the down-then-rally probe from the
+original diagnosis across a sweep of shock depths and reports the mean number
+of steps delta spends below 0.5 after the shock. Within each GRU arm that
+number ranks the seeds by their measured 500,000-path tail risk:
+
+| arm | lag range (steps) | CVaR₉₉ range | Spearman(lag, CVaR₉₉) |
+|---|---|---|---|
+| GRU (TimeGAN) baseline | 0.1-18.1 | 2.78-39.67 | **+1.000** |
+| GRU (TimeGAN) `--moneyness-clip` | 1.0-19.0 | 12.68-43.09 | +0.900 |
+| GRU (WGAN-GP) `--grad-clip-norm 1.0` | 2.6-14.3 | 5.37-13.43 | +0.900 |
+| GRU (WGAN-GP) baseline | 2.6-12.1 | 5.37-13.11 | +0.700 |
+
+Deliberately *duration*, not final delta: the same checkpoints scored by
+recovered delta in the realistic depth band give a weaker -0.768 (pooled),
+because final delta saturates at 1.0 for most checkpoints. Duration is also
+what the mechanism predicts should matter — the price path is exponential, so
+the largest absolute increments land early in the rally, while delta is still
+catching up.
+
+**Controls.** Final training CVaR loss does *not* predict stress tail risk:
+Spearman -0.600, -0.900, +0.100 across the three arms with training logs — the
+wrong sign twice, inconsistent, and on GRU (TimeGAN) seed 3 (the 39.67-CVaR₉₉
+near-collapse) its training loss is the second-*best* of its arm. Whatever the
+seed is doing, it is invisible in-distribution.
+
+Probe-construction sensitivity was checked by varying the rally target
+(3.50/4.87/6.00) and the dip's end step (7/10/14): the GRU (TimeGAN) arm holds
+at +1.000 under all four constructions, while the GRU (WGAN-GP) baseline arm
+moves between +0.400 and +0.900. The reason is resolution — three of its five
+seeds have lags within 2 steps of each other (7.4, 8.7, 9.2), and their
+ordering is not stable. **The honest claim is that the probe separates seeds
+whose lags differ by more than ~2 steps and does not resolve seeds inside
+that band.**
+
+**The predictor is specific to this defect, which is the right behaviour.**
+Run across the LSTM and Basic RNN arms too, it carries no signal where the
+defect is absent: pooled Spearman across the 20 non-GRU sweep checkpoints is
+**+0.005**. Those arms have lag ranges of 0.2-2.2 steps (LSTM) and 0.1-0.7
+(Basic RNN after `--lr 1e-3 --moneyness-clip`) — the lag is simply gone, and
+their remaining tail-risk variation comes from something else. Basic RNN
+*baseline*, which does carry a lag (0.0-10.5 steps), scores +0.800. So the
+probe tracks recovery lag specifically, not tail risk in general.
+
+**What this does and does not settle.** It explains the variance — a shared
+mechanism at seed-dependent severity, amplified by a rare trigger — and it
+makes severity cheap to measure, which turns "GRU is unpredictable" into "GRU
+checkpoints are screenable before a 500,000-path evaluation". It does not
+explain *why* a seed lands at a given severity, which is the natural next
+question: nothing here connects the initialisation to the resulting lag. It
+also does not license picking the best-probing seed and promoting it — that is
+the practice that produced two retracted fixes in this document.
+
+Raw data: `sweep_data/PROBE_recovery_lag.json` (40 checkpoints, all four
+architectures).
+
 
 ### Re-anchoring all four TimeGAN rows to the surviving generator
 
